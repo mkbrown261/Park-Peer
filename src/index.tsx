@@ -9,6 +9,7 @@ import { driverDashboard } from './routes/driver-dashboard'
 import { hostDashboard } from './routes/host-dashboard'
 import { authPages } from './routes/auth'
 import { adminPanel } from './routes/admin'
+import { adminAuth } from './routes/admin-auth'
 import { apiRoutes } from './routes/api'
 
 const app = new Hono()
@@ -24,6 +25,9 @@ app.route('/booking', bookingPage)
 app.route('/dashboard', driverDashboard)
 app.route('/host', hostDashboard)
 app.route('/auth', authPages)
+// Admin auth routes MUST be mounted before the protected admin panel
+// so /admin/login and /admin/logout are reachable without a session
+app.route('/admin', adminAuth)
 app.route('/admin', adminPanel)
 app.route('/api', apiRoutes)
 

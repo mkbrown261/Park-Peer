@@ -1,372 +1,633 @@
 import { Hono } from 'hono'
-import { Layout } from '../components/layout'
+import { AdminLayout } from '../components/admin-layout'
+import { adminAuthMiddleware } from './admin-auth'
 
 export const adminPanel = new Hono()
 
-adminPanel.get('/', (c) => {
-  const content = `
-  <div class="pt-16 min-h-screen">
-    <div class="flex h-screen overflow-hidden">
-      
-      <!-- Admin Sidebar -->
-      <div class="w-64 bg-charcoal-100 border-r border-white/5 flex flex-col flex-shrink-0 hidden lg:flex">
-        <div class="p-5 border-b border-white/5">
-          <div class="flex items-center gap-3">
-            <div class="w-9 h-9 gradient-bg rounded-xl flex items-center justify-center">
-              <i class="fas fa-shield-halved text-white"></i>
-            </div>
-            <div>
-              <p class="font-bold text-white text-sm">Admin Panel</p>
-              <p class="text-xs text-gray-500">ParkPeer HQ</p>
-            </div>
-          </div>
-        </div>
-        
-        <nav class="flex-1 p-3 overflow-y-auto">
-          <p class="text-xs text-gray-600 uppercase tracking-wider font-medium mb-2 px-2">Overview</p>
-          ${[
-            { label: 'Dashboard', icon: 'fa-gauge-high', active: true, badge: '' },
-            { label: 'Analytics', icon: 'fa-chart-line', active: false, badge: '' },
-            { label: 'Revenue', icon: 'fa-dollar-sign', active: false, badge: '' },
-          ].map(item => `
-            <button onclick="switchSection('${item.label.toLowerCase()}')" class="admin-nav w-full flex items-center gap-3 px-3 py-2.5 rounded-xl mb-1 text-sm transition-all ${item.active ? 'bg-indigo-500/20 text-indigo-300 font-semibold' : 'text-gray-400 hover:bg-white/5 hover:text-white'}">
-              <i class="fas ${item.icon} w-4 text-center"></i>
-              ${item.label}
-            </button>
-          `).join('')}
-          
-          <p class="text-xs text-gray-600 uppercase tracking-wider font-medium mb-2 px-2 mt-4">Management</p>
-          ${[
-            { label: 'Users', icon: 'fa-users', badge: '2' },
-            { label: 'Listings', icon: 'fa-parking', badge: '5' },
-            { label: 'Bookings', icon: 'fa-calendar-check', badge: '' },
-            { label: 'Payments', icon: 'fa-credit-card', badge: '' },
-            { label: 'Reviews', icon: 'fa-star', badge: '' },
-          ].map(item => `
-            <button onclick="switchSection('${item.label.toLowerCase()}')" class="admin-nav w-full flex items-center gap-3 px-3 py-2.5 rounded-xl mb-1 text-sm transition-all text-gray-400 hover:bg-white/5 hover:text-white">
-              <i class="fas ${item.icon} w-4 text-center"></i>
-              <span class="flex-1 text-left">${item.label}</span>
-              ${item.badge ? `<span class="w-5 h-5 bg-indigo-500 rounded-full text-xs font-bold text-white flex items-center justify-center">${item.badge}</span>` : ''}
-            </button>
-          `).join('')}
-          
-          <p class="text-xs text-gray-600 uppercase tracking-wider font-medium mb-2 px-2 mt-4">Support</p>
-          ${[
-            { label: 'Disputes', icon: 'fa-gavel', badge: '3' },
-            { label: 'Fraud Alerts', icon: 'fa-triangle-exclamation', badge: '1' },
-            { label: 'Reports', icon: 'fa-flag', badge: '' },
-            { label: 'Settings', icon: 'fa-gear', badge: '' },
-          ].map(item => `
-            <button onclick="switchSection('${item.label.toLowerCase().replace(' ','')}')" class="admin-nav w-full flex items-center gap-3 px-3 py-2.5 rounded-xl mb-1 text-sm transition-all text-gray-400 hover:bg-white/5 hover:text-white ${item.label === 'Fraud Alerts' ? 'text-amber-400/70' : ''}">
-              <i class="fas ${item.icon} w-4 text-center ${item.label === 'Fraud Alerts' ? 'text-amber-400' : ''}"></i>
-              <span class="flex-1 text-left">${item.label}</span>
-              ${item.badge ? `<span class="w-5 h-5 ${item.label === 'Fraud Alerts' ? 'bg-amber-500' : 'bg-red-500'} rounded-full text-xs font-bold text-white flex items-center justify-center">${item.badge}</span>` : ''}
-            </button>
-          `).join('')}
-        </nav>
+// ── All admin routes require authentication ──────────────────────────────────
+adminPanel.use('/*', adminAuthMiddleware)
 
-        <div class="p-4 border-t border-white/5">
-          <div class="flex items-center gap-2 mb-3">
-            <div class="w-8 h-8 gradient-bg rounded-full flex items-center justify-center text-white text-xs font-bold">SA</div>
-            <div>
-              <p class="text-white text-xs font-semibold">Super Admin</p>
-              <p class="text-gray-500 text-xs">admin@parkpeer.com</p>
-            </div>
-          </div>
-          <a href="/" class="flex items-center gap-2 text-gray-400 hover:text-white text-xs transition-colors">
-            <i class="fas fa-arrow-left"></i> Back to App
-          </a>
-        </div>
+// ── Helper: empty-state component ───────────────────────────────────────────
+const EmptyState = (icon: string, title: string, sub: string) => `
+  <div class="flex flex-col items-center justify-center py-20 text-center">
+    <div class="w-16 h-16 bg-charcoal-200 rounded-2xl flex items-center justify-center mb-4">
+      <i class="fas ${icon} text-gray-600 text-2xl"></i>
+    </div>
+    <p class="text-gray-400 font-semibold">${title}</p>
+    <p class="text-gray-600 text-sm mt-1 max-w-xs">${sub}</p>
+  </div>`
+
+// ── Helper: stat card ────────────────────────────────────────────────────────
+const StatCard = (label: string, value: string, icon: string, colorClass: string, bgClass: string, note = '') => `
+  <div class="stat-card rounded-2xl p-5 card-hover">
+    <div class="flex items-start justify-between mb-3">
+      <div class="w-10 h-10 ${bgClass} rounded-xl flex items-center justify-center">
+        <i class="fas ${icon} ${colorClass} text-lg"></i>
       </div>
+    </div>
+    <p class="text-2xl font-black text-white">${value}</p>
+    <p class="text-gray-400 text-xs mt-1 font-medium">${label}</p>
+    ${note ? `<p class="text-gray-600 text-xs mt-0.5">${note}</p>` : ''}
+  </div>`
 
-      <!-- Main Content -->
-      <div class="flex-1 overflow-y-auto p-6">
-        
-        <!-- Header -->
-        <div class="flex items-center justify-between mb-6">
-          <div>
-            <h1 class="text-2xl font-black text-white" id="section-title">Dashboard Overview</h1>
-            <p class="text-gray-400 text-sm mt-0.5">March 3, 2026 · All systems operational</p>
-          </div>
-          <div class="flex items-center gap-2">
-            <div class="flex items-center gap-2 bg-green-500/10 border border-green-500/20 rounded-full px-3 py-1.5">
-              <div class="w-2 h-2 bg-green-500 rounded-full pulse-dot"></div>
-              <span class="text-green-400 text-xs font-medium">System Healthy</span>
-            </div>
-            <button class="px-4 py-2 bg-charcoal-100 border border-white/10 rounded-xl text-gray-400 hover:text-white text-sm transition-colors">
-              <i class="fas fa-rotate-right mr-1"></i> Refresh
-            </button>
-          </div>
-        </div>
+// ════════════════════════════════════════════════════════════════════════════
+// GET /admin  — Dashboard
+// ════════════════════════════════════════════════════════════════════════════
+adminPanel.get('/', (c) => {
+  const now = new Date()
+  const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
 
-        <!-- Key Metrics -->
-        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-          ${[
-            { label: 'Total Revenue (MTD)', val: '$84,320', change: '+22%', icon: 'fa-dollar-sign', color: 'text-lime-500', bg: 'bg-lime-500/10', positive: true },
-            { label: 'Total Bookings', val: '2,847', change: '+15%', icon: 'fa-calendar-check', color: 'text-indigo-400', bg: 'bg-indigo-500/10', positive: true },
-            { label: 'Active Users', val: '12,441', change: '+8%', icon: 'fa-users', color: 'text-blue-400', bg: 'bg-blue-500/10', positive: true },
-            { label: 'Platform Fees', val: '$14,256', change: '+22%', icon: 'fa-piggy-bank', color: 'text-amber-400', bg: 'bg-amber-500/10', positive: true },
-          ].map(s => `
-            <div class="stat-card rounded-2xl p-5">
-              <div class="flex items-start justify-between mb-3">
-                <div class="w-10 h-10 ${s.bg} rounded-xl flex items-center justify-center">
-                  <i class="fas ${s.icon} ${s.color}"></i>
-                </div>
-                <span class="text-xs ${s.positive ? 'text-green-400' : 'text-red-400'} font-semibold">${s.change}</span>
-              </div>
-              <p class="text-2xl font-black text-white">${s.val}</p>
-              <p class="text-gray-400 text-xs mt-1">${s.label}</p>
-            </div>
-          `).join('')}
-        </div>
-
-        <!-- Alert Banner -->
-        <div class="flex items-center gap-3 p-4 bg-amber-500/10 border border-amber-500/20 rounded-2xl mb-6">
-          <i class="fas fa-triangle-exclamation text-amber-400 text-lg flex-shrink-0"></i>
-          <div class="flex-1">
-            <p class="text-white font-semibold text-sm">Fraud Alert: Suspicious booking activity detected</p>
-            <p class="text-amber-300/70 text-xs mt-0.5">User #44291 made 12 bookings in 2 hours from different IP addresses</p>
-          </div>
-          <div class="flex gap-2">
-            <button class="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 rounded-lg text-xs font-semibold transition-colors">Review</button>
-            <button class="px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg text-xs font-semibold transition-colors">Suspend</button>
-          </div>
-        </div>
-
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-          
-          <!-- User Management -->
-          <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
-            <div class="flex items-center justify-between p-5 border-b border-white/5">
-              <h3 class="font-bold text-white">Recent Users</h3>
-              <button class="text-indigo-400 text-sm font-medium hover:text-indigo-300 transition-colors">View All →</button>
-            </div>
-            <div class="divide-y divide-white/5">
-              ${[
-                { name: 'Marcus Johnson', email: 'marcus@email.com', role: 'DRIVER', status: 'active', joined: '2h ago', flag: false },
-                { name: 'Sarah Chen', email: 'sarah@email.com', role: 'HOST', status: 'active', joined: '5h ago', flag: false },
-                { name: 'John Suspicious', email: 'suspicious@mail.ru', role: 'DRIVER', status: 'flagged', joined: '1h ago', flag: true },
-                { name: 'Emily Rodriguez', email: 'emily@gmail.com', role: 'HOST', status: 'pending', joined: '1d ago', flag: false },
-              ].map(u => `
-                <div class="flex items-center gap-3 px-5 py-3 hover:bg-white/5 transition-colors">
-                  <div class="w-8 h-8 ${u.flag ? 'bg-red-500/20' : 'gradient-bg'} rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
-                    ${u.name[0]}
-                  </div>
-                  <div class="flex-1 min-w-0">
-                    <p class="text-white text-sm font-medium truncate ${u.flag ? 'text-red-300' : ''}">${u.name}</p>
-                    <p class="text-gray-500 text-xs truncate">${u.email}</p>
-                  </div>
-                  <div class="flex items-center gap-2">
-                    <span class="text-xs ${u.role === 'HOST' ? 'bg-lime-500/20 text-lime-400' : 'bg-indigo-500/20 text-indigo-400'} px-2 py-0.5 rounded-full">${u.role}</span>
-                    <span class="text-xs ${u.status === 'active' ? 'bg-green-500/20 text-green-400' : u.status === 'flagged' ? 'bg-red-500/20 text-red-400' : 'bg-gray-500/20 text-gray-400'} px-2 py-0.5 rounded-full">${u.status}</span>
-                  </div>
-                  <div class="flex gap-1 ml-2">
-                    <button title="View Profile" class="w-7 h-7 bg-charcoal-200 hover:bg-indigo-500/20 rounded-lg flex items-center justify-center text-gray-400 hover:text-indigo-400 transition-colors">
-                      <i class="fas fa-eye text-xs"></i>
-                    </button>
-                    <button title="Ban User" class="w-7 h-7 bg-charcoal-200 hover:bg-red-500/20 rounded-lg flex items-center justify-center text-gray-400 hover:text-red-400 transition-colors">
-                      <i class="fas fa-ban text-xs"></i>
-                    </button>
-                  </div>
-                </div>
-              `).join('')}
-            </div>
-          </div>
-
-          <!-- Listings Moderation -->
-          <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
-            <div class="flex items-center justify-between p-5 border-b border-white/5">
-              <h3 class="font-bold text-white">Listings Pending Review</h3>
-              <span class="bg-amber-500/20 text-amber-400 text-xs font-bold px-2.5 py-1 rounded-full">5 pending</span>
-            </div>
-            <div class="divide-y divide-white/5">
-              ${[
-                { title: 'Downtown Covered Garage', host: 'James T.', type: 'Garage', rate: 15, status: 'pending' },
-                { title: 'Airport Adjacent Lot', host: 'Linda M.', type: 'Lot', rate: 12, status: 'pending' },
-                { title: 'Suspicious Empty Lot', host: 'Unknown User', type: 'Lot', rate: 3, status: 'flagged' },
-                { title: 'River North Driveway', host: 'Carlos P.', type: 'Driveway', rate: 7, status: 'pending' },
-              ].map(l => `
-                <div class="flex items-center gap-3 px-5 py-3 hover:bg-white/5 transition-colors">
-                  <div class="w-10 h-10 bg-charcoal-200 rounded-xl flex items-center justify-center flex-shrink-0">
-                    <i class="fas fa-${l.type === 'Garage' ? 'warehouse' : l.type === 'Driveway' ? 'home' : 'parking'} text-gray-400 text-sm"></i>
-                  </div>
-                  <div class="flex-1 min-w-0">
-                    <p class="text-white text-sm font-medium truncate ${l.status === 'flagged' ? 'text-red-300' : ''}">${l.title}</p>
-                    <p class="text-gray-500 text-xs">${l.host} · $${l.rate}/hr</p>
-                  </div>
-                  <span class="text-xs ${l.status === 'flagged' ? 'bg-red-500/20 text-red-400' : 'bg-amber-500/20 text-amber-400'} px-2 py-0.5 rounded-full flex-shrink-0">${l.status}</span>
-                  <div class="flex gap-1">
-                    <button onclick="approveListing(this)" class="w-7 h-7 bg-green-500/10 hover:bg-green-500/20 rounded-lg flex items-center justify-center text-green-400 transition-colors">
-                      <i class="fas fa-check text-xs"></i>
-                    </button>
-                    <button onclick="rejectListing(this)" class="w-7 h-7 bg-red-500/10 hover:bg-red-500/20 rounded-lg flex items-center justify-center text-red-400 transition-colors">
-                      <i class="fas fa-times text-xs"></i>
-                    </button>
-                  </div>
-                </div>
-              `).join('')}
-            </div>
-          </div>
-        </div>
-
-        <!-- Recent Bookings -->
-        <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden mb-6">
-          <div class="flex items-center justify-between p-5 border-b border-white/5">
-            <h3 class="font-bold text-white">Recent Bookings</h3>
-            <div class="flex gap-2">
-              <button class="px-3 py-1.5 bg-charcoal-200 border border-white/5 rounded-xl text-xs text-gray-400 hover:text-white transition-colors">
-                <i class="fas fa-download mr-1"></i> Export CSV
-              </button>
-            </div>
-          </div>
-          <div class="overflow-x-auto">
-            <table class="w-full text-sm">
-              <thead class="bg-charcoal-200/50">
-                <tr>
-                  ${['Booking ID', 'Driver', 'Space', 'Date', 'Amount', 'Status', 'Actions'].map(h => `
-                    <th class="px-4 py-3 text-left text-xs text-gray-500 uppercase tracking-wider font-medium">${h}</th>
-                  `).join('')}
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-white/5">
-                ${[
-                  { id: 'PP-8741', driver: 'Alex M.', space: 'Covered Garage', date: 'Mar 3, 10am', amount: 48, status: 'active' },
-                  { id: 'PP-8740', driver: 'Sarah K.', space: 'Wrigley Driveway', date: 'Mar 3, 8am', amount: 32, status: 'completed' },
-                  { id: 'PP-8739', driver: 'Marcus B.', space: "O'Hare Lot", date: 'Mar 2', amount: 84, status: 'completed' },
-                  { id: 'PP-8738', driver: 'Lisa T.', space: 'River North', date: 'Mar 2', amount: 18, status: 'cancelled' },
-                  { id: 'PP-8737', driver: 'Derek W.', space: 'Navy Pier', date: 'Mar 1', amount: 40, status: 'refunded' },
-                ].map(b => `
-                  <tr class="hover:bg-white/5 transition-colors">
-                    <td class="px-4 py-3 text-indigo-400 font-mono text-xs">${b.id}</td>
-                    <td class="px-4 py-3 text-white">${b.driver}</td>
-                    <td class="px-4 py-3 text-gray-400">${b.space}</td>
-                    <td class="px-4 py-3 text-gray-400 text-xs">${b.date}</td>
-                    <td class="px-4 py-3 text-white font-semibold">$${b.amount}</td>
-                    <td class="px-4 py-3">
-                      <span class="text-xs px-2 py-1 rounded-full ${
-                        b.status === 'active' ? 'bg-green-500/20 text-green-400' :
-                        b.status === 'completed' ? 'bg-indigo-500/20 text-indigo-400' :
-                        b.status === 'cancelled' ? 'bg-gray-500/20 text-gray-400' :
-                        'bg-red-500/20 text-red-400'
-                      }">${b.status}</span>
-                    </td>
-                    <td class="px-4 py-3">
-                      <div class="flex gap-1">
-                        <button class="w-7 h-7 bg-charcoal-200 hover:bg-indigo-500/20 rounded-lg flex items-center justify-center text-gray-400 hover:text-indigo-400 transition-colors">
-                          <i class="fas fa-eye text-xs"></i>
-                        </button>
-                        <button class="w-7 h-7 bg-charcoal-200 hover:bg-amber-500/20 rounded-lg flex items-center justify-center text-gray-400 hover:text-amber-400 transition-colors">
-                          <i class="fas fa-pen text-xs"></i>
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                `).join('')}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <!-- Dispute Resolution + System Health -->
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          
-          <!-- Active Disputes -->
-          <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-5">
-            <div class="flex items-center justify-between mb-4">
-              <h3 class="font-bold text-white">Active Disputes</h3>
-              <span class="bg-red-500/20 text-red-400 text-xs font-bold px-2.5 py-1 rounded-full">3 open</span>
-            </div>
-            <div class="space-y-3">
-              ${[
-                { id: 'D-441', type: 'Space Unavailable', parties: 'Marcus vs Host J.', priority: 'high', amount: 48 },
-                { id: 'D-440', type: 'Unauthorized Charge', parties: 'Sarah vs Platform', priority: 'medium', amount: 25 },
-                { id: 'D-439', type: 'No Show - Host', parties: 'Derek vs Host K.', priority: 'low', amount: 32 },
-              ].map(d => `
-                <div class="p-3 bg-charcoal-200 rounded-xl flex items-center gap-3">
-                  <div class="w-8 h-8 ${d.priority === 'high' ? 'bg-red-500/20' : d.priority === 'medium' ? 'bg-amber-500/20' : 'bg-blue-500/20'} rounded-lg flex items-center justify-center flex-shrink-0">
-                    <i class="fas fa-gavel ${d.priority === 'high' ? 'text-red-400' : d.priority === 'medium' ? 'text-amber-400' : 'text-blue-400'} text-xs"></i>
-                  </div>
-                  <div class="flex-1 min-w-0">
-                    <p class="text-white text-xs font-semibold">${d.id} · ${d.type}</p>
-                    <p class="text-gray-500 text-xs truncate">${d.parties}</p>
-                  </div>
-                  <span class="text-white text-xs font-bold">$${d.amount}</span>
-                  <button class="px-2.5 py-1.5 btn-primary text-white rounded-lg text-xs font-semibold">Resolve</button>
-                </div>
-              `).join('')}
-            </div>
-          </div>
-
-          <!-- System Health -->
-          <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-5">
-            <h3 class="font-bold text-white mb-4">System Health</h3>
-            <div class="space-y-3">
-              ${[
-                { service: 'API Gateway', status: 'Operational', latency: '24ms', uptime: '99.98%', ok: true },
-                { service: 'Payment Service (Stripe)', status: 'Operational', latency: '340ms', uptime: '99.99%', ok: true },
-                { service: 'Database (D1)', status: 'Operational', latency: '8ms', uptime: '100%', ok: true },
-                { service: 'Email Service (SendGrid)', status: 'Degraded', latency: '1.2s', uptime: '98.3%', ok: false },
-                { service: 'SMS Service (Twilio)', status: 'Operational', latency: '220ms', uptime: '99.95%', ok: true },
-              ].map(s => `
-                <div class="flex items-center gap-3 p-2.5 bg-charcoal-200 rounded-xl">
-                  <div class="w-2 h-2 ${s.ok ? 'bg-green-500' : 'bg-amber-400'} rounded-full flex-shrink-0 pulse-dot"></div>
-                  <span class="text-white text-xs font-medium flex-1">${s.service}</span>
-                  <span class="text-xs ${s.ok ? 'text-green-400' : 'text-amber-400'}">${s.status}</span>
-                  <span class="text-gray-500 text-xs font-mono">${s.latency}</span>
-                  <span class="text-gray-600 text-xs">${s.uptime}</span>
-                </div>
-              `).join('')}
-            </div>
-          </div>
-        </div>
+  const content = `
+  <!-- Page header -->
+  <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-6">
+    <div>
+      <p class="text-gray-500 text-sm">${dateStr}</p>
+    </div>
+    <div class="flex items-center gap-2">
+      <div class="flex items-center gap-1.5 bg-green-500/10 border border-green-500/20 rounded-full px-3 py-1.5">
+        <div class="w-2 h-2 bg-green-500 rounded-full pulse-dot"></div>
+        <span class="text-green-400 text-xs font-semibold">All Systems Operational</span>
       </div>
     </div>
   </div>
 
-  <script>
-    function switchSection(section) {
-      const titles = {
-        dashboard: 'Dashboard Overview',
-        analytics: 'Analytics & Insights',
-        revenue: 'Revenue Management',
-        users: 'User Management',
-        listings: 'Listings Moderation',
-        bookings: 'All Bookings',
-        payments: 'Payment Management',
-        reviews: 'Reviews & Ratings',
-        disputes: 'Dispute Resolution',
-        fraudalerts: 'Fraud Detection',
-        reports: 'Reports',
-        settings: 'Platform Settings',
-      };
-      const el = document.getElementById('section-title');
-      if (el && titles[section]) el.textContent = titles[section];
-      
-      document.querySelectorAll('.admin-nav').forEach(btn => {
-        btn.className = btn.className.replace('bg-indigo-500/20 text-indigo-300 font-semibold', 'text-gray-400 hover:bg-white/5 hover:text-white');
-      });
-    }
+  <!-- KPI cards — all zeros until real DB is connected -->
+  <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+    ${StatCard('Total Revenue (MTD)', '$0.00', 'fa-dollar-sign', 'text-lime-500', 'bg-lime-500/10', 'No transactions yet')}
+    ${StatCard('Total Bookings', '0', 'fa-calendar-check', 'text-indigo-400', 'bg-indigo-500/10', 'No bookings yet')}
+    ${StatCard('Registered Users', '0', 'fa-users', 'text-blue-400', 'bg-blue-500/10', 'No sign-ups yet')}
+    ${StatCard('Active Listings', '0', 'fa-parking', 'text-amber-400', 'bg-amber-500/10', 'No listings yet')}
+  </div>
 
-    function approveListing(btn) {
-      const row = btn.closest('.flex');
-      const statusEl = row.previousElementSibling;
-      if (statusEl) {
-        statusEl.className = 'text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded-full flex-shrink-0';
-        statusEl.textContent = 'approved';
-      }
-      row.innerHTML = '<span class="text-green-400 text-xs font-semibold"><i class="fas fa-check mr-1"></i>Approved</span>';
-    }
+  <!-- Secondary KPIs -->
+  <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+    ${StatCard('Platform Fees Collected', '$0.00', 'fa-piggy-bank', 'text-purple-400', 'bg-purple-500/10')}
+    ${StatCard('Pending Listings', '0', 'fa-hourglass-half', 'text-amber-400', 'bg-amber-500/10', 'Awaiting review')}
+    ${StatCard('Open Disputes', '0', 'fa-gavel', 'text-red-400', 'bg-red-500/10')}
+    ${StatCard('Fraud Alerts', '0', 'fa-triangle-exclamation', 'text-amber-400', 'bg-amber-500/10')}
+  </div>
 
-    function rejectListing(btn) {
-      const row = btn.closest('.flex');
-      const statusEl = row.previousElementSibling;
-      if (statusEl) {
-        statusEl.className = 'text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded-full flex-shrink-0';
-        statusEl.textContent = 'rejected';
-      }
-      row.innerHTML = '<span class="text-red-400 text-xs font-semibold"><i class="fas fa-times mr-1"></i>Rejected</span>';
-    }
-  </script>
+  <!-- Main grid -->
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+
+    <!-- Recent Users -->
+    <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
+      <div class="flex items-center justify-between p-5 border-b border-white/5">
+        <h3 class="font-bold text-white text-sm">Recent Registrations</h3>
+        <a href="/admin/users" class="text-indigo-400 text-xs font-medium hover:text-indigo-300 transition-colors">View All →</a>
+      </div>
+      ${EmptyState('fa-user-plus', 'No users yet', 'New registrations will appear here as people sign up.')}
+    </div>
+
+    <!-- Pending Listings -->
+    <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
+      <div class="flex items-center justify-between p-5 border-b border-white/5">
+        <h3 class="font-bold text-white text-sm">Listings Pending Review</h3>
+        <a href="/admin/listings" class="text-indigo-400 text-xs font-medium hover:text-indigo-300 transition-colors">View All →</a>
+      </div>
+      ${EmptyState('fa-parking', 'No pending listings', 'New listing submissions will appear here for moderation.')}
+    </div>
+  </div>
+
+  <!-- Recent Bookings table -->
+  <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden mb-6">
+    <div class="flex items-center justify-between p-5 border-b border-white/5">
+      <h3 class="font-bold text-white text-sm">Recent Bookings</h3>
+      <a href="/admin/bookings" class="text-indigo-400 text-xs font-medium hover:text-indigo-300 transition-colors">View All →</a>
+    </div>
+    ${EmptyState('fa-calendar-check', 'No bookings yet', 'All platform bookings will be displayed here in real time.')}
+  </div>
+
+  <!-- Bottom row: Disputes + System Health -->
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+    <!-- Disputes -->
+    <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
+      <div class="flex items-center justify-between p-5 border-b border-white/5">
+        <h3 class="font-bold text-white text-sm">Active Disputes</h3>
+        <a href="/admin/disputes" class="text-indigo-400 text-xs font-medium hover:text-indigo-300 transition-colors">View All →</a>
+      </div>
+      ${EmptyState('fa-gavel', 'No open disputes', 'Dispute requests from users will be listed here.')}
+    </div>
+
+    <!-- System Health -->
+    <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-5">
+      <h3 class="font-bold text-white text-sm mb-4">Service Health</h3>
+      <div class="space-y-2.5">
+        ${[
+          { name: 'Cloudflare Workers (API)', ok: true },
+          { name: 'Cloudflare Pages (Frontend)', ok: true },
+          { name: 'D1 Database', ok: true },
+          { name: 'Stripe Payments', ok: false, note: 'Not yet configured' },
+          { name: 'SendGrid Email', ok: false, note: 'Not yet configured' },
+          { name: 'Twilio SMS', ok: false, note: 'Not yet configured' },
+        ].map(s => `
+          <div class="flex items-center gap-3 p-2.5 bg-charcoal-200 rounded-xl">
+            <div class="w-2 h-2 ${s.ok ? 'bg-green-500 pulse-dot' : 'bg-gray-600'} rounded-full flex-shrink-0"></div>
+            <span class="text-white text-xs font-medium flex-1">${s.name}</span>
+            <span class="text-xs ${s.ok ? 'text-green-400' : 'text-gray-500'}">${s.ok ? 'Operational' : (s.note || 'Offline')}</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  </div>
   `
-  return c.html(Layout('Admin Panel', content))
+  return c.html(AdminLayout('Dashboard', content))
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// GET /admin/users
+// ════════════════════════════════════════════════════════════════════════════
+adminPanel.get('/users', (c) => {
+  const content = `
+  <div class="flex items-center justify-between mb-6">
+    <p class="text-gray-400 text-sm">Manage all platform users</p>
+    <button class="btn-primary px-4 py-2 rounded-xl text-xs text-white font-semibold flex items-center gap-2">
+      <i class="fas fa-download"></i> Export CSV
+    </button>
+  </div>
+
+  <!-- Search & filter bar -->
+  <div class="flex flex-wrap gap-3 mb-5">
+    <div class="relative flex-1 min-w-[200px]">
+      <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-xs pointer-events-none"></i>
+      <input type="text" placeholder="Search by name, email, phone..." class="w-full bg-charcoal-100 border border-white/10 rounded-xl pl-9 pr-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500"/>
+    </div>
+    <select class="bg-charcoal-100 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-gray-400 focus:outline-none focus:border-indigo-500">
+      <option value="">All Roles</option>
+      <option>DRIVER</option>
+      <option>HOST</option>
+      <option>ADMIN</option>
+    </select>
+    <select class="bg-charcoal-100 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-gray-400 focus:outline-none focus:border-indigo-500">
+      <option value="">All Statuses</option>
+      <option>active</option>
+      <option>suspended</option>
+      <option>pending</option>
+    </select>
+  </div>
+
+  <!-- Users table -->
+  <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-charcoal-200/60">
+          <tr>
+            ${['User', 'Email', 'Role', 'Joined', 'ID Verified', 'Rating', 'Status', 'Actions'].map(h => `
+              <th class="px-4 py-3 text-left text-xs text-gray-500 uppercase tracking-wider font-semibold whitespace-nowrap">${h}</th>
+            `).join('')}
+          </tr>
+        </thead>
+        <tbody id="users-table">
+          <tr><td colspan="8">
+            ${EmptyState('fa-users', 'No users registered yet', 'Users will appear here as they sign up on the platform.')}
+          </td></tr>
+        </tbody>
+      </table>
+    </div>
+    <!-- Pagination placeholder -->
+    <div class="flex items-center justify-between px-5 py-3 border-t border-white/5">
+      <p class="text-gray-600 text-xs">Showing 0 of 0 users</p>
+      <div class="flex gap-2">
+        <button disabled class="px-3 py-1.5 bg-charcoal-200 text-gray-600 rounded-lg text-xs">← Prev</button>
+        <button disabled class="px-3 py-1.5 bg-charcoal-200 text-gray-600 rounded-lg text-xs">Next →</button>
+      </div>
+    </div>
+  </div>
+  `
+  return c.html(AdminLayout('Users', content))
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// GET /admin/listings
+// ════════════════════════════════════════════════════════════════════════════
+adminPanel.get('/listings', (c) => {
+  const content = `
+  <div class="flex items-center justify-between mb-6">
+    <p class="text-gray-400 text-sm">Review and moderate parking space submissions</p>
+    <button class="btn-primary px-4 py-2 rounded-xl text-xs text-white font-semibold flex items-center gap-2">
+      <i class="fas fa-download"></i> Export CSV
+    </button>
+  </div>
+
+  <!-- Tabs -->
+  <div class="flex gap-2 mb-5">
+    ${[
+      { label: 'All', count: 0 },
+      { label: 'Pending Review', count: 0 },
+      { label: 'Active', count: 0 },
+      { label: 'Suspended', count: 0 },
+    ].map((tab, i) => `
+      <button class="px-4 py-2 rounded-xl text-xs font-semibold transition-all ${i === 0 ? 'bg-indigo-500 text-white' : 'bg-charcoal-200 text-gray-400 hover:text-white border border-white/5'}">
+        ${tab.label} <span class="ml-1 opacity-60">(${tab.count})</span>
+      </button>
+    `).join('')}
+  </div>
+
+  <!-- Listings table -->
+  <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-charcoal-200/60">
+          <tr>
+            ${['Listing', 'Host', 'Type', 'Rates', 'Submitted', 'Status', 'Actions'].map(h => `
+              <th class="px-4 py-3 text-left text-xs text-gray-500 uppercase tracking-wider font-semibold whitespace-nowrap">${h}</th>
+            `).join('')}
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td colspan="7">
+            ${EmptyState('fa-parking', 'No listings submitted yet', 'New listing submissions will appear here for your review and approval.')}
+          </td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="flex items-center justify-between px-5 py-3 border-t border-white/5">
+      <p class="text-gray-600 text-xs">Showing 0 of 0 listings</p>
+      <div class="flex gap-2">
+        <button disabled class="px-3 py-1.5 bg-charcoal-200 text-gray-600 rounded-lg text-xs">← Prev</button>
+        <button disabled class="px-3 py-1.5 bg-charcoal-200 text-gray-600 rounded-lg text-xs">Next →</button>
+      </div>
+    </div>
+  </div>
+  `
+  return c.html(AdminLayout('Listings', content))
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// GET /admin/bookings
+// ════════════════════════════════════════════════════════════════════════════
+adminPanel.get('/bookings', (c) => {
+  const content = `
+  <div class="flex items-center justify-between mb-6">
+    <p class="text-gray-400 text-sm">Full log of all platform bookings</p>
+    <button class="btn-primary px-4 py-2 rounded-xl text-xs text-white font-semibold flex items-center gap-2">
+      <i class="fas fa-download"></i> Export CSV
+    </button>
+  </div>
+
+  <!-- Filter bar -->
+  <div class="flex flex-wrap gap-3 mb-5">
+    <div class="relative flex-1 min-w-[200px]">
+      <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-xs pointer-events-none"></i>
+      <input type="text" placeholder="Search by booking ID, driver, space..." class="w-full bg-charcoal-100 border border-white/10 rounded-xl pl-9 pr-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500"/>
+    </div>
+    <input type="date" class="bg-charcoal-100 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-gray-400 focus:outline-none focus:border-indigo-500"/>
+    <select class="bg-charcoal-100 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-gray-400 focus:outline-none focus:border-indigo-500">
+      <option value="">All Statuses</option>
+      <option>active</option>
+      <option>confirmed</option>
+      <option>completed</option>
+      <option>cancelled</option>
+      <option>refunded</option>
+    </select>
+  </div>
+
+  <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-charcoal-200/60">
+          <tr>
+            ${['Booking ID', 'Driver', 'Space', 'Start', 'End', 'Amount', 'Fee', 'Status', 'Actions'].map(h => `
+              <th class="px-4 py-3 text-left text-xs text-gray-500 uppercase tracking-wider font-semibold whitespace-nowrap">${h}</th>
+            `).join('')}
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td colspan="9">
+            ${EmptyState('fa-calendar-check', 'No bookings yet', 'All platform bookings will be shown here with full detail.')}
+          </td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="flex items-center justify-between px-5 py-3 border-t border-white/5">
+      <p class="text-gray-600 text-xs">Showing 0 of 0 bookings</p>
+      <div class="flex gap-2">
+        <button disabled class="px-3 py-1.5 bg-charcoal-200 text-gray-600 rounded-lg text-xs">← Prev</button>
+        <button disabled class="px-3 py-1.5 bg-charcoal-200 text-gray-600 rounded-lg text-xs">Next →</button>
+      </div>
+    </div>
+  </div>
+  `
+  return c.html(AdminLayout('Bookings', content))
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// GET /admin/payments
+// ════════════════════════════════════════════════════════════════════════════
+adminPanel.get('/payments', (c) => {
+  const content = `
+  <div class="flex items-center justify-between mb-6">
+    <p class="text-gray-400 text-sm">Payment transactions and payout management</p>
+    <button class="btn-primary px-4 py-2 rounded-xl text-xs text-white font-semibold flex items-center gap-2">
+      <i class="fas fa-download"></i> Export CSV
+    </button>
+  </div>
+
+  <!-- Payment KPIs -->
+  <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+    ${StatCard('Total Volume', '$0.00', 'fa-dollar-sign', 'text-lime-500', 'bg-lime-500/10', 'All time')}
+    ${StatCard('Platform Revenue', '$0.00', 'fa-piggy-bank', 'text-indigo-400', 'bg-indigo-500/10', '15% of transactions')}
+    ${StatCard('Pending Payouts', '$0.00', 'fa-clock', 'text-amber-400', 'bg-amber-500/10', 'To hosts')}
+    ${StatCard('Total Refunds', '$0.00', 'fa-rotate-left', 'text-red-400', 'bg-red-500/10', 'All time')}
+  </div>
+
+  <!-- Stripe status notice -->
+  <div class="flex items-start gap-3 p-4 bg-amber-500/10 border border-amber-500/20 rounded-2xl mb-5">
+    <i class="fas fa-triangle-exclamation text-amber-400 flex-shrink-0 mt-0.5"></i>
+    <div>
+      <p class="text-amber-300 font-semibold text-sm">Stripe not configured</p>
+      <p class="text-amber-400/70 text-xs mt-0.5">Payment processing is inactive. Add your <code class="bg-black/20 px-1 rounded">STRIPE_SECRET_KEY</code> as a Cloudflare secret to enable transactions.</p>
+    </div>
+  </div>
+
+  <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-charcoal-200/60">
+          <tr>
+            ${['Transaction ID','Booking ID','Driver','Amount','Platform Fee','Host Payout','Status','Date'].map(h => `
+              <th class="px-4 py-3 text-left text-xs text-gray-500 uppercase tracking-wider font-semibold whitespace-nowrap">${h}</th>
+            `).join('')}
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td colspan="8">
+            ${EmptyState('fa-credit-card', 'No transactions yet', 'Payment records will appear here once Stripe is configured and bookings are made.')}
+          </td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  `
+  return c.html(AdminLayout('Payments', content))
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// GET /admin/reviews
+// ════════════════════════════════════════════════════════════════════════════
+adminPanel.get('/reviews', (c) => {
+  const content = `
+  <div class="flex items-center justify-between mb-6">
+    <p class="text-gray-400 text-sm">Moderate user reviews and ratings</p>
+  </div>
+
+  <!-- Filter -->
+  <div class="flex flex-wrap gap-3 mb-5">
+    <div class="relative flex-1 min-w-[200px]">
+      <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-xs pointer-events-none"></i>
+      <input type="text" placeholder="Search reviews..." class="w-full bg-charcoal-100 border border-white/10 rounded-xl pl-9 pr-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500"/>
+    </div>
+    <select class="bg-charcoal-100 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-gray-400 focus:outline-none focus:border-indigo-500">
+      <option>All Stars</option>
+      <option>5 ★</option><option>4 ★</option><option>3 ★</option><option>2 ★</option><option>1 ★</option>
+    </select>
+    <select class="bg-charcoal-100 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-gray-400 focus:outline-none focus:border-indigo-500">
+      <option>All Statuses</option>
+      <option>published</option>
+      <option>flagged</option>
+      <option>removed</option>
+    </select>
+  </div>
+
+  <div class="bg-charcoal-100 rounded-2xl border border-white/5">
+    ${EmptyState('fa-star', 'No reviews yet', 'User reviews will appear here after completed bookings.')}
+  </div>
+  `
+  return c.html(AdminLayout('Reviews', content))
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// GET /admin/disputes
+// ════════════════════════════════════════════════════════════════════════════
+adminPanel.get('/disputes', (c) => {
+  const content = `
+  <div class="flex items-center justify-between mb-6">
+    <p class="text-gray-400 text-sm">Handle and resolve user disputes</p>
+  </div>
+
+  <!-- Priority tabs -->
+  <div class="flex gap-2 mb-5">
+    ${[
+      { label: 'All', count: 0 },
+      { label: 'High Priority', count: 0 },
+      { label: 'In Progress', count: 0 },
+      { label: 'Resolved', count: 0 },
+    ].map((tab, i) => `
+      <button class="px-4 py-2 rounded-xl text-xs font-semibold transition-all ${i === 0 ? 'bg-indigo-500 text-white' : 'bg-charcoal-200 text-gray-400 hover:text-white border border-white/5'}">
+        ${tab.label} <span class="ml-1 opacity-60">(${tab.count})</span>
+      </button>
+    `).join('')}
+  </div>
+
+  <div class="bg-charcoal-100 rounded-2xl border border-white/5">
+    ${EmptyState('fa-gavel', 'No active disputes', 'Dispute requests submitted by drivers or hosts will appear here for your resolution.')}
+  </div>
+  `
+  return c.html(AdminLayout('Disputes', content))
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// GET /admin/fraud
+// ════════════════════════════════════════════════════════════════════════════
+adminPanel.get('/fraud', (c) => {
+  const content = `
+  <div class="flex items-center justify-between mb-6">
+    <p class="text-gray-400 text-sm">Monitor and action suspicious activity</p>
+  </div>
+
+  <!-- Alert types -->
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+    ${StatCard('Active Fraud Alerts', '0', 'fa-triangle-exclamation', 'text-amber-400', 'bg-amber-500/10')}
+    ${StatCard('Accounts Suspended', '0', 'fa-ban', 'text-red-400', 'bg-red-500/10', 'All time')}
+    ${StatCard('Flagged Transactions', '0', 'fa-flag', 'text-orange-400', 'bg-orange-500/10')}
+  </div>
+
+  <div class="bg-charcoal-100 rounded-2xl border border-white/5">
+    ${EmptyState('fa-shield-halved', 'No fraud alerts', 'The system will flag suspicious booking patterns, multiple accounts, and unusual activity here.')}
+  </div>
+  `
+  return c.html(AdminLayout('Fraud', content))
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// GET /admin/analytics
+// ════════════════════════════════════════════════════════════════════════════
+adminPanel.get('/analytics', (c) => {
+  const content = `
+  <div class="flex items-center justify-between mb-6">
+    <p class="text-gray-400 text-sm">Platform growth and usage metrics</p>
+    <div class="flex gap-2">
+      ${['7D','30D','3M','1Y'].map((p, i) => `
+        <button class="px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${i === 1 ? 'bg-indigo-500 text-white' : 'bg-charcoal-200 text-gray-400 hover:text-white border border-white/5'}">${p}</button>
+      `).join('')}
+    </div>
+  </div>
+
+  <!-- Charts placeholder grid -->
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+    ${['Bookings Over Time', 'Revenue Over Time', 'New User Signups', 'Listing Growth'].map(chart => `
+      <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-5">
+        <h3 class="font-semibold text-white text-sm mb-4">${chart}</h3>
+        ${EmptyState('fa-chart-line', 'No data yet', 'Chart will populate once the platform has activity.')}
+      </div>
+    `).join('')}
+  </div>
+
+  <!-- Geo breakdown placeholder -->
+  <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-5">
+    <h3 class="font-semibold text-white text-sm mb-4">Bookings by City</h3>
+    ${EmptyState('fa-map-location-dot', 'No city data yet', 'Geographic breakdown of bookings will appear here.')}
+  </div>
+  `
+  return c.html(AdminLayout('Analytics', content))
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// GET /admin/revenue
+// ════════════════════════════════════════════════════════════════════════════
+adminPanel.get('/revenue', (c) => {
+  const content = `
+  <div class="flex items-center justify-between mb-6">
+    <p class="text-gray-400 text-sm">Detailed financial reporting</p>
+    <button class="btn-primary px-4 py-2 rounded-xl text-xs text-white font-semibold flex items-center gap-2">
+      <i class="fas fa-download"></i> Export Report
+    </button>
+  </div>
+
+  <!-- Revenue KPIs -->
+  <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+    ${StatCard('Gross Volume (All Time)', '$0.00', 'fa-dollar-sign', 'text-lime-500', 'bg-lime-500/10')}
+    ${StatCard('Net Platform Revenue', '$0.00', 'fa-piggy-bank', 'text-indigo-400', 'bg-indigo-500/10', 'After payouts')}
+    ${StatCard('Total Host Payouts', '$0.00', 'fa-money-bill-wave', 'text-blue-400', 'bg-blue-500/10', 'Paid out to hosts')}
+    ${StatCard('Total Refunds Issued', '$0.00', 'fa-rotate-left', 'text-red-400', 'bg-red-500/10')}
+  </div>
+
+  <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-5">
+    <h3 class="font-semibold text-white text-sm mb-4">Monthly Revenue Breakdown</h3>
+    ${EmptyState('fa-chart-bar', 'No revenue data yet', 'Monthly revenue reports will populate here as transactions occur.')}
+  </div>
+  `
+  return c.html(AdminLayout('Revenue', content))
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// GET /admin/settings
+// ════════════════════════════════════════════════════════════════════════════
+adminPanel.get('/settings', (c) => {
+  const content = `
+  <div class="mb-6">
+    <p class="text-gray-400 text-sm">Platform-wide configuration and integrations</p>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+    <!-- Platform Settings -->
+    <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-6">
+      <h3 class="font-bold text-white mb-5 flex items-center gap-2">
+        <i class="fas fa-gear text-indigo-400"></i> Platform Settings
+      </h3>
+      <div class="space-y-4">
+        ${[
+          { label: 'Platform Service Fee (%)', value: '15', type: 'number', note: 'Percentage charged on each booking' },
+          { label: 'Platform Name', value: 'ParkPeer', type: 'text', note: '' },
+          { label: 'Support Email', value: '', type: 'email', note: 'Shown to users in support section' },
+          { label: 'Max Booking Duration (hours)', value: '720', type: 'number', note: 'Maximum booking length allowed' },
+        ].map(f => `
+          <div>
+            <label class="text-xs text-gray-400 font-medium block mb-1.5">${f.label}</label>
+            <input type="${f.type}" value="${f.value}" class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 transition-all"/>
+            ${f.note ? `<p class="text-gray-600 text-xs mt-1">${f.note}</p>` : ''}
+          </div>
+        `).join('')}
+        <button class="btn-primary w-full py-2.5 rounded-xl text-sm text-white font-semibold mt-2">
+          Save Settings
+        </button>
+      </div>
+    </div>
+
+    <!-- Integrations status -->
+    <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-6">
+      <h3 class="font-bold text-white mb-5 flex items-center gap-2">
+        <i class="fas fa-plug text-indigo-400"></i> Third-Party Integrations
+      </h3>
+      <div class="space-y-3">
+        ${[
+          { name: 'Stripe', desc: 'Payment processing', icon: 'fa-credit-card', connected: false, envKey: 'STRIPE_SECRET_KEY' },
+          { name: 'SendGrid', desc: 'Email notifications', icon: 'fa-envelope', connected: false, envKey: 'SENDGRID_API_KEY' },
+          { name: 'Twilio', desc: 'SMS notifications', icon: 'fa-mobile-screen', connected: false, envKey: 'TWILIO_AUTH_TOKEN' },
+          { name: 'Mapbox', desc: 'Interactive maps', icon: 'fa-map', connected: false, envKey: 'MAPBOX_TOKEN' },
+          { name: 'Cloudflare D1', desc: 'Database', icon: 'fa-database', connected: true, envKey: '' },
+        ].map(s => `
+          <div class="flex items-center gap-3 p-3.5 bg-charcoal-200 rounded-xl border ${s.connected ? 'border-green-500/20' : 'border-white/5'}">
+            <div class="w-9 h-9 ${s.connected ? 'bg-green-500/10' : 'bg-charcoal-300'} rounded-xl flex items-center justify-center flex-shrink-0">
+              <i class="fas ${s.icon} ${s.connected ? 'text-green-400' : 'text-gray-600'} text-sm"></i>
+            </div>
+            <div class="flex-1 min-w-0">
+              <p class="text-white text-sm font-semibold">${s.name}</p>
+              <p class="text-gray-500 text-xs">${s.desc}</p>
+              ${!s.connected && s.envKey ? `<p class="text-gray-700 text-xs font-mono mt-0.5">Set <code>${s.envKey}</code> in Cloudflare Secrets</p>` : ''}
+            </div>
+            <span class="text-xs px-2.5 py-1 rounded-full font-semibold ${s.connected ? 'badge-green' : 'badge-gray'} flex-shrink-0">
+              ${s.connected ? 'Connected' : 'Not Set Up'}
+            </span>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+
+    <!-- Security settings -->
+    <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-6">
+      <h3 class="font-bold text-white mb-5 flex items-center gap-2">
+        <i class="fas fa-shield-halved text-indigo-400"></i> Security
+      </h3>
+      <div class="space-y-3">
+        ${[
+          { label: 'Admin session duration', value: '8 hours', icon: 'fa-clock' },
+          { label: 'Login lockout threshold', value: '5 failed attempts', icon: 'fa-lock' },
+          { label: 'Lockout duration', value: '15 minutes', icon: 'fa-ban' },
+          { label: 'Cookie scope', value: '/admin path only', icon: 'fa-cookie' },
+          { label: 'Cookie flags', value: 'HttpOnly · Secure · SameSite=Strict', icon: 'fa-shield-halved' },
+        ].map(s => `
+          <div class="flex items-center justify-between p-3 bg-charcoal-200 rounded-xl">
+            <div class="flex items-center gap-2.5">
+              <i class="fas ${s.icon} text-indigo-400/70 text-xs w-4 text-center"></i>
+              <span class="text-sm text-gray-300">${s.label}</span>
+            </div>
+            <span class="text-xs text-indigo-300 font-mono">${s.value}</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+
+    <!-- Admin account -->
+    <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-6">
+      <h3 class="font-bold text-white mb-5 flex items-center gap-2">
+        <i class="fas fa-user-shield text-indigo-400"></i> Admin Account
+      </h3>
+      <div class="flex items-center gap-3 p-4 bg-charcoal-200 rounded-xl mb-4">
+        <div class="w-10 h-10 gradient-bg rounded-full flex items-center justify-center font-black text-white">A</div>
+        <div>
+          <p class="font-bold text-white text-sm">adminpanama</p>
+          <p class="text-gray-500 text-xs">Super Administrator · Full access</p>
+        </div>
+        <span class="ml-auto badge-green text-xs px-2.5 py-1 rounded-full font-semibold">Active</span>
+      </div>
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs text-gray-400 font-medium block mb-1.5">New Password</label>
+          <input type="password" placeholder="Enter new password" autocomplete="new-password" class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500"/>
+        </div>
+        <div>
+          <label class="text-xs text-gray-400 font-medium block mb-1.5">Confirm New Password</label>
+          <input type="password" placeholder="Repeat new password" autocomplete="new-password" class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500"/>
+        </div>
+        <button class="w-full py-2.5 bg-charcoal-300 border border-white/10 text-gray-300 hover:text-white rounded-xl text-sm font-semibold transition-colors">
+          Change Password
+        </button>
+      </div>
+    </div>
+  </div>
+  `
+  return c.html(AdminLayout('Settings', content))
 })
