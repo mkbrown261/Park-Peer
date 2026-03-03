@@ -37,6 +37,7 @@ type Bindings = {
   ADMIN_USERNAME: string
   ADMIN_PASSWORD: string
   ADMIN_TOKEN_SECRET: string
+  MAPBOX_TOKEN: string
 }
 
 export const apiRoutes = new Hono<{ Bindings: Bindings }>()
@@ -58,6 +59,17 @@ apiRoutes.get('/health', (c) => {
       resend:     (env?.RESEND_API_KEY && env.RESEND_API_KEY !== 'PLACEHOLDER_RESEND_KEY') ? 'configured' : 'placeholder',
       twilio:       env?.TWILIO_ACCOUNT_SID ? 'configured' : 'not configured',
     }
+  })
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// MAP CONFIG — returns Mapbox public token safely from env
+// GET /api/map/config
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.get('/map/config', (c) => {
+  return c.json({
+    mapbox_token: c.env?.MAPBOX_TOKEN || '',
+    has_token: !!(c.env?.MAPBOX_TOKEN)
   })
 })
 
@@ -363,62 +375,188 @@ apiRoutes.post('/emails/welcome', async (c) => {
 })
 
 // ════════════════════════════════════════════════════════════════════════════
-// LISTINGS (mock — will migrate to D1 in next phase)
+// LISTINGS — Real D1 data with geo-filtering
+// GET /api/listings?q=&type=&city=&lat=&lng=&radius_km=&min_price=&max_price=&instant=&limit=&offset=
 // ════════════════════════════════════════════════════════════════════════════
-apiRoutes.get('/listings', (c) => {
-  const { q, type, min_price, max_price, limit = '20', offset = '0' } = c.req.query()
+apiRoutes.get('/listings', async (c) => {
+  const {
+    q, type, city, lat, lng,
+    radius_km = '50',
+    min_price, max_price,
+    instant,
+    limit = '50', offset = '0'
+  } = c.req.query()
 
-  const listings = [
-    { id: 1, title: 'Secure Covered Garage', type: 'garage', address: '120 S Michigan Ave, Chicago', lat: 41.8819, lon: -87.6278, price_hourly: 12, price_daily: 55, price_monthly: 320, rating: 4.9, review_count: 142, instant_book: true, features: ['cctv', 'covered', 'ev_charging', 'gated'], max_vehicle: 'suv', available: true },
-    { id: 2, title: 'Private Driveway — Wrigley', type: 'driveway', address: '3614 N Clark St, Chicago', lat: 41.9484, lon: -87.6553, price_hourly: 8, price_daily: 35, price_monthly: 180, rating: 4.8, review_count: 89, instant_book: false, features: ['gated', 'lighting'], max_vehicle: 'sedan', available: true },
-    { id: 3, title: "O'Hare Airport Long-Term", type: 'lot', address: 'Near ORD Terminal 1, Chicago', lat: 41.9742, lon: -87.9073, price_hourly: 14, price_daily: 45, price_monthly: 280, rating: 4.7, review_count: 311, instant_book: true, features: ['shuttle', 'cctv', '24hr'], max_vehicle: 'suv', available: true },
-    { id: 4, title: 'Loop District Open Lot', type: 'lot', address: '55 W Monroe St, Chicago', lat: 41.8806, lon: -87.6298, price_hourly: 6, price_daily: 28, price_monthly: 150, rating: 4.5, review_count: 67, instant_book: true, features: ['lighting'], max_vehicle: 'compact', available: true },
-    { id: 5, title: 'Navy Pier Gated Spot', type: 'covered', address: '600 E Grand Ave, Chicago', lat: 41.8917, lon: -87.6054, price_hourly: 10, price_daily: 42, price_monthly: 240, rating: 4.9, review_count: 203, instant_book: false, features: ['gated', 'covered', 'lighting'], max_vehicle: 'suv', available: true },
-  ]
+  const db = c.env?.DB
+  if (!db) {
+    // Fallback static data if D1 not bound
+    return c.json({ data: [], total: 0, limit: 50, offset: 0, has_more: false, source: 'fallback' })
+  }
 
-  let filtered = listings
-  if (type && type !== 'all') filtered = filtered.filter(l => l.type === type)
-  if (min_price) filtered = filtered.filter(l => l.price_hourly >= parseInt(min_price))
-  if (max_price) filtered = filtered.filter(l => l.price_hourly <= parseInt(max_price))
-  if (q) filtered = filtered.filter(l => l.title.toLowerCase().includes(q.toLowerCase()) || l.address.toLowerCase().includes(q.toLowerCase()))
+  try {
+    let where: string[] = ["l.status = 'active'"]
+    const params: any[] = []
 
-  const start = parseInt(offset)
-  const end   = start + parseInt(limit)
-  return c.json({ data: filtered.slice(start, end), total: filtered.length, limit: parseInt(limit), offset: start, has_more: end < filtered.length })
+    if (type && type !== 'all') { where.push('l.type = ?'); params.push(type) }
+    if (city) { where.push("(l.city LIKE ? OR l.state LIKE ?)"); params.push(`%${city}%`); params.push(`%${city}%`) }
+    if (min_price) { where.push('l.rate_hourly >= ?'); params.push(parseFloat(min_price)) }
+    if (max_price) { where.push('l.rate_hourly <= ?'); params.push(parseFloat(max_price)) }
+    if (instant === '1' || instant === 'true') { where.push('l.instant_book = 1') }
+    if (q) {
+      where.push("(l.title LIKE ? OR l.address LIKE ? OR l.city LIKE ? OR l.description LIKE ?)")
+      const ql = `%${q}%`
+      params.push(ql, ql, ql, ql)
+    }
+
+    // Geo-radius filter using Haversine approximation (SQLite-friendly)
+    if (lat && lng) {
+      const latF = parseFloat(lat)
+      const lngF = parseFloat(lng)
+      const km   = parseFloat(radius_km)
+      const latDelta = km / 111.0
+      const lngDelta = km / (111.0 * Math.cos(latF * Math.PI / 180))
+      where.push('l.lat BETWEEN ? AND ? AND l.lng BETWEEN ? AND ?')
+      params.push(latF - latDelta, latF + latDelta, lngF - lngDelta, lngF + lngDelta)
+    }
+
+    const whereClause = where.length ? 'WHERE ' + where.join(' AND ') : ''
+    const lim  = Math.min(100, parseInt(limit))
+    const off  = parseInt(offset)
+
+    const countQ  = await db.prepare(`SELECT COUNT(*) as total FROM listings l ${whereClause}`).bind(...params).first<{total:number}>()
+    const total   = countQ?.total ?? 0
+
+    const rows = await db.prepare(`
+      SELECT l.id, l.title, l.type, l.address, l.city, l.state, l.zip,
+             l.lat, l.lng,
+             l.rate_hourly, l.rate_daily, l.rate_monthly,
+             l.max_vehicle_size, l.amenities, l.instant_book,
+             l.avg_rating, l.review_count, l.status,
+             u.full_name as host_name, u.id as host_id
+      FROM listings l
+      LEFT JOIN users u ON l.host_id = u.id
+      ${whereClause}
+      ORDER BY l.avg_rating DESC, l.review_count DESC
+      LIMIT ? OFFSET ?
+    `).bind(...params, lim, off).all()
+
+    const data = (rows.results || []).map((r: any) => {
+      let amenities: string[] = []
+      try { amenities = JSON.parse(r.amenities || '[]') } catch {}
+      return {
+        id: r.id,
+        title: r.title,
+        type: r.type,
+        address: r.address,
+        city: r.city,
+        state: r.state,
+        lat: r.lat,
+        lng: r.lng,
+        price_hourly: r.rate_hourly,
+        price_daily: r.rate_daily,
+        price_monthly: r.rate_monthly,
+        max_vehicle: r.max_vehicle_size,
+        amenities,
+        instant_book: r.instant_book === 1,
+        rating: r.avg_rating,
+        review_count: r.review_count,
+        host: { id: r.host_id, name: r.host_name },
+        available: true
+      }
+    })
+
+    return c.json({ data, total, limit: lim, offset: off, has_more: off + lim < total, source: 'd1' })
+  } catch (e: any) {
+    console.error('[API] listings error:', e.message)
+    return c.json({ error: 'Failed to fetch listings', detail: e.message }, 500)
+  }
 })
 
-apiRoutes.get('/listings/:id', (c) => {
+// GET /api/listings/:id — full listing detail from D1
+apiRoutes.get('/listings/:id', async (c) => {
   const id = parseInt(c.req.param('id'))
-  return c.json({
-    id,
-    title: 'Secure Covered Garage',
-    type: 'garage',
-    address: '120 S Michigan Ave, Chicago, IL 60603',
-    lat: 41.8819, lon: -87.6278,
-    price_hourly: 12, price_daily: 55, price_monthly: 320,
-    rating: 4.9, review_count: 142,
-    instant_book: true,
-    host: { id: 'h1', name: 'Jennifer K.', rating: 4.95, response_time: '< 1 hour', joined: '2023-01-15' },
-    features: ['cctv', 'covered', 'ev_charging', 'gated', '24hr', 'lighting'],
-    max_vehicle: 'suv',
-    cancellation_policy: 'free_1hr',
-    description: 'Premium covered garage space in the heart of downtown Chicago.',
-    photos: [],
-    available: true
-  })
+  const db = c.env?.DB
+
+  if (!db) {
+    return c.json({ error: 'Database not available' }, 503)
+  }
+
+  try {
+    const row = await db.prepare(`
+      SELECT l.*, u.full_name as host_name, u.id as host_id
+      FROM listings l
+      LEFT JOIN users u ON l.host_id = u.id
+      WHERE l.id = ?
+    `).bind(id).first<any>()
+
+    if (!row) return c.json({ error: 'Listing not found' }, 404)
+
+    let amenities: string[] = []
+    try { amenities = JSON.parse(row.amenities || '[]') } catch {}
+
+    return c.json({
+      id: row.id,
+      title: row.title,
+      type: row.type,
+      description: row.description,
+      address: row.address,
+      city: row.city,
+      state: row.state,
+      zip: row.zip,
+      lat: row.lat,
+      lng: row.lng,
+      price_hourly: row.rate_hourly,
+      price_daily: row.rate_daily,
+      price_monthly: row.rate_monthly,
+      max_vehicle: row.max_vehicle_size,
+      amenities,
+      instant_book: row.instant_book === 1,
+      rating: row.avg_rating,
+      review_count: row.review_count,
+      host: {
+        id: row.host_id,
+        name: row.host_name,
+        response_time: '< 1 hour'
+      },
+      cancellation_policy: 'free_1hr',
+      photos: [],
+      available: row.status === 'active'
+    })
+  } catch (e: any) {
+    console.error('[API] listing/:id error:', e.message)
+    return c.json({ error: 'Failed to fetch listing' }, 500)
+  }
 })
 
-apiRoutes.get('/listings/:id/availability', (c) => {
+apiRoutes.get('/listings/:id/availability', async (c) => {
   const id = c.req.param('id')
-  return c.json({
-    listing_id: id,
-    available_slots: [
-      { date: '2026-03-10', start: '08:00', end: '18:00', available: true },
-      { date: '2026-03-11', start: '06:00', end: '22:00', available: true },
-      { date: '2026-03-12', start: '09:00', end: '17:00', available: true },
-    ],
-    unavailable_dates: ['2026-03-07', '2026-03-08', '2026-03-14']
-  })
+  const db = c.env?.DB
+
+  // Get blocked dates from availability_blocks
+  let unavailable_dates: string[] = []
+  if (db) {
+    try {
+      const blocks = await db.prepare(`
+        SELECT date(start_time) as d FROM availability_blocks
+        WHERE listing_id = ? AND end_time > datetime('now')
+      `).bind(id).all<{d:string}>()
+      unavailable_dates = (blocks.results || []).map((b: any) => b.d)
+    } catch {}
+  }
+
+  // Generate next 7 available dates
+  const available_slots = []
+  const today = new Date()
+  for (let i = 1; i <= 7; i++) {
+    const d = new Date(today)
+    d.setDate(today.getDate() + i)
+    const ds = d.toISOString().split('T')[0]
+    if (!unavailable_dates.includes(ds)) {
+      available_slots.push({ date: ds, start: '06:00', end: '22:00', available: true })
+    }
+  }
+
+  return c.json({ listing_id: id, available_slots, unavailable_dates })
 })
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -490,14 +628,35 @@ apiRoutes.get('/estimate-earnings', (c) => {
 })
 
 // ════════════════════════════════════════════════════════════════════════════
-// ADMIN STATS
+// ADMIN STATS — real D1 counts
 // ════════════════════════════════════════════════════════════════════════════
-apiRoutes.get('/admin/stats', (c) => {
-  return c.json({
-    revenue_mtd: 0, bookings_mtd: 0, active_users: 0,
-    platform_fees_mtd: 0, active_listings: 0, pending_listings: 0,
-    open_disputes: 0, fraud_alerts: 0, cities: 0, uptime: 99.99
-  })
+apiRoutes.get('/admin/stats', async (c) => {
+  const db = c.env?.DB
+  if (!db) {
+    return c.json({ revenue_mtd: 0, bookings_mtd: 0, active_users: 0, platform_fees_mtd: 0, active_listings: 0, pending_listings: 0, open_disputes: 0, fraud_alerts: 0, cities: 0, uptime: 99.99 })
+  }
+  try {
+    const [users, listings, pending, disputes] = await Promise.all([
+      db.prepare("SELECT COUNT(*) as n FROM users WHERE status='active'").first<{n:number}>(),
+      db.prepare("SELECT COUNT(*) as n FROM listings WHERE status='active'").first<{n:number}>(),
+      db.prepare("SELECT COUNT(*) as n FROM listings WHERE status='pending'").first<{n:number}>(),
+      db.prepare("SELECT COUNT(*) as n FROM disputes WHERE status='open'").first<{n:number}>(),
+    ])
+    const cities = await db.prepare("SELECT COUNT(DISTINCT city) as n FROM listings WHERE status='active'").first<{n:number}>()
+    return c.json({
+      revenue_mtd: 0, bookings_mtd: 0,
+      active_users: users?.n ?? 0,
+      platform_fees_mtd: 0,
+      active_listings: listings?.n ?? 0,
+      pending_listings: pending?.n ?? 0,
+      open_disputes: disputes?.n ?? 0,
+      fraud_alerts: 0,
+      cities: cities?.n ?? 0,
+      uptime: 99.99
+    })
+  } catch {
+    return c.json({ revenue_mtd: 0, bookings_mtd: 0, active_users: 0, platform_fees_mtd: 0, active_listings: 0, pending_listings: 0, open_disputes: 0, fraud_alerts: 0, cities: 0, uptime: 99.99 })
+  }
 })
 
 // ════════════════════════════════════════════════════════════════════════════
