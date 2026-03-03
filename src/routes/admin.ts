@@ -33,7 +33,7 @@ const StatCard = (label: string, value: string, icon: string, colorClass: string
 // ════════════════════════════════════════════════════════════════════════════
 // GET /admin  — Dashboard
 // ════════════════════════════════════════════════════════════════════════════
-adminPanel.get('/', (c) => {
+adminPanel.get('/', (c: any) => {
   const now = new Date()
   const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
 
@@ -114,20 +114,24 @@ adminPanel.get('/', (c) => {
     <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-5">
       <h3 class="font-bold text-white text-sm mb-4">Service Health</h3>
       <div class="space-y-2.5">
-        ${[
-          { name: 'Cloudflare Workers (API)', ok: true },
-          { name: 'Cloudflare Pages (Frontend)', ok: true },
-          { name: 'D1 Database', ok: true },
-          { name: 'Stripe Payments', ok: false, note: 'Not yet configured' },
-          { name: 'SendGrid Email', ok: false, note: 'Not yet configured' },
-          { name: 'Twilio SMS', ok: false, note: 'Not yet configured' },
-        ].map(s => `
+        ${((): string => {
+          const env = c.env || {}
+          const services = [
+            { name: 'Cloudflare Workers (API)',    ok: true },
+            { name: 'Cloudflare Pages (Frontend)', ok: true },
+            { name: 'D1 Database',                 ok: !!(env.DB),                                                              note: env.DB ? '' : 'Not bound' },
+            { name: 'R2 Media Storage',            ok: !!(env.MEDIA),                                                           note: env.MEDIA ? '' : 'Not bound' },
+            { name: 'Stripe Payments',             ok: !!(env.STRIPE_SECRET_KEY),                                               note: env.STRIPE_SECRET_KEY ? '' : 'Key not configured' },
+            { name: 'SendGrid Email',              ok: !!(env.SENDGRID_API_KEY && env.SENDGRID_API_KEY !== 'PLACEHOLDER_SENDGRID_KEY'), note: (!env.SENDGRID_API_KEY || env.SENDGRID_API_KEY === 'PLACEHOLDER_SENDGRID_KEY') ? 'Key not configured' : '' },
+            { name: 'Twilio SMS',                  ok: !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN),                     note: !(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN) ? 'Not configured' : '' },
+          ]
+          return services.map(s => `
           <div class="flex items-center gap-3 p-2.5 bg-charcoal-200 rounded-xl">
-            <div class="w-2 h-2 ${s.ok ? 'bg-green-500 pulse-dot' : 'bg-gray-600'} rounded-full flex-shrink-0"></div>
+            <div class="w-2 h-2 ${s.ok ? 'bg-green-500 pulse-dot' : 'bg-red-500'} rounded-full flex-shrink-0"></div>
             <span class="text-white text-xs font-medium flex-1">${s.name}</span>
-            <span class="text-xs ${s.ok ? 'text-green-400' : 'text-gray-500'}">${s.ok ? 'Operational' : (s.note || 'Offline')}</span>
-          </div>
-        `).join('')}
+            <span class="text-xs ${s.ok ? 'text-green-400' : 'text-red-400'}">${s.ok ? 'Operational' : (s.note || 'Offline')}</span>
+          </div>`).join('')
+        })()}
       </div>
     </div>
   </div>
@@ -514,7 +518,7 @@ adminPanel.get('/revenue', (c) => {
 // ════════════════════════════════════════════════════════════════════════════
 // GET /admin/settings
 // ════════════════════════════════════════════════════════════════════════════
-adminPanel.get('/settings', (c) => {
+adminPanel.get('/settings', (c: any) => {
   const content = `
   <div class="mb-6">
     <p class="text-gray-400 text-sm">Platform-wide configuration and integrations</p>
@@ -546,19 +550,65 @@ adminPanel.get('/settings', (c) => {
       </div>
     </div>
 
-    <!-- Integrations status -->
+    <!-- Integrations status — read live from env -->
     <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-6">
       <h3 class="font-bold text-white mb-5 flex items-center gap-2">
         <i class="fas fa-plug text-indigo-400"></i> Third-Party Integrations
       </h3>
-      <div class="space-y-3">
-        ${[
-          { name: 'Stripe', desc: 'Payment processing', icon: 'fa-credit-card', connected: false, envKey: 'STRIPE_SECRET_KEY' },
-          { name: 'SendGrid', desc: 'Email notifications', icon: 'fa-envelope', connected: false, envKey: 'SENDGRID_API_KEY' },
-          { name: 'Twilio', desc: 'SMS notifications', icon: 'fa-mobile-screen', connected: false, envKey: 'TWILIO_AUTH_TOKEN' },
-          { name: 'Mapbox', desc: 'Interactive maps', icon: 'fa-map', connected: false, envKey: 'MAPBOX_TOKEN' },
-          { name: 'Cloudflare D1', desc: 'Database', icon: 'fa-database', connected: true, envKey: '' },
-        ].map(s => `
+      <div class="space-y-3" id="integrations-list">
+        ${((): string => {
+          const env = c.env || {}
+          const integrations = [
+            {
+              name: 'Stripe',
+              desc: 'Payment processing',
+              icon: 'fa-credit-card',
+              connected: !!(env.STRIPE_SECRET_KEY),
+              label: env.STRIPE_SECRET_KEY ? 'Connected' : 'Not Configured',
+              note: env.STRIPE_SECRET_KEY ? '' : 'STRIPE_SECRET_KEY not set'
+            },
+            {
+              name: 'SendGrid',
+              desc: 'Email notifications',
+              icon: 'fa-envelope',
+              connected: !!(env.SENDGRID_API_KEY && env.SENDGRID_API_KEY !== 'PLACEHOLDER_SENDGRID_KEY'),
+              label: (env.SENDGRID_API_KEY && env.SENDGRID_API_KEY !== 'PLACEHOLDER_SENDGRID_KEY') ? 'Connected' : 'Not Configured',
+              note: (!env.SENDGRID_API_KEY || env.SENDGRID_API_KEY === 'PLACEHOLDER_SENDGRID_KEY') ? 'SENDGRID_API_KEY not set' : ''
+            },
+            {
+              name: 'Twilio',
+              desc: 'SMS notifications',
+              icon: 'fa-mobile-screen',
+              connected: !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN),
+              label: (env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN) ? 'Connected' : 'Not Configured',
+              note: !(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN) ? 'TWILIO credentials not set' : ''
+            },
+            {
+              name: 'Mapbox',
+              desc: 'Interactive maps',
+              icon: 'fa-map',
+              connected: !!(env.MAPBOX_TOKEN),
+              label: env.MAPBOX_TOKEN ? 'Connected' : 'Not Configured',
+              note: !env.MAPBOX_TOKEN ? 'MAPBOX_TOKEN not set' : ''
+            },
+            {
+              name: 'Cloudflare D1',
+              desc: 'Database',
+              icon: 'fa-database',
+              connected: !!(env.DB),
+              label: env.DB ? 'Connected' : 'Not Bound',
+              note: ''
+            },
+            {
+              name: 'Cloudflare R2',
+              desc: 'Media storage',
+              icon: 'fa-bucket',
+              connected: !!(env.MEDIA),
+              label: env.MEDIA ? 'Connected' : 'Not Bound',
+              note: ''
+            },
+          ]
+          return integrations.map(s => `
           <div class="flex items-center gap-3 p-3.5 bg-charcoal-200 rounded-xl border ${s.connected ? 'border-green-500/20' : 'border-white/5'}">
             <div class="w-9 h-9 ${s.connected ? 'bg-green-500/10' : 'bg-charcoal-300'} rounded-xl flex items-center justify-center flex-shrink-0">
               <i class="fas ${s.icon} ${s.connected ? 'text-green-400' : 'text-gray-600'} text-sm"></i>
@@ -566,13 +616,13 @@ adminPanel.get('/settings', (c) => {
             <div class="flex-1 min-w-0">
               <p class="text-white text-sm font-semibold">${s.name}</p>
               <p class="text-gray-500 text-xs">${s.desc}</p>
-              ${!s.connected && s.envKey ? `<p class="text-gray-700 text-xs font-mono mt-0.5">Set <code>${s.envKey}</code> in Cloudflare Secrets</p>` : ''}
+              ${s.note ? `<p class="text-gray-600 text-xs font-mono mt-0.5">${s.note}</p>` : ''}
             </div>
-            <span class="text-xs px-2.5 py-1 rounded-full font-semibold ${s.connected ? 'badge-green' : 'badge-gray'} flex-shrink-0">
-              ${s.connected ? 'Connected' : 'Not Set Up'}
+            <span class="text-xs px-2.5 py-1 rounded-full font-semibold flex-shrink-0 ${s.connected ? 'badge-green' : 'badge-gray'}">
+              ${s.label}
             </span>
-          </div>
-        `).join('')}
+          </div>`).join('')
+        })()}
       </div>
     </div>
 
