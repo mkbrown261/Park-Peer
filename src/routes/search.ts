@@ -403,8 +403,36 @@ searchPage.get('/', (c) => {
   // MAP INIT
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   function initMap() {
-    if (typeof mapboxgl === 'undefined') {
-      document.getElementById('map-loading').innerHTML = '<div class="text-center p-8"><i class="fas fa-map-marked-alt text-4xl text-gray-600 mb-3"></i><p class="text-gray-400">Map unavailable — add MAPBOX_TOKEN</p></div>'
+    if (typeof mapboxgl === 'undefined' || !MAPBOX_TOKEN) {
+      // Graceful fallback: show styled static map visual with real pins
+      const loadingEl = document.getElementById('map-loading')
+      loadingEl.innerHTML = \`
+        <div class="absolute inset-0 overflow-hidden" id="fallback-map"
+          style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 30%, #0f3460 60%, #1a1a2e 100%);">
+          <svg class="absolute inset-0 w-full h-full opacity-10" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <pattern id="grid" width="80" height="80" patternUnits="userSpaceOnUse">
+                <path d="M 80 0 L 0 0 0 80" fill="none" stroke="#5B2EFF" stroke-width="1"/>
+              </pattern>
+              <pattern id="roads" width="240" height="240" patternUnits="userSpaceOnUse">
+                <rect width="240" height="25" fill="#2a2a3a" opacity="0.9"/>
+                <rect y="80" width="240" height="25" fill="#2a2a3a" opacity="0.9"/>
+                <rect y="160" width="240" height="25" fill="#2a2a3a" opacity="0.9"/>
+                <rect x="0" width="25" height="240" fill="#2a2a3a" opacity="0.9"/>
+                <rect x="80" width="25" height="240" fill="#2a2a3a" opacity="0.9"/>
+                <rect x="160" width="25" height="240" fill="#2a2a3a" opacity="0.9"/>
+              </pattern>
+            </defs>
+            <rect width="100%" height="100%" fill="url(#roads)"/>
+            <rect width="100%" height="100%" fill="url(#grid)"/>
+          </svg>
+          <div id="fallback-pins" class="absolute inset-0"></div>
+          <div class="absolute bottom-4 left-4 glass rounded-xl px-3 py-2 text-xs text-gray-400">
+            <i class="fas fa-info-circle text-indigo-400 mr-1"></i>
+            Add MAPBOX_TOKEN to enable interactive map
+          </div>
+        </div>
+      \`
       return
     }
 
@@ -582,7 +610,12 @@ searchPage.get('/', (c) => {
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   function renderMapPins(listings) {
     clearMarkers()
-    if (!map || typeof mapboxgl === 'undefined') return
+
+    // No real Mapbox map? Use fallback visual pins
+    if (!map || typeof mapboxgl === 'undefined' || !MAPBOX_TOKEN) {
+      renderFallbackPins(listings)
+      return
+    }
 
     listings.forEach(l => {
       if (!l.lat || !l.lng) return
@@ -615,10 +648,54 @@ searchPage.get('/', (c) => {
     }
   }
 
+  function renderFallbackPins(listings) {
+    const container = document.getElementById('fallback-pins')
+    if (!container) return
+    container.innerHTML = ''
+
+    const validListings = listings.filter(l => l.lat && l.lng)
+    if (validListings.length === 0) return
+
+    // Project lat/lng to x/y percentage within bounding box
+    const lats = validListings.map(l => l.lat)
+    const lngs = validListings.map(l => l.lng)
+    const minLat = Math.min(...lats), maxLat = Math.max(...lats)
+    const minLng = Math.min(...lngs), maxLng = Math.max(...lngs)
+    const latRange = Math.max(maxLat - minLat, 0.05)
+    const lngRange = Math.max(maxLng - minLng, 0.05)
+
+    validListings.forEach((l, i) => {
+      const xPct = 10 + ((l.lng - minLng) / lngRange) * 80
+      const yPct = 10 + ((maxLat - l.lat) / latRange) * 80
+
+      const pin = document.createElement('button')
+      pin.className = 'park-pin absolute'
+      pin.dataset.id = l.id
+      pin.style.cssText = \`left:\${xPct.toFixed(1)}%;top:\${yPct.toFixed(1)}%;transform:translate(-50%,-100%)\`
+      pin.textContent = '$' + (l.price_hourly || 0).toFixed(0)
+      pin.addEventListener('click', () => {
+        // Scroll to card in left panel
+        const card = document.querySelector('[data-id="' + l.id + '"].listing-card')
+        if (card) {
+          card.classList.add('highlighted')
+          card.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+          setTimeout(() => card.classList.remove('highlighted'), 2000)
+        }
+      })
+      container.appendChild(pin)
+    })
+
+    // Update spot count
+    document.getElementById('map-spot-count').textContent = validListings.length
+  }
+
   function clearMarkers() {
     activeMarkers.forEach(m => m.marker.remove())
     activeMarkers = []
     if (activePopup) { activePopup.remove(); activePopup = null }
+    // Clear fallback pins too
+    const fb = document.getElementById('fallback-pins')
+    if (fb) fb.innerHTML = ''
   }
 
   function highlightPin(id) {
