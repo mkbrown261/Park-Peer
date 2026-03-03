@@ -10,6 +10,7 @@
   // ── D1 SQLite Database ────────────────────────────────────────────────────
   // Created: npx wrangler d1 create parkpeer-production
   // Region: ENAM (Eastern North America)
+  // Migrations: migrations/0001_initial_schema.sql (8 tables)
   "d1_databases": [
     {
       "binding": "DB",
@@ -19,21 +20,12 @@
   ],
 
   // ── R2 Object Storage ─────────────────────────────────────────────────────
-  // ACTION REQUIRED: Enable R2 at https://dash.cloudflare.com → R2 → Enable
-  // Then run: npx wrangler r2 bucket create parkpeer-media
-  // Uncomment below after R2 is enabled:
-  // "r2_buckets": [
-  //   {
-  //     "binding": "MEDIA",
-  //     "bucket_name": "parkpeer-media"
-  //   }
-  // ],
-
-  // ── KV Namespace (sessions / cache) ───────────────────────────────────────
-  // "kv_namespaces": [
-  //   {
-  //     "binding": "KV",
-  //     "id": "your-kv-id-here"
-  //   }
-  // ]
+  // Created: npx wrangler r2 bucket create parkpeer-media
+  // Used for: listing photos, dispute evidence, user avatars
+  "r2_buckets": [
+    {
+      "binding": "MEDIA",
+      "bucket_name": "parkpeer-media"
+    }
+  ]
 }
