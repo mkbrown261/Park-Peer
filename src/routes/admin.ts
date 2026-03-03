@@ -122,7 +122,7 @@ adminPanel.get('/', (c: any) => {
             { name: 'D1 Database',                 ok: !!(env.DB),                                                              note: env.DB ? '' : 'Not bound' },
             { name: 'R2 Media Storage',            ok: !!(env.MEDIA),                                                           note: env.MEDIA ? '' : 'Not bound' },
             { name: 'Stripe Payments',             ok: !!(env.STRIPE_SECRET_KEY),                                               note: env.STRIPE_SECRET_KEY ? '' : 'Key not configured' },
-            { name: 'SendGrid Email',              ok: !!(env.SENDGRID_API_KEY && env.SENDGRID_API_KEY !== 'PLACEHOLDER_SENDGRID_KEY'), note: (!env.SENDGRID_API_KEY || env.SENDGRID_API_KEY === 'PLACEHOLDER_SENDGRID_KEY') ? 'Key not configured' : '' },
+            { name: 'Resend Email',              ok: !!(env.RESEND_API_KEY && env.RESEND_API_KEY !== 'PLACEHOLDER_RESEND_KEY'), note: (!env.RESEND_API_KEY || env.RESEND_API_KEY === 'PLACEHOLDER_RESEND_KEY') ? 'Key not configured' : '' },
             { name: 'Twilio SMS',                  ok: !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN),                     note: !(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN) ? 'Not configured' : '' },
           ]
           return services.map(s => `
@@ -571,9 +571,9 @@ adminPanel.get('/settings', (c: any) => {
               name: 'SendGrid',
               desc: 'Email notifications',
               icon: 'fa-envelope',
-              connected: !!(env.SENDGRID_API_KEY && env.SENDGRID_API_KEY !== 'PLACEHOLDER_SENDGRID_KEY'),
-              label: (env.SENDGRID_API_KEY && env.SENDGRID_API_KEY !== 'PLACEHOLDER_SENDGRID_KEY') ? 'Connected' : 'Not Configured',
-              note: (!env.SENDGRID_API_KEY || env.SENDGRID_API_KEY === 'PLACEHOLDER_SENDGRID_KEY') ? 'SENDGRID_API_KEY not set' : ''
+              connected: !!(env.RESEND_API_KEY && env.RESEND_API_KEY !== 'PLACEHOLDER_RESEND_KEY'),
+              label: (env.RESEND_API_KEY && env.RESEND_API_KEY !== 'PLACEHOLDER_RESEND_KEY') ? 'Connected' : 'Not Configured',
+              note: (!env.RESEND_API_KEY || env.RESEND_API_KEY === 'PLACEHOLDER_RESEND_KEY') ? 'RESEND_API_KEY not set' : ''
             },
             {
               name: 'Twilio',

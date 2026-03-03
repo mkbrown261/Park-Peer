@@ -1,11 +1,11 @@
-// ─── SendGrid Email Service ───────────────────────────────────────────────────
-// Uses SendGrid Web API v3 directly — no SDK, fully Cloudflare Workers compatible
-// All sending is server-side only. API key never reaches the browser.
+// ─── Resend Email Service ─────────────────────────────────────────────────────
+// Uses Resend REST API — no SDK, fully Cloudflare Workers compatible
+// Replaces SendGrid. All sending is server-side only.
 
-const SENDGRID_API = 'https://api.sendgrid.com/v3/mail/send'
+const RESEND_API = 'https://api.resend.com/emails'
 
 type Env = {
-  SENDGRID_API_KEY: string
+  RESEND_API_KEY: string
   FROM_EMAIL: string
 }
 
@@ -19,48 +19,46 @@ interface EmailPayload {
 
 // ── Core send function ────────────────────────────────────────────────────────
 async function sendEmail(env: Env, payload: EmailPayload): Promise<boolean> {
-  // If no real key configured yet, log and skip gracefully
-  if (!env.SENDGRID_API_KEY || env.SENDGRID_API_KEY === 'PLACEHOLDER_SENDGRID_KEY') {
-    console.log(`[SendGrid SKIP] Would send "${payload.subject}" to ${payload.to}`)
+  if (!env.RESEND_API_KEY) {
+    console.log(`[Resend SKIP] Would send "${payload.subject}" to ${payload.to}`)
     return true
   }
 
-  const fromEmail = env.FROM_EMAIL || 'noreply@parkpeer.pages.dev'
-  const fromName = 'ParkPeer'
+  const fromEmail = env.FROM_EMAIL || 'onboarding@resend.dev'
+  const fromName  = 'ParkPeer'
 
   const body = {
-    personalizations: [{ to: [{ email: payload.to, name: payload.toName || payload.to }] }],
-    from: { email: fromEmail, name: fromName },
-    reply_to: { email: fromEmail, name: fromName },
+    from:    `${fromName} <${fromEmail}>`,
+    to:      [payload.toName ? `${payload.toName} <${payload.to}>` : payload.to],
     subject: payload.subject,
-    content: [
-      { type: 'text/plain', value: payload.textContent || payload.subject },
-      { type: 'text/html',  value: payload.htmlContent }
-    ]
+    html:    payload.htmlContent,
+    text:    payload.textContent || payload.subject
   }
 
   try {
-    const res = await fetch(SENDGRID_API, {
-      method: 'POST',
+    const res = await fetch(RESEND_API, {
+      method:  'POST',
       headers: {
-        Authorization: `Bearer ${env.SENDGRID_API_KEY}`,
+        Authorization:  `Bearer ${env.RESEND_API_KEY}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify(body)
     })
-    if (res.status >= 400) {
-      const err = await res.text()
-      console.error('[SendGrid ERROR]', res.status, err)
+
+    const data = await res.json() as any
+    if (!res.ok) {
+      console.error('[Resend ERROR]', res.status, data)
       return false
     }
+    console.log('[Resend OK] id:', data.id, '→', payload.to)
     return true
   } catch (e) {
-    console.error('[SendGrid EXCEPTION]', e)
+    console.error('[Resend EXCEPTION]', e)
     return false
   }
 }
 
-// ── Shared email wrapper / footer ─────────────────────────────────────────────
+// ── Shared branded email wrapper ──────────────────────────────────────────────
 function emailWrapper(content: string): string {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -77,10 +75,7 @@ function emailWrapper(content: string): string {
         <!-- Header -->
         <tr>
           <td style="background:linear-gradient(135deg,#5B2EFF,#3a12d4);padding:32px 40px;border-radius:16px 16px 0 0;text-align:center;">
-            <div style="display:inline-flex;align-items:center;gap:12px;">
-              <div style="width:44px;height:44px;background:rgba(255,255,255,0.15);border-radius:12px;display:inline-block;text-align:center;line-height:44px;font-size:20px;">🅿️</div>
-              <span style="font-size:26px;font-weight:900;color:#fff;letter-spacing:-0.5px;">Park<span style="color:#C6FF00;">Peer</span></span>
-            </div>
+            <span style="font-size:28px;font-weight:900;color:#fff;letter-spacing:-0.5px;">🅿️ Park<span style="color:#C6FF00;">Peer</span></span>
           </td>
         </tr>
 
@@ -103,7 +98,11 @@ function emailWrapper(content: string): string {
 </html>`
 }
 
-// ── 1. Booking Confirmation (to Driver) ───────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+// EMAIL TEMPLATES
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── 1. Booking Confirmation → Driver ─────────────────────────────────────────
 export async function sendBookingConfirmation(env: Env, data: {
   driverEmail: string
   driverName: string
@@ -133,14 +132,13 @@ export async function sendBookingConfirmation(env: Env, data: {
             <td style="padding:6px 0;color:#121212;font-size:13px;font-weight:600;">${data.endTime}</td></tr>
         <tr><td style="padding:6px 0;color:#6b7280;font-size:13px;">Vehicle</td>
             <td style="padding:6px 0;color:#121212;font-size:13px;">${data.vehiclePlate}</td></tr>
-        <tr><td style="padding:6px 0;color:#6b7280;font-size:13px;">Total Paid</td>
-            <td style="padding:6px 0;color:#5B2EFF;font-size:16px;font-weight:800;">$${data.totalCharged.toFixed(2)}</td></tr>
+        <tr><td style="padding:8px 0 0;color:#6b7280;font-size:13px;border-top:1px solid #e5e7eb;">Total Paid</td>
+            <td style="padding:8px 0 0;color:#5B2EFF;font-size:16px;font-weight:800;border-top:1px solid #e5e7eb;">$${data.totalCharged.toFixed(2)}</td></tr>
       </table>
     </div>
 
     <a href="https://parkpeer.pages.dev/dashboard" style="display:inline-block;background:linear-gradient(135deg,#5B2EFF,#4a20f0);color:#fff;font-weight:700;font-size:14px;padding:14px 28px;border-radius:10px;text-decoration:none;">View My Booking →</a>
-
-    <p style="color:#9ca3af;font-size:13px;margin-top:24px;">Need help? Reply to this email or visit your dashboard to manage your booking.</p>
+    <p style="color:#9ca3af;font-size:13px;margin-top:24px;">Need help? Visit your dashboard to manage your booking.</p>
   `)
 
   return sendEmail(env, {
@@ -152,7 +150,7 @@ export async function sendBookingConfirmation(env: Env, data: {
   })
 }
 
-// ── 2. New Booking Alert (to Host) ────────────────────────────────────────────
+// ── 2. New Booking Alert → Host ───────────────────────────────────────────────
 export async function sendHostBookingAlert(env: Env, data: {
   hostEmail: string
   hostName: string
@@ -179,8 +177,8 @@ export async function sendHostBookingAlert(env: Env, data: {
             <td style="padding:6px 0;color:#121212;font-size:13px;font-weight:600;">${data.startTime}</td></tr>
         <tr><td style="padding:6px 0;color:#6b7280;font-size:13px;">Check-out</td>
             <td style="padding:6px 0;color:#121212;font-size:13px;font-weight:600;">${data.endTime}</td></tr>
-        <tr><td style="padding:6px 0;color:#6b7280;font-size:13px;">Your Payout</td>
-            <td style="padding:6px 0;color:#16a34a;font-size:16px;font-weight:800;">$${data.hostPayout.toFixed(2)}</td></tr>
+        <tr><td style="padding:8px 0 0;color:#6b7280;font-size:13px;border-top:1px solid #e5e7eb;">Your Payout</td>
+            <td style="padding:8px 0 0;color:#16a34a;font-size:16px;font-weight:800;border-top:1px solid #e5e7eb;">$${data.hostPayout.toFixed(2)}</td></tr>
       </table>
     </div>
 
@@ -196,7 +194,7 @@ export async function sendHostBookingAlert(env: Env, data: {
   })
 }
 
-// ── 3. Booking Cancellation ───────────────────────────────────────────────────
+// ── 3. Cancellation ───────────────────────────────────────────────────────────
 export async function sendCancellationEmail(env: Env, data: {
   toEmail: string
   toName: string
@@ -207,17 +205,16 @@ export async function sendCancellationEmail(env: Env, data: {
 }): Promise<boolean> {
   const html = emailWrapper(`
     <h2 style="color:#121212;font-size:22px;font-weight:800;margin:0 0 8px;">❌ Booking Cancelled</h2>
-    <p style="color:#6b7280;font-size:15px;margin:0 0 28px;">Booking #PP-${String(data.bookingId).padStart(6,'0')} for <strong>${data.listingTitle}</strong> has been cancelled by the ${data.cancelledBy}.</p>
+    <p style="color:#6b7280;font-size:15px;margin:0 0 28px;">Booking <strong>#PP-${String(data.bookingId).padStart(6,'0')}</strong> for <strong>${data.listingTitle}</strong> has been cancelled by the ${data.cancelledBy}.</p>
     ${data.refundAmount > 0 ? `
     <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;padding:20px;margin-bottom:24px;">
-      <p style="color:#15803d;font-weight:700;font-size:15px;margin:0;">💚 Refund of <strong>$${data.refundAmount.toFixed(2)}</strong> will be returned to your original payment method within 5–10 business days.</p>
+      <p style="color:#15803d;font-weight:700;font-size:15px;margin:0;">💚 Refund of <strong>$${data.refundAmount.toFixed(2)}</strong> processing — 5–10 business days.</p>
     </div>` : ''}
     <a href="https://parkpeer.pages.dev/search" style="display:inline-block;background:linear-gradient(135deg,#5B2EFF,#4a20f0);color:#fff;font-weight:700;font-size:14px;padding:14px 28px;border-radius:10px;text-decoration:none;">Find Another Space →</a>
   `)
 
   return sendEmail(env, {
-    to: data.toEmail,
-    toName: data.toName,
+    to: data.toEmail, toName: data.toName,
     subject: `❌ Booking Cancelled — #PP-${String(data.bookingId).padStart(6,'0')}`,
     htmlContent: html,
     textContent: `Booking #PP-${String(data.bookingId).padStart(6,'0')} for ${data.listingTitle} was cancelled. Refund: $${data.refundAmount.toFixed(2)}.`
@@ -254,8 +251,7 @@ export async function sendPaymentReceipt(env: Env, data: {
   `)
 
   return sendEmail(env, {
-    to: data.toEmail,
-    toName: data.toName,
+    to: data.toEmail, toName: data.toName,
     subject: `🧾 Receipt — $${data.amount.toFixed(2)} · ParkPeer #PP-${String(data.bookingId).padStart(6,'0')}`,
     htmlContent: html,
     textContent: `Payment of $${data.amount.toFixed(2)} confirmed for booking #PP-${String(data.bookingId).padStart(6,'0')} at ${data.listingTitle}.`
@@ -272,22 +268,19 @@ export async function sendWelcomeEmail(env: Env, data: {
   const html = emailWrapper(`
     <h2 style="color:#121212;font-size:22px;font-weight:800;margin:0 0 8px;">👋 Welcome to ParkPeer, ${data.toName.split(' ')[0]}!</h2>
     <p style="color:#6b7280;font-size:15px;margin:0 0 24px;">
-      ${isHost
-        ? 'Your host account is ready. Start listing your parking space and earning money today.'
-        : 'Your account is ready. Find and book affordable parking near you.'
-      }
+      ${isHost ? 'Your host account is ready. Start listing your parking space and earning money today.' : 'Your account is ready. Find and book affordable parking near you.'}
     </p>
 
     <div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:12px;padding:24px;margin-bottom:28px;">
       <h3 style="color:#5B2EFF;font-size:15px;font-weight:700;margin:0 0 16px;">🚀 Get started in 3 steps</h3>
       ${isHost ? `
-      <p style="color:#374151;font-size:14px;margin:0 0 10px;">1. 📍 <strong>List your space</strong> — add photos, set your rate, and go live in minutes</p>
-      <p style="color:#374151;font-size:14px;margin:0 0 10px;">2. 💳 <strong>Connect Stripe</strong> — so you can receive payouts directly</p>
-      <p style="color:#374151;font-size:14px;margin:0;">3. 🎉 <strong>Start earning</strong> — drivers in your area will find and book your space</p>
+      <p style="color:#374151;font-size:14px;margin:0 0 10px;">1. 📍 <strong>List your space</strong> — add photos, set your rate, go live in minutes</p>
+      <p style="color:#374151;font-size:14px;margin:0 0 10px;">2. 💳 <strong>Connect Stripe</strong> — receive payouts directly to your bank</p>
+      <p style="color:#374151;font-size:14px;margin:0;">3. 🎉 <strong>Start earning</strong> — drivers near you will find and book your space</p>
       ` : `
       <p style="color:#374151;font-size:14px;margin:0 0 10px;">1. 🔍 <strong>Search for parking</strong> — find spaces near your destination</p>
       <p style="color:#374151;font-size:14px;margin:0 0 10px;">2. 📅 <strong>Book instantly</strong> — reserve your spot in seconds</p>
-      <p style="color:#374151;font-size:14px;margin:0;">3. 🚗 <strong>Park & go</strong> — access details sent straight to your dashboard</p>
+      <p style="color:#374151;font-size:14px;margin:0;">3. 🚗 <strong>Park &amp; go</strong> — access details sent to your dashboard</p>
       `}
     </div>
 
@@ -297,8 +290,7 @@ export async function sendWelcomeEmail(env: Env, data: {
   `)
 
   return sendEmail(env, {
-    to: data.toEmail,
-    toName: data.toName,
+    to: data.toEmail, toName: data.toName,
     subject: `👋 Welcome to ParkPeer — let's get you parked!`,
     htmlContent: html,
     textContent: `Welcome to ParkPeer, ${data.toName}! Your account is ready. Visit https://parkpeer.pages.dev to get started.`

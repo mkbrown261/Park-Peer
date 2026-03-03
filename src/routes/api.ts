@@ -32,7 +32,7 @@ type Bindings = {
   TWILIO_PHONE_NUMBER: string
   STRIPE_PUBLISHABLE_KEY: string
   STRIPE_WEBHOOK_SECRET: string
-  SENDGRID_API_KEY: string
+  RESEND_API_KEY: string
   FROM_EMAIL: string
   ADMIN_USERNAME: string
   ADMIN_PASSWORD: string
@@ -55,7 +55,7 @@ apiRoutes.get('/health', (c) => {
       d1_database:  env?.DB ? 'connected' : 'not configured',
       r2_storage:   env?.MEDIA ? 'connected' : 'not configured',
       stripe:       env?.STRIPE_SECRET_KEY ? 'configured' : 'not configured',
-      sendgrid:     (env?.SENDGRID_API_KEY && env.SENDGRID_API_KEY !== 'PLACEHOLDER_SENDGRID_KEY') ? 'configured' : 'placeholder',
+      resend:     (env?.RESEND_API_KEY && env.RESEND_API_KEY !== 'PLACEHOLDER_RESEND_KEY') ? 'configured' : 'placeholder',
       twilio:       env?.TWILIO_ACCOUNT_SID ? 'configured' : 'not configured',
     }
   })
@@ -347,7 +347,7 @@ apiRoutes.post('/webhooks/stripe', async (c) => {
 })
 
 // ════════════════════════════════════════════════════════════════════════════
-// SENDGRID — Send welcome email (called after signup)
+// RESEND — Send welcome email (called after signup)
 // POST /api/emails/welcome
 // ════════════════════════════════════════════════════════════════════════════
 apiRoutes.post('/emails/welcome', async (c) => {
