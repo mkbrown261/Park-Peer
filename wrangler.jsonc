@@ -1,34 +1,39 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "webapp",
+  "name": "parkpeer",
   "compatibility_date": "2026-03-03",
   "pages_build_output_dir": "./dist",
   "compatibility_flags": [
     "nodejs_compat"
-  ]
-  // "vars": {
-  //   "MY_VAR": "my-variable"
-  // },
-  // "kv_namespaces": [
-  //   {
-  //     "binding": "MY_KV_NAMESPACE",
-  //     "id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-  //   }
-  // ],
+  ],
+
+  // ── D1 SQLite Database ────────────────────────────────────────────────────
+  // Created: npx wrangler d1 create parkpeer-production
+  // Region: ENAM (Eastern North America)
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "parkpeer-production",
+      "database_id": "119f9fd4-1f2b-43bb-877e-faf704ede1db"
+    }
+  ],
+
+  // ── R2 Object Storage ─────────────────────────────────────────────────────
+  // ACTION REQUIRED: Enable R2 at https://dash.cloudflare.com → R2 → Enable
+  // Then run: npx wrangler r2 bucket create parkpeer-media
+  // Uncomment below after R2 is enabled:
   // "r2_buckets": [
   //   {
-  //     "binding": "MY_BUCKET",
-  //     "bucket_name": "my-bucket"
+  //     "binding": "MEDIA",
+  //     "bucket_name": "parkpeer-media"
   //   }
   // ],
-  // "d1_databases": [
+
+  // ── KV Namespace (sessions / cache) ───────────────────────────────────────
+  // "kv_namespaces": [
   //   {
-  //     "binding": "MY_DB",
-  //     "database_name": "my-database",
-  //     "database_id": ""
+  //     "binding": "KV",
+  //     "id": "your-kv-id-here"
   //   }
-  // ],
-  // "ai": {
-  //   "binding": "AI"
-  // }
+  // ]
 }
