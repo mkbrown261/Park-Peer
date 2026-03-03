@@ -13,11 +13,23 @@ import {
   sendPaymentReceipt,
   sendWelcomeEmail
 } from '../services/sendgrid'
+import {
+  smsSendBookingConfirmation,
+  smsSendHostAlert,
+  smsSendCancellation,
+  smsSendOTP,
+  smsSendPaymentFailed,
+  smsSendDisputeAlert,
+  verifyTwilioSignature
+} from '../services/twilio'
 
 type Bindings = {
   DB: D1Database
   MEDIA: R2Bucket
   STRIPE_SECRET_KEY: string
+  TWILIO_ACCOUNT_SID: string
+  TWILIO_AUTH_TOKEN: string
+  TWILIO_PHONE_NUMBER: string
   STRIPE_PUBLISHABLE_KEY: string
   STRIPE_WEBHOOK_SECRET: string
   SENDGRID_API_KEY: string
@@ -44,6 +56,7 @@ apiRoutes.get('/health', (c) => {
       r2_storage:   env?.MEDIA ? 'connected' : 'not configured',
       stripe:       env?.STRIPE_SECRET_KEY ? 'configured' : 'not configured',
       sendgrid:     (env?.SENDGRID_API_KEY && env.SENDGRID_API_KEY !== 'PLACEHOLDER_SENDGRID_KEY') ? 'configured' : 'placeholder',
+      twilio:       env?.TWILIO_ACCOUNT_SID ? 'configured' : 'not configured',
     }
   })
 })
@@ -164,30 +177,44 @@ apiRoutes.post('/payments/confirm', async (c) => {
     const hostPayout   = amountPaid - platformFee
     const bookingId    = Math.floor(100000 + Math.random() * 900000)
 
-    // Send confirmation emails
+    // Send confirmation emails + SMS in parallel
     const listingTitle   = 'Parking Space'  // TODO: fetch from D1
     const listingAddress = 'Chicago, IL'
+    const startFormatted = new Date(start_datetime).toLocaleString('en-US')
+    const endFormatted   = new Date(end_datetime).toLocaleString('en-US')
 
-    await sendBookingConfirmation(env as any, {
-      driverEmail: driver_email,
-      driverName: driver_name || driver_email,
-      bookingId,
-      listingTitle,
-      listingAddress,
-      startTime: new Date(start_datetime).toLocaleString('en-US'),
-      endTime:   new Date(end_datetime).toLocaleString('en-US'),
-      totalCharged: amountPaid,
-      vehiclePlate: vehicle_plate || 'Not provided'
-    })
-
-    await sendPaymentReceipt(env as any, {
-      toEmail: driver_email,
-      toName:  driver_name || driver_email,
-      bookingId,
-      amount: amountPaid,
-      last4:  pi.payment_method_details?.card?.last4,
-      listingTitle
-    })
+    await Promise.all([
+      sendBookingConfirmation(env as any, {
+        driverEmail: driver_email,
+        driverName: driver_name || driver_email,
+        bookingId,
+        listingTitle,
+        listingAddress,
+        startTime: startFormatted,
+        endTime:   endFormatted,
+        totalCharged: amountPaid,
+        vehiclePlate: vehicle_plate || 'Not provided'
+      }),
+      sendPaymentReceipt(env as any, {
+        toEmail: driver_email,
+        toName:  driver_name || driver_email,
+        bookingId,
+        amount: amountPaid,
+        last4:  pi.payment_method_details?.card?.last4,
+        listingTitle
+      }),
+      // SMS confirmation — only if phone provided
+      body.driver_phone ? smsSendBookingConfirmation(env as any, {
+        toPhone: body.driver_phone,
+        driverName: driver_name || 'Driver',
+        bookingId,
+        listingTitle,
+        listingAddress,
+        startTime: startFormatted,
+        endTime:   endFormatted,
+        totalCharged: amountPaid
+      }) : Promise.resolve(true)
+    ])
 
     return c.json({
       success: true,
@@ -230,14 +257,23 @@ apiRoutes.post('/payments/refund', async (c) => {
     const refundAmount = refund.amount / 100
 
     if (requester_email) {
-      await sendCancellationEmail(env as any, {
-        toEmail: requester_email,
-        toName:  requester_name || requester_email,
-        bookingId: booking_id || 0,
-        listingTitle: 'Your Parking Space',
-        refundAmount,
-        cancelledBy: 'user'
-      })
+      await Promise.all([
+        sendCancellationEmail(env as any, {
+          toEmail: requester_email,
+          toName:  requester_name || requester_email,
+          bookingId: booking_id || 0,
+          listingTitle: 'Your Parking Space',
+          refundAmount,
+          cancelledBy: 'user'
+        }),
+        body.requester_phone ? smsSendCancellation(env as any, {
+          toPhone: body.requester_phone,
+          bookingId: booking_id || 0,
+          listingTitle: 'Your Parking Space',
+          refundAmount,
+          cancelledBy: 'user'
+        }) : Promise.resolve(true)
+      ])
     }
 
     return c.json({
@@ -462,4 +498,102 @@ apiRoutes.get('/admin/stats', (c) => {
     platform_fees_mtd: 0, active_listings: 0, pending_listings: 0,
     open_disputes: 0, fraud_alerts: 0, cities: 0, uptime: 99.99
   })
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// TWILIO — Send OTP
+// POST /api/sms/otp
+// Body: { phone }
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.post('/sms/otp', async (c) => {
+  const env = c.env
+  if (!env?.TWILIO_ACCOUNT_SID) {
+    return c.json({ error: 'SMS not configured' }, 503)
+  }
+
+  let body: any = {}
+  try { body = await c.req.json() } catch {
+    return c.json({ error: 'Invalid JSON' }, 400)
+  }
+
+  const { phone } = body
+  if (!phone) return c.json({ error: 'Missing phone number' }, 400)
+
+  // Generate 6-digit OTP
+  const otp = Math.floor(100000 + Math.random() * 900000).toString()
+
+  const ok = await smsSendOTP(env as any, { toPhone: phone, otp })
+  if (!ok) return c.json({ error: 'Failed to send OTP' }, 500)
+
+  // In production: store hashed OTP in D1/KV with 10-min TTL
+  // For now return success (OTP sent via SMS)
+  return c.json({ success: true, message: 'OTP sent' })
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// TWILIO WEBHOOK — Incoming SMS
+// POST /api/webhooks/twilio/sms
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.post('/webhooks/twilio/sms', async (c) => {
+  const env = c.env
+
+  // Parse form body from Twilio
+  const text = await c.req.text()
+  const params: Record<string, string> = {}
+  for (const [k, v] of new URLSearchParams(text)) {
+    params[k] = v
+  }
+
+  const from = params['From'] || ''
+  const body = params['Body']?.trim().toUpperCase() || ''
+
+  console.log(`[Twilio SMS] From: ${from} Body: "${body}"`)
+
+  // Simple keyword auto-replies
+  let reply = ''
+  if (body === 'HELP') {
+    reply = 'ParkPeer Help: Reply STOP to unsubscribe. Visit parkpeer.pages.dev/dashboard to manage your bookings. Questions? Email support@parkpeer.pages.dev'
+  } else if (body === 'STOP' || body === 'UNSUBSCRIBE') {
+    reply = 'You have been unsubscribed from ParkPeer SMS notifications. Reply START to re-subscribe.'
+  } else if (body === 'START') {
+    reply = 'Welcome back! ParkPeer SMS notifications re-enabled. Visit parkpeer.pages.dev to manage bookings.'
+  } else {
+    reply = 'Thanks for contacting ParkPeer! Visit parkpeer.pages.dev/dashboard to manage your bookings or reply HELP for assistance.'
+  }
+
+  // Respond with TwiML
+  return new Response(
+    `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${reply}</Message></Response>`,
+    { headers: { 'Content-Type': 'text/xml' } }
+  )
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// TWILIO WEBHOOK — SMS Status Callback
+// POST /api/webhooks/twilio/status
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.post('/webhooks/twilio/status', async (c) => {
+  const text = await c.req.text()
+  const params: Record<string, string> = {}
+  for (const [k, v] of new URLSearchParams(text)) {
+    params[k] = v
+  }
+
+  const sid    = params['MessageSid'] || ''
+  const status = params['MessageStatus'] || ''
+  console.log(`[Twilio Status] SID: ${sid} → ${status}`)
+
+  // TODO: update SMS delivery status in D1
+  return c.json({ received: true })
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// TWILIO WEBHOOK — Voice (fallback)
+// POST /api/webhooks/twilio/voice
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.post('/webhooks/twilio/voice', async (c) => {
+  return new Response(
+    `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice">Welcome to ParkPeer. For support, please visit parkpeer dot pages dot dev or send us a text message.</Say></Response>`,
+    { headers: { 'Content-Type': 'text/xml' } }
+  )
 })
