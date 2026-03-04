@@ -334,9 +334,12 @@ adminPanel.get('/users', async (c: any) => {
   if (db) {
     try {
       const rows = await db.prepare(`
-        SELECT id, full_name, email, role, status, created_at, id_verified
-        FROM users
-        ORDER BY created_at DESC
+        SELECT u.id, u.full_name, u.email, u.role, u.status, u.created_at, u.id_verified,
+               ROUND(AVG(l.avg_rating), 1) as avg_rating
+        FROM users u
+        LEFT JOIN listings l ON l.host_id = u.id AND l.avg_rating > 0
+        GROUP BY u.id
+        ORDER BY u.created_at DESC
         LIMIT 100
       `).all<any>()
       users = rows.results || []

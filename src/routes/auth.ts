@@ -11,20 +11,33 @@ export const authPages = new Hono<{ Bindings: Bindings }>()
 authPages.get('/login', (c) => {
   const appleConfigured  = !!(c.env?.APPLE_CLIENT_ID)
   const googleConfigured = !!(c.env?.GOOGLE_CLIENT_ID)
-  // Surface errors from OAuth redirects
-  const oauthError = c.req.query('error') || ''
+  // Surface errors from OAuth redirects — check both ?error= and ?reason= params
+  const oauthError  = c.req.query('error')  || ''
   const oauthReason = c.req.query('reason') || ''
   const errorMessages: Record<string, string> = {
-    oauth_not_configured: 'Social login is not configured yet. Please use email/password.',
-    google_denied:        'Google sign-in was cancelled.',
-    google_token_failed:  'Google authentication failed. Please try again.',
-    apple_denied:         'Apple sign-in was cancelled.',
-    apple_token_failed:   'Apple authentication failed. Please try again.',
-    account_suspended:    'This account has been suspended. Contact support.',
-    db_unavailable:       'Service temporarily unavailable. Please try again.',
-    auth:                 'Please sign in to continue.',
+    oauth_not_configured:  'Social login is not configured yet. Please use email/password.',
+    google_denied:         'Google sign-in was cancelled. Please try again.',
+    google_token_failed:   'Google authentication failed. Please try again.',
+    google_no_token:       'Google sign-in failed (no token). Please try again.',
+    google_no_email:       'Google account has no email. Please use email/password.',
+    google_profile_failed: 'Could not fetch Google profile. Please try again.',
+    google_unexpected:     'Google sign-in encountered an unexpected error. Please try again.',
+    google_redirect_mismatch: 'OAuth redirect URI mismatch — please contact support (ERR: redirect_uri_mismatch).',
+    google_invalid_client: 'OAuth client configuration error — please contact support (ERR: invalid_client).',
+    google_invalid_grant:  'Google authorization code expired or already used. Please try signing in again.',
+    apple_denied:          'Apple sign-in was cancelled.',
+    apple_token_failed:    'Apple authentication failed. Please try again.',
+    account_suspended:     'This account has been suspended. Contact support@parkpeer.com.',
+    db_unavailable:        'Service temporarily unavailable. Please try again in a moment.',
+    // reason= params (from requireUserAuth redirect)
+    auth:                  'Please sign in to continue.',
+    wrong_role:            'Please sign in to access that page.',
   }
-  const oauthMsg = errorMessages[oauthError] || (oauthError ? 'Authentication error. Please try again.' : '')
+  // Show message from ?error= first, then fall back to ?reason=
+  const oauthMsg = errorMessages[oauthError]
+    || (oauthError ? 'Authentication error. Please try again.' : '')
+    || errorMessages[oauthReason]
+    || ''
   const content = `
   <div class="pt-16 min-h-screen flex items-center justify-center px-4 py-12">
     <div class="absolute inset-0 map-bg opacity-20"></div>
@@ -211,15 +224,25 @@ authPages.get('/login', (c) => {
 authPages.get('/signup', (c) => {
   const appleConfigured  = !!(c.env?.APPLE_CLIENT_ID)
   const googleConfigured = !!(c.env?.GOOGLE_CLIENT_ID)
-  const oauthError = c.req.query('error') || ''
+  const oauthError  = c.req.query('error')  || ''
+  const oauthReason = c.req.query('reason') || ''
   const errorMessages: Record<string, string> = {
-    oauth_not_configured: 'Social login is not configured yet. Please use email/password.',
-    google_denied:        'Google sign-up was cancelled.',
-    google_token_failed:  'Google authentication failed. Please try again.',
-    apple_denied:         'Apple sign-up was cancelled.',
-    apple_token_failed:   'Apple authentication failed. Please try again.',
+    oauth_not_configured:  'Social login is not configured yet. Please use email/password.',
+    google_denied:         'Google sign-up was cancelled. Please try again.',
+    google_token_failed:   'Google authentication failed. Please try again.',
+    google_no_token:       'Google sign-in failed (no token). Please try again.',
+    google_no_email:       'Google account has no email. Please use email/password.',
+    google_profile_failed: 'Could not fetch Google profile. Please try again.',
+    google_unexpected:     'Google sign-in encountered an unexpected error. Please try again.',
+    apple_denied:          'Apple sign-up was cancelled.',
+    apple_token_failed:    'Apple authentication failed. Please try again.',
+    account_suspended:     'This account has been suspended. Contact support@parkpeer.com.',
+    db_unavailable:        'Service temporarily unavailable. Please try again.',
   }
-  const oauthMsg = errorMessages[oauthError] || (oauthError ? 'Authentication error. Please try again.' : '')
+  const oauthMsg = errorMessages[oauthError]
+    || (oauthError ? 'Authentication error. Please try again.' : '')
+    || errorMessages[oauthReason]
+    || ''
   const content = `
   <div class="pt-16 min-h-screen flex items-center justify-center px-4 py-12">
     <div class="absolute inset-0 map-bg opacity-20"></div>

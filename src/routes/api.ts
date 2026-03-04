@@ -129,8 +129,8 @@ apiRoutes.post('/auth/register', async (c) => {
     const roleForJwt = role.toLowerCase()
     await issueUserToken(c, { userId, email, role: roleForJwt }, secret)
 
-    // Issue CSRF token
-    const csrfToken = await generateCsrfToken(c, secret)
+    // Issue CSRF token (must use secret+'.csrf' to match verifyCsrf)
+    const csrfToken = await generateCsrfToken(c, secret + '.csrf')
 
     // Send welcome email (non-blocking)
     sendWelcomeEmail(c.env as any, { toEmail: email, toName: full_name, role: role }).catch(() => {})
@@ -195,7 +195,7 @@ apiRoutes.post('/auth/login', async (c) => {
 
     const secret = c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod'
     await issueUserToken(c, { userId: user.id, email: user.email, role: user.role.toLowerCase() }, secret)
-    const csrfToken = await generateCsrfToken(c, secret)
+    const csrfToken = await generateCsrfToken(c, secret + '.csrf')
 
     return c.json({
       success: true,
@@ -239,7 +239,7 @@ apiRoutes.post('/auth/refresh', async (c) => {
     if (!user || user.status !== 'active') return c.json({ error: 'User not found or suspended' }, 401)
 
     await issueUserToken(c, { userId: user.id, email: user.email, role: user.role }, secret)
-    const csrfToken = await generateCsrfToken(c, secret)
+    const csrfToken = await generateCsrfToken(c, secret + '.csrf')
     return c.json({ success: true, csrf_token: csrfToken })
   } catch {
     return c.json({ error: 'Token refresh failed' }, 401)
@@ -255,8 +255,31 @@ apiRoutes.get('/auth/me', requireUserAuth(), (c) => {
 // GET /api/auth/csrf — issue a fresh CSRF token (call on page load)
 apiRoutes.get('/auth/csrf', async (c) => {
   const secret = c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod'
-  const token  = await generateCsrfToken(c, secret)
+  const csrfSecret = secret + '.csrf'
+  const token  = await generateCsrfToken(c, csrfSecret)
   return c.json({ csrf_token: token })
+})
+
+// GET /api/auth/status — returns current session info (safe, no secrets)
+// Used to diagnose OAuth loop: if cookie was set but session fails to verify
+apiRoutes.get('/auth/status', async (c) => {
+  const secret = c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod'
+  const session = await verifyUserToken(c, secret)
+  return c.json({
+    authenticated: !!session,
+    userId:  session?.userId  ?? null,
+    role:    session?.role    ?? null,
+    email:   session?.email   ?? null,
+    // Diagnostic: which env vars are configured (boolean only — no values)
+    config: {
+      google_oauth:   !!(c.env?.GOOGLE_CLIENT_ID && c.env?.GOOGLE_CLIENT_SECRET),
+      apple_oauth:    !!(c.env?.APPLE_CLIENT_ID),
+      stripe:         !!(c.env?.STRIPE_SECRET_KEY),
+      db:             !!(c.env?.DB),
+      jwt_secret_set: !!(c.env?.USER_TOKEN_SECRET),
+      redirect_base:  c.env?.OAUTH_REDIRECT_BASE || '(default: https://parkpeer.pages.dev)',
+    }
+  })
 })
 
 
@@ -2001,14 +2024,19 @@ apiRoutes.get('/auth/google', (c) => {
     return c.redirect('/auth/login?error=oauth_not_configured')
   }
 
-  const base    = c.env?.OAUTH_REDIRECT_BASE || 'https://parkpeer.pages.dev'
+  // Normalise base URL — strip trailing slash to avoid double-slash in redirect_uri
+  const base    = (c.env?.OAUTH_REDIRECT_BASE || 'https://parkpeer.pages.dev').replace(/\/$/, '')
   const role    = c.req.query('role') || 'driver'
+  // Encode role in state as base64url JSON
   const state   = btoa(JSON.stringify({ role, ts: Date.now() }))
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
 
+  const redirectUri = `${base}/api/auth/google/callback`
+  console.log(`[OAuth/Google] Step 1: role=${role} redirect_uri=${redirectUri}`)
+
   const params = new URLSearchParams({
     client_id:     googleClientId,
-    redirect_uri:  `${base}/api/auth/google/callback`,
+    redirect_uri:  redirectUri,
     response_type: 'code',
     scope:         'openid email profile',
     access_type:   'offline',
@@ -2026,108 +2054,151 @@ apiRoutes.get('/auth/google/callback', async (c) => {
   const db = c.env?.DB
 
   if (error || !code) {
-    console.error('[OAuth/Google] Callback error:', error)
+    console.error('[OAuth/Google] Callback denied or missing code. error=', error)
     return c.redirect(`/auth/login?error=${encodeURIComponent(error || 'google_denied')}`)
   }
 
-  if (!db) return c.redirect('/auth/login?error=db_unavailable')
+  if (!db) {
+    console.error('[OAuth/Google] DB binding unavailable')
+    return c.redirect('/auth/login?error=db_unavailable')
+  }
 
-  const base            = c.env?.OAUTH_REDIRECT_BASE || 'https://parkpeer.pages.dev'
+  // Normalise base URL — strip trailing slash
+  const base            = (c.env?.OAUTH_REDIRECT_BASE || 'https://parkpeer.pages.dev').replace(/\/$/, '')
   const googleClientId  = c.env?.GOOGLE_CLIENT_ID
   const googleClientSecret = c.env?.GOOGLE_CLIENT_SECRET
   const tokenSecret     = c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod'
+  const redirectUri     = `${base}/api/auth/google/callback`
+
+  console.log(`[OAuth/Google] Callback received. code_len=${code.length} redirect_uri=${redirectUri}`)
 
   if (!googleClientId || !googleClientSecret) {
-    console.error('[OAuth/Google] Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET')
+    console.error('[OAuth/Google] GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET not configured in env')
     return c.redirect('/auth/login?error=oauth_not_configured')
   }
 
-  // Decode role from state
+  // Decode role from state (base64url JSON)
   let role = 'driver'
   try {
-    const padded = state.replace(/-/g, '+').replace(/_/g, '/')
-    const decoded = JSON.parse(atob(padded + '==='.slice((padded.length + 3) % 4 || 4)))
+    const padded  = (state || '').replace(/-/g, '+').replace(/_/g, '/')
+    const padded4 = padded + '==='.slice((padded.length + 3) % 4 || 4)
+    const decoded = JSON.parse(atob(padded4))
     role = decoded.role || 'driver'
-  } catch { /* ignore */ }
+  } catch (stateErr) {
+    console.warn('[OAuth/Google] Could not decode state param, defaulting role=driver:', stateErr)
+  }
 
   try {
-    // Exchange code for tokens
+    // ── Exchange authorization code for access token ─────────────────────
+    const tokenBody = new URLSearchParams({
+      code,
+      client_id:     googleClientId,
+      client_secret: googleClientSecret,
+      redirect_uri:  redirectUri,
+      grant_type:    'authorization_code',
+    }).toString()
+
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
+      method:  'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        code,
-        client_id:     googleClientId,
-        client_secret: googleClientSecret,
-        redirect_uri:  `${base}/api/auth/google/callback`,
-        grant_type:    'authorization_code',
-      }).toString(),
+      body:    tokenBody,
     })
 
     if (!tokenRes.ok) {
-      const e = await tokenRes.text()
-      console.error('[OAuth/Google] Token exchange failed:', e.substring(0, 200))
-      return c.redirect('/auth/login?error=google_token_failed')
+      const errBody = await tokenRes.text()
+      // Log full error to surface redirect_uri_mismatch vs invalid_client vs invalid_grant
+      console.error(`[OAuth/Google] Token exchange HTTP ${tokenRes.status}:`, errBody.substring(0, 400))
+      // Parse the specific error type so we can surface it safely to the user
+      let googleErrType = 'google_token_failed'
+      try {
+        const errJson = JSON.parse(errBody)
+        const gt = errJson.error || ''
+        console.error('[OAuth/Google] Token error type:', gt, '|', errJson.error_description)
+        // Map Google error types to safe, non-secret diagnostic codes
+        if (gt === 'redirect_uri_mismatch') googleErrType = 'google_redirect_mismatch'
+        else if (gt === 'invalid_client')   googleErrType = 'google_invalid_client'
+        else if (gt === 'invalid_grant')    googleErrType = 'google_invalid_grant'
+        else if (gt === 'access_denied')    googleErrType = 'google_denied'
+      } catch { /* not JSON */ }
+      return c.redirect(`/auth/login?error=${googleErrType}`)
     }
 
     const tokens: any = await tokenRes.json()
     const accessToken = tokens.access_token
-    if (!accessToken) return c.redirect('/auth/login?error=google_no_token')
+    if (!accessToken) {
+      console.error('[OAuth/Google] Token response missing access_token:', JSON.stringify(tokens).substring(0, 200))
+      return c.redirect('/auth/login?error=google_no_token')
+    }
 
-    // Fetch user profile from Google
+    // ── Fetch Google profile ─────────────────────────────────────────────
     const profileRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
       headers: { Authorization: `Bearer ${accessToken}` },
     })
 
-    if (!profileRes.ok) return c.redirect('/auth/login?error=google_profile_failed')
+    if (!profileRes.ok) {
+      console.error('[OAuth/Google] Profile fetch failed:', profileRes.status)
+      return c.redirect('/auth/login?error=google_profile_failed')
+    }
 
     const profile: any = await profileRes.json()
     const email    = profile.email?.toLowerCase()?.trim()
     const fullName = profile.name || profile.given_name || email?.split('@')[0] || 'User'
 
-    if (!email) return c.redirect('/auth/login?error=google_no_email')
+    if (!email) {
+      console.error('[OAuth/Google] Profile missing email. profile keys:', Object.keys(profile).join(','))
+      return c.redirect('/auth/login?error=google_no_email')
+    }
 
-    console.log(`[OAuth/Google] Login: ${email} role=${role}`)
+    console.log(`[OAuth/Google] Profile OK: email=${email} name=${fullName} role=${role}`)
 
-    // Upsert user in D1
+    // ── Upsert user in D1 ────────────────────────────────────────────────
     let user: any = await db.prepare(
       'SELECT id, email, full_name, role, status FROM users WHERE email = ?'
     ).bind(email).first()
 
     if (!user) {
-      // New user — create account
+      // New user — create account with requested role
       const insertResult = await db.prepare(`
         INSERT INTO users (email, password_hash, full_name, role, status, email_verified, created_at, updated_at)
         VALUES (?, '', ?, ?, 'active', 1, datetime('now'), datetime('now'))
       `).bind(email, sanitizeHtml(fullName), role.toUpperCase()).run()
-      const newId = insertResult.meta?.last_row_id
-      user = { id: newId, email, full_name: fullName, role: role.toUpperCase(), status: 'active' }
-      console.log(`[OAuth/Google] Created new user id=${newId}`)
+      const newId = Number(insertResult.meta?.last_row_id ?? 0)
+      if (!newId) {
+        console.error('[OAuth/Google] DB insert returned no last_row_id')
+        return c.redirect('/auth/login?error=google_unexpected')
+      }
+      user = { id: newId, email, full_name: sanitizeHtml(fullName), role: role.toUpperCase(), status: 'active' }
+      console.log(`[OAuth/Google] Created new user id=${newId} role=${user.role}`)
     } else {
       if (user.status === 'suspended') {
+        console.warn(`[OAuth/Google] Suspended account: ${email}`)
         return c.redirect('/auth/login?error=account_suspended')
       }
-      // Update last-seen (non-blocking)
-      db.prepare('UPDATE users SET updated_at = datetime(\'now\') WHERE id = ?').bind(user.id).run().catch(() => {})
+      console.log(`[OAuth/Google] Existing user id=${user.id} role=${user.role}`)
+      // Update last-seen (non-blocking, failure is OK)
+      db.prepare(`UPDATE users SET updated_at = datetime('now') WHERE id = ?`)
+        .bind(user.id).run().catch((e: any) => console.warn('[OAuth/Google] last-seen update failed:', e.message))
     }
 
-    // Issue JWT session cookie
+    // ── Issue HttpOnly JWT session cookie ────────────────────────────────
+    const sessionRole = (user.role || role).toLowerCase()
     await issueUserToken(c, {
-      userId: user.id,
+      userId: Number(user.id),
       email:  user.email,
-      role:   (user.role || role).toLowerCase(),
+      role:   sessionRole,
     }, tokenSecret)
 
-    // Generate CSRF token
+    // ── Issue CSRF cookie (non-HttpOnly, for JS to read back) ────────────
     const csrfSecret = tokenSecret + '.csrf'
     await generateCsrfToken(c, csrfSecret)
 
-    // Redirect to appropriate dashboard
-    const userRole = (user.role || role).toLowerCase()
-    return c.redirect(userRole === 'host' ? '/host' : '/dashboard')
+    console.log(`[OAuth/Google] Session issued. userId=${user.id} role=${sessionRole} → /${sessionRole === 'host' ? 'host' : 'dashboard'}`)
+
+    // ── Redirect to appropriate dashboard (303 = GET after POST safe) ────
+    return c.redirect(sessionRole === 'host' ? '/host' : '/dashboard', 303)
 
   } catch (e: any) {
-    console.error('[OAuth/Google] Unexpected error:', e.message)
+    console.error('[OAuth/Google] Unexpected error in callback:', e?.message, e?.stack?.substring(0, 500))
     return c.redirect('/auth/login?error=google_unexpected')
   }
 })
