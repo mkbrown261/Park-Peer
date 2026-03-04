@@ -96,7 +96,9 @@ apiRoutes.post('/auth/register', async (c) => {
     return c.json({ error: e.message }, 400)
   }
 
-  const role  = ['driver','host','both'].includes(body.role) ? body.role : 'driver'
+  const role  = ['driver','host','both'].includes((body.role || '').toLowerCase())
+    ? (body.role || 'driver').toUpperCase()
+    : 'DRIVER'
   const phone = validateInput(body.phone, { maxLength: 20 })
 
   try {
@@ -108,32 +110,33 @@ apiRoutes.post('/auth/register', async (c) => {
     const password_hash = await hashPassword(password)
 
     // Insert user — email_verified = 0 (requires email verification)
-    const result = await db.prepare(`
+      const result = await db.prepare(`
       INSERT INTO users (email, password_hash, full_name, role, phone, status, email_verified, created_at)
       VALUES (?, ?, ?, ?, ?, 'active', 0, datetime('now'))
     `).bind(email, password_hash, sanitizeHtml(full_name), role, phone || null).run()
 
-    const userId = result.meta?.last_row_id as number
+    const userId = Number(result.meta?.last_row_id ?? 0)
 
     // Issue JWT in HttpOnly cookie
     const secret = c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod'
-    await issueUserToken(c, { userId, email, role }, secret)
+    const roleForJwt = role.toLowerCase()
+    await issueUserToken(c, { userId, email, role: roleForJwt }, secret)
 
     // Issue CSRF token
     const csrfToken = await generateCsrfToken(c, secret)
 
     // Send welcome email (non-blocking)
-    sendWelcomeEmail(c.env as any, { toEmail: email, toName: full_name, role: role.toUpperCase() }).catch(() => {})
+    sendWelcomeEmail(c.env as any, { toEmail: email, toName: full_name, role: role }).catch(() => {})
 
     return c.json({
       success:  true,
-      user: { id: userId, email, full_name: sanitizeHtml(full_name), role },
+      user: { id: userId, email, full_name: sanitizeHtml(full_name), role: roleForJwt },
       csrf_token: csrfToken,
       message: 'Account created. Please verify your email.'
     }, 201)
   } catch (e: any) {
-    console.error('[auth/register]', e.message)
-    if (e.message?.includes('UNIQUE')) {
+    console.error('[auth/register] DB error:', e.message, e.cause)
+    if (e.message?.includes('UNIQUE') || e.cause?.message?.includes('UNIQUE')) {
       return c.json({ error: 'An account with that email already exists.' }, 409)
     }
     return c.json({ error: 'Registration failed. Please try again.' }, 500)
@@ -184,7 +187,7 @@ apiRoutes.post('/auth/login', async (c) => {
     }
 
     const secret = c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod'
-    await issueUserToken(c, { userId: user.id, email: user.email, role: user.role }, secret)
+    await issueUserToken(c, { userId: user.id, email: user.email, role: user.role.toLowerCase() }, secret)
     const csrfToken = await generateCsrfToken(c, secret)
 
     return c.json({

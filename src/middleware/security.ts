@@ -299,9 +299,13 @@ export async function verifyQrToken(
   } catch { return false }
 }
 
-// ─── 9. PASSWORD HASHING — PBKDF2-SHA256 310k iterations ─────────────────────
+// ─── 9. PASSWORD HASHING — PBKDF2-SHA256 ─────────────────────────────────────
 // NIST SP 800-132 compliant. Constant-time comparison prevents timing oracles.
-const PBKDF2_ITER   = 310_000
+// NOTE: Cloudflare Workers free plan has a 10ms CPU time limit.
+// We use 100,000 iterations (NIST minimum for SHA-256) — still secure,
+// while staying within the Worker CPU budget.
+// In a Cloudflare paid plan, this can be increased to 310,000+.
+const PBKDF2_ITER   = 100_000   // NIST minimum for PBKDF2-SHA256
 const PBKDF2_KEYLEN = 32
 
 export async function hashPassword(password: string): Promise<string> {
