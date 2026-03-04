@@ -169,11 +169,20 @@ bookingPage.get('/:id', (c) => {
             <textarea placeholder="Let the host know anything helpful, e.g. 'I'll be arriving in a blue Honda'" rows="3" class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 resize-none"></textarea>
           </div>
 
+          <!-- No Bailment Disclaimer (required before payment) -->
+          <div class="p-3 bg-yellow-500/5 border border-yellow-500/20 rounded-xl">
+            <p class="text-xs text-yellow-300/80 leading-relaxed">
+              <i class="fas fa-triangle-exclamation mr-1"></i>
+              <strong>No Bailment:</strong> ParkPeer and the Host do not take custody of your vehicle. You park at your own risk. Neither ParkPeer nor the Host is liable for theft, damage, or towing.
+              <a href="/legal/no-bailment" target="_blank" class="text-yellow-400 hover:underline ml-1">Learn more</a>
+            </p>
+          </div>
+
           <!-- Terms -->
           <label class="flex items-start gap-3 cursor-pointer group">
             <input type="checkbox" id="terms-check" class="mt-1 accent-indigo-500 w-4 h-4 flex-shrink-0"/>
             <p class="text-sm text-gray-400 group-hover:text-gray-300 transition-colors">
-              I agree to ParkPeer's <a href="#" class="text-indigo-400 hover:underline">Terms of Service</a>, <a href="#" class="text-indigo-400 hover:underline">Privacy Policy</a>, and understand the <a href="#" class="text-indigo-400 hover:underline">Cancellation Policy</a> for this listing.
+              I agree to ParkPeer's <a href="/legal/tos" class="text-indigo-400 hover:underline">Terms of Service</a>, <a href="/legal/privacy" class="text-indigo-400 hover:underline">Privacy Policy</a>, understand the <a href="/legal/tos#cancellation" class="text-indigo-400 hover:underline">Cancellation Policy</a>, and acknowledge the No Bailment disclaimer above.
             </p>
           </label>
         </div>

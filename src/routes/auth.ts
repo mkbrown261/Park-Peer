@@ -78,7 +78,7 @@ authPages.get('/login', (c) => {
 
           <div id="login-error" class="hidden p-3 bg-red-500/10 border border-red-500/20 rounded-xl flex items-center gap-2">
             <i class="fas fa-exclamation-circle text-red-400 text-sm"></i>
-            <p class="text-red-400 text-sm">Invalid email or password. Please try again.</p>
+            <p id="login-error-msg" class="text-red-400 text-sm">Invalid email or password. Please try again.</p>
           </div>
 
           <button type="submit" id="login-btn" class="btn-primary w-full flex items-center justify-center gap-2 py-4 rounded-xl font-bold text-white text-base">
@@ -121,21 +121,43 @@ authPages.get('/login', (c) => {
       }
     }
 
-    function handleLogin(e) {
+    async function handleLogin(e) {
       e.preventDefault();
-      const btn = document.getElementById('login-btn');
+      const btn   = document.getElementById('login-btn');
+      const errEl = document.getElementById('login-error');
+      const errMsg = document.getElementById('login-error-msg');
       btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Signing in...';
-      btn.disabled = true;
-      setTimeout(() => {
-        const email = document.getElementById('login-email').value;
-        if (email && email.includes('@')) {
-          window.location.href = '/dashboard';
+      btn.disabled  = true;
+      errEl.classList.add('hidden');
+
+      const email    = document.getElementById('login-email').value.trim();
+      const password = document.getElementById('login-password').value;
+
+      try {
+        const res  = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+          credentials: 'same-origin',
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          // Store CSRF token in sessionStorage for subsequent API calls
+          if (data.csrf_token) sessionStorage.setItem('pp_csrf', data.csrf_token);
+          const role = data.user?.role || 'driver';
+          window.location.href = role === 'host' ? '/host' : '/dashboard';
         } else {
-          document.getElementById('login-error').classList.remove('hidden');
+          if (errMsg) errMsg.textContent = data.error || 'Invalid email or password.';
+          errEl.classList.remove('hidden');
           btn.innerHTML = '<i class="fas fa-sign-in-alt"></i> Sign In';
-          btn.disabled = false;
+          btn.disabled  = false;
         }
-      }, 1500);
+      } catch {
+        if (errMsg) errMsg.textContent = 'Connection error. Please try again.';
+        errEl.classList.remove('hidden');
+        btn.innerHTML = '<i class="fas fa-sign-in-alt"></i> Sign In';
+        btn.disabled  = false;
+      }
     }
   </script>
   `
@@ -200,29 +222,30 @@ authPages.get('/signup', (c) => {
         </div>
 
         <!-- Form -->
+        <input type="hidden" id="selected-role" value="driver"/>
         <form onsubmit="handleSignup(event)" class="space-y-4">
           <div class="grid grid-cols-2 gap-3">
             <div>
               <label class="text-xs text-gray-400 font-medium block mb-1.5">First Name</label>
-              <input type="text" placeholder="Alex" required class="w-full bg-charcoal-100 border border-white/10 rounded-xl px-3 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 transition-all"/>
+              <input type="text" id="signup-first" placeholder="Alex" required class="w-full bg-charcoal-100 border border-white/10 rounded-xl px-3 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 transition-all"/>
             </div>
             <div>
               <label class="text-xs text-gray-400 font-medium block mb-1.5">Last Name</label>
-              <input type="text" placeholder="Martinez" required class="w-full bg-charcoal-100 border border-white/10 rounded-xl px-3 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 transition-all"/>
+              <input type="text" id="signup-last" placeholder="Martinez" required class="w-full bg-charcoal-100 border border-white/10 rounded-xl px-3 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 transition-all"/>
             </div>
           </div>
           <div>
             <label class="text-xs text-gray-400 font-medium block mb-1.5">Email Address</label>
             <div class="relative">
               <i class="fas fa-envelope absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm"></i>
-              <input type="email" placeholder="you@example.com" required class="w-full bg-charcoal-100 border border-white/10 rounded-xl pl-10 pr-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 transition-all"/>
+              <input type="email" id="signup-email" placeholder="you@example.com" required class="w-full bg-charcoal-100 border border-white/10 rounded-xl pl-10 pr-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 transition-all"/>
             </div>
           </div>
           <div>
             <label class="text-xs text-gray-400 font-medium block mb-1.5">Phone Number</label>
             <div class="relative">
               <i class="fas fa-phone absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm"></i>
-              <input type="tel" placeholder="+1 (555) 000-0000" class="w-full bg-charcoal-100 border border-white/10 rounded-xl pl-10 pr-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 transition-all"/>
+              <input type="tel" id="signup-phone" placeholder="+1 (555) 000-0000" class="w-full bg-charcoal-100 border border-white/10 rounded-xl pl-10 pr-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 transition-all"/>
             </div>
           </div>
           <div>
@@ -232,7 +255,7 @@ authPages.get('/signup', (c) => {
             </label>
             <div class="relative">
               <i class="fas fa-lock absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm"></i>
-              <input type="password" id="signup-password" placeholder="Min 8 characters" required oninput="checkStrength(this)"
+              <input type="password" id="signup-password" placeholder="Min 8 chars, 1 uppercase, 1 number" required oninput="checkStrength(this)"
                 class="w-full bg-charcoal-100 border border-white/10 rounded-xl pl-10 pr-10 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 transition-all"/>
               <button type="button" onclick="togglePass('signup-password', this)" class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white transition-colors">
                 <i class="fas fa-eye text-sm"></i>
@@ -244,13 +267,26 @@ authPages.get('/signup', (c) => {
             </div>
           </div>
 
+          <!-- No Bailment + Legal Disclaimer (Phase 3) -->
+          <div class="p-3 bg-yellow-500/5 border border-yellow-500/20 rounded-xl">
+            <p class="text-xs text-yellow-300/80 leading-relaxed">
+              <i class="fas fa-shield-halved mr-1"></i>
+              <strong>No Bailment Created.</strong> ParkPeer is a peer-to-peer marketplace. Listing or booking a space does not create a bailment relationship. ParkPeer and hosts are not responsible for theft, damage, or towing. You park at your own risk. ParkPeer is not a licensed insurer.
+            </p>
+          </div>
+
           <!-- Terms -->
           <label class="flex items-start gap-3 cursor-pointer">
             <input type="checkbox" required class="mt-1 accent-indigo-500 w-4 h-4 flex-shrink-0"/>
             <p class="text-xs text-gray-400">
-              I agree to ParkPeer's <a href="#" class="text-indigo-400 hover:underline">Terms of Service</a> and <a href="#" class="text-indigo-400 hover:underline">Privacy Policy</a>. I consent to SMS and email notifications.
+              I agree to ParkPeer's <a href="/legal/tos" class="text-indigo-400 hover:underline">Terms of Service</a>, <a href="/legal/privacy" class="text-indigo-400 hover:underline">Privacy Policy</a>, and <a href="/legal/host-protection" class="text-indigo-400 hover:underline">Host Protection Policy</a>. I acknowledge the No Bailment disclaimer and consent to SMS and email communications.
             </p>
           </label>
+
+          <div id="signup-error" class="hidden p-3 bg-red-500/10 border border-red-500/20 rounded-xl flex items-center gap-2">
+            <i class="fas fa-exclamation-circle text-red-400 text-sm"></i>
+            <p id="signup-error-msg" class="text-red-400 text-sm">Registration failed. Please try again.</p>
+          </div>
 
           <button type="submit" id="signup-btn" class="btn-primary w-full flex items-center justify-center gap-2 py-4 rounded-xl font-bold text-white text-base">
             <i class="fas fa-rocket"></i>
@@ -275,6 +311,7 @@ authPages.get('/signup', (c) => {
     }
 
     function selectRole(role, btn) {
+      document.getElementById('selected-role').value = role;
       document.querySelectorAll('.role-btn').forEach(b => {
         b.className = 'role-btn p-4 rounded-2xl border border-white/5 bg-charcoal-100 text-center transition-all hover:border-lime-500/50';
         b.querySelector('i').className = b.querySelector('i').className.replace('text-indigo-400', 'text-gray-400').replace('text-lime-500', 'text-gray-400');
@@ -313,14 +350,57 @@ authPages.get('/signup', (c) => {
       }
     }
 
-    function handleSignup(e) {
+    async function handleSignup(e) {
       e.preventDefault();
-      const btn = document.getElementById('signup-btn');
+      const btn    = document.getElementById('signup-btn');
+      const errEl  = document.getElementById('signup-error');
+      const errMsg = document.getElementById('signup-error-msg');
       btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Creating account...';
-      btn.disabled = true;
-      setTimeout(() => {
-        window.location.href = '/dashboard';
-      }, 2000);
+      btn.disabled  = true;
+      errEl.classList.add('hidden');
+
+      const first    = document.getElementById('signup-first')?.value?.trim()  || '';
+      const last     = document.getElementById('signup-last')?.value?.trim()   || '';
+      const email    = document.getElementById('signup-email')?.value?.trim()  || '';
+      const phone    = document.getElementById('signup-phone')?.value?.trim()  || '';
+      const password = document.getElementById('signup-password')?.value      || '';
+      const role     = document.getElementById('selected-role')?.value         || 'driver';
+
+      if (!first || !last) {
+        if (errMsg) errMsg.textContent = 'Please enter your first and last name.';
+        errEl.classList.remove('hidden');
+        btn.innerHTML = 'Create Free Account'; btn.disabled = false; return;
+      }
+      if (password.length < 8) {
+        if (errMsg) errMsg.textContent = 'Password must be at least 8 characters.';
+        errEl.classList.remove('hidden');
+        btn.innerHTML = 'Create Free Account'; btn.disabled = false; return;
+      }
+
+      try {
+        const res  = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password, full_name: first + ' ' + last, phone, role }),
+          credentials: 'same-origin',
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          if (data.csrf_token) sessionStorage.setItem('pp_csrf', data.csrf_token);
+          const r = data.user?.role || role;
+          window.location.href = r === 'host' ? '/host' : '/dashboard';
+        } else {
+          if (errMsg) errMsg.textContent = data.error || 'Registration failed. Please try again.';
+          errEl.classList.remove('hidden');
+          btn.innerHTML = 'Create Free Account';
+          btn.disabled  = false;
+        }
+      } catch {
+        if (errMsg) errMsg.textContent = 'Connection error. Please try again.';
+        errEl.classList.remove('hidden');
+        btn.innerHTML = 'Create Free Account';
+        btn.disabled  = false;
+      }
     }
   </script>
   `
