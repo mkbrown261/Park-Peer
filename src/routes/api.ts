@@ -1059,7 +1059,7 @@ apiRoutes.post('/chat', async (c) => {
       body: JSON.stringify({
         model:       'gpt-5-mini',
         messages:    [{ role: 'system', content: SYSTEM_PROMPT }, ...safeMessages],
-        max_tokens:  400,
+        max_tokens:  1500,
         temperature: 0.55,
         top_p:       0.9,
       }),
