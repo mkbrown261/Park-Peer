@@ -438,7 +438,18 @@ apiRoutes.post('/payments/create-intent', async (c) => {
   }
 
   const hours       = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / 3600000))
-  const ratePerHour = 12  // TODO: fetch from D1 listing
+
+  // Fetch real rate from D1 listing
+  let ratePerHour = 12  // fallback
+  const db = c.env?.DB
+  if (db && listing_id) {
+    try {
+      const row = await db.prepare('SELECT rate_hourly FROM listings WHERE id = ? AND status = ?')
+        .bind(String(listing_id), 'active').first<{ rate_hourly: number }>()
+      if (row?.rate_hourly) ratePerHour = row.rate_hourly
+    } catch {}
+  }
+
   const subtotal    = ratePerHour * hours
   const platformFee = Math.round(subtotal * 0.15 * 100) / 100
   const total       = subtotal + platformFee
@@ -516,8 +527,20 @@ apiRoutes.post('/payments/confirm', async (c) => {
     const bookingId    = Math.floor(100000 + Math.random() * 900000)
 
     // Send confirmation emails + SMS in parallel
-    const listingTitle   = 'Parking Space'  // TODO: fetch from D1
-    const listingAddress = 'Chicago, IL'
+    // Fetch real listing title + address from D1
+    let listingTitle   = 'Parking Space'
+    let listingAddress = ''
+    const dbConfirm = c.env?.DB
+    if (dbConfirm && listing_id) {
+      try {
+        const row = await dbConfirm.prepare('SELECT title, address, city FROM listings WHERE id = ?')
+          .bind(String(listing_id)).first<any>()
+        if (row) {
+          listingTitle   = row.title   || listingTitle
+          listingAddress = [row.address, row.city].filter(Boolean).join(', ') || listingAddress
+        }
+      } catch {}
+    }
     const startFormatted = new Date(start_datetime).toLocaleString('en-US')
     const endFormatted   = new Date(end_datetime).toLocaleString('en-US')
 
@@ -982,17 +1005,8 @@ apiRoutes.post('/bookings', async (c) => {
     }
   }
 
-  // DB not available — return calculated quote only
-  const base  = Math.round(12 * hours * 100) / 100
-  const fee   = Math.round(base * 0.15 * 100) / 100
-  const total = Math.round((base + fee) * 100) / 100
-  return c.json({
-    id: 'PP-' + new Date().getFullYear() + '-' + Math.floor(1000 + Math.random() * 9000),
-    listing_id, start_datetime, end_datetime, hours,
-    pricing: { rate_per_hour: 12, base, service_fee: fee, total },
-    status: 'pending_payment',
-    created_at: new Date().toISOString()
-  }, 201)
+  // DB not available — cannot create booking without rate data
+  return c.json({ error: 'Database unavailable. Please try again.' }, 503)
 })
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1231,18 +1245,50 @@ apiRoutes.get('/user/payout-info', requireUserAuth(), async (c) => {
 })
 
 // ════════════════════════════════════════════════════════════════════════════
-// REVIEWS
+// REVIEWS — Real D1 data
+// GET /api/reviews/listing/:id
 // ════════════════════════════════════════════════════════════════════════════
-apiRoutes.get('/reviews/listing/:id', (c) => {
-  return c.json({
-    data: [
-      { id: 'r1', reviewer: 'David L.', rating: 5, comment: 'Exactly as described. Clean, safe, easy to find.', created_at: '2026-02-28T10:00:00Z' },
-      { id: 'r2', reviewer: 'Priya S.', rating: 5, comment: 'Best parking in the area for the price.', created_at: '2026-02-20T14:00:00Z' },
-      { id: 'r3', reviewer: 'Carlos M.', rating: 4, comment: 'Great spot, easy access.', created_at: '2026-02-15T09:00:00Z' },
-    ],
-    average_rating: 4.9, total: 3,
-    breakdown: { 5: 72, 4: 45, 3: 18, 2: 5, 1: 2 }
-  })
+apiRoutes.get('/reviews/listing/:id', async (c) => {
+  const id = c.req.param('id')
+  const db = c.env?.DB
+  if (!db) return c.json({ data: [], average_rating: 0, total: 0, breakdown: { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 } })
+
+  try {
+    const rows = await db.prepare(`
+      SELECT r.id, r.rating, r.comment, r.created_at,
+             u.full_name as reviewer_name
+      FROM reviews r
+      LEFT JOIN users u ON r.reviewer_id = u.id
+      WHERE r.listing_id = ? AND r.status = 'published'
+      ORDER BY r.created_at DESC
+      LIMIT 50
+    `).bind(id).all<any>()
+
+    const reviews = rows.results || []
+    const total   = reviews.length
+    const avg     = total > 0 ? Math.round((reviews.reduce((s: number, r: any) => s + (r.rating || 0), 0) / total) * 10) / 10 : 0
+    const breakdown: Record<number, number> = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 }
+    for (const r of reviews) {
+      const s = Math.round(r.rating || 0)
+      if (s >= 1 && s <= 5) breakdown[s]++
+    }
+
+    return c.json({
+      data: reviews.map((r: any) => ({
+        id:         r.id,
+        reviewer:   r.reviewer_name || 'Driver',
+        rating:     r.rating,
+        comment:    r.comment,
+        created_at: r.created_at,
+      })),
+      average_rating: avg,
+      total,
+      breakdown,
+    })
+  } catch (e: any) {
+    console.error('[reviews/listing/:id]', e.message)
+    return c.json({ data: [], average_rating: 0, total: 0, breakdown: { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 } })
+  }
 })
 
 // ════════════════════════════════════════════════════════════════════════════

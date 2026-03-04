@@ -346,7 +346,7 @@ searchPage.get('/', (c) => {
   let currentType = 'all'
   let currentSort = 'rating'
   let selectedVehicles = []
-  let mapCenter = { lat: 41.8781, lng: -87.6298 }  // Default: Chicago
+  let mapCenter = { lat: 0, lng: 0 }  // Will be set by geolocation or search
   let mapRadius = 50
   let mapStyleId = 'dark-v11'
 
@@ -391,7 +391,7 @@ searchPage.get('/', (c) => {
             if (map) map.flyTo({ center: [mapCenter.lng, mapCenter.lat], zoom: 12 })
             loadListings()
           },
-          () => loadListings()  // Fallback to Chicago
+          () => loadListings()  // Fallback: load without geo filter
         )
       } else {
         loadListings()
@@ -441,8 +441,8 @@ searchPage.get('/', (c) => {
     map = new mapboxgl.Map({
       container: 'map',
       style: MAP_STYLES.dark,
-      center: [mapCenter.lng, mapCenter.lat],
-      zoom: 12,
+      center: [mapCenter.lng || -98.5795, mapCenter.lat || 39.8283],  // US center if no location yet
+      zoom: mapCenter.lat ? 12 : 4,
       attributionControl: false
     })
 
@@ -786,42 +786,11 @@ searchPage.get('/', (c) => {
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   // GEOCODING: search by city/address name → coordinates
-  // Uses Mapbox Geocoding API
+  // Uses Mapbox Geocoding API when token is available;
+  // otherwise loads all listings with the text query filter.
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   async function geocodeAndLoad(query) {
-    // City-to-coordinates fallback table (no API token needed)
-    const cities = {
-      'chicago': { lat: 41.8781, lng: -87.6298 },
-      'miami': { lat: 25.7617, lng: -80.1918 },
-      'miami beach': { lat: 25.7907, lng: -80.1300 },
-      'new york': { lat: 40.7128, lng: -74.0060 },
-      'nyc': { lat: 40.7128, lng: -74.0060 },
-      'brooklyn': { lat: 40.6782, lng: -73.9442 },
-      'queens': { lat: 40.7282, lng: -73.7949 },
-      'los angeles': { lat: 34.0522, lng: -118.2437 },
-      'la': { lat: 34.0522, lng: -118.2437 },
-      'santa monica': { lat: 34.0195, lng: -118.4912 },
-      'venice': { lat: 33.9851, lng: -118.4695 },
-      'atlanta': { lat: 33.7490, lng: -84.3880 },
-      'wrigley': { lat: 41.9484, lng: -87.6553 },
-      "o'hare": { lat: 41.9742, lng: -87.9073 },
-      'ohare': { lat: 41.9742, lng: -87.9073 },
-      'midtown': { lat: 40.7549, lng: -73.9840 },
-      'navy pier': { lat: 41.8917, lng: -87.6054 },
-      'loop': { lat: 41.8808, lng: -87.6298 },
-    }
-
-    const key = query.toLowerCase().trim()
-    for (const [city, coords] of Object.entries(cities)) {
-      if (key.includes(city)) {
-        mapCenter = coords
-        if (map) map.flyTo({ center: [coords.lng, coords.lat], zoom: 12, duration: 1000 })
-        await loadListings()
-        return
-      }
-    }
-
-    // If Mapbox token is available, try geocoding API
+    // If Mapbox token is available, use the geocoding API
     if (MAPBOX_TOKEN && MAPBOX_TOKEN.length > 20) {
       try {
         const r = await fetch(\`https://api.mapbox.com/geocoding/v5/mapbox.places/\${encodeURIComponent(query)}.json?access_token=\${MAPBOX_TOKEN}&types=place,address,neighborhood,poi&limit=1\`)
@@ -836,7 +805,7 @@ searchPage.get('/', (c) => {
       } catch(e) {}
     }
 
-    // Just load with text query filter
+    // No geocoding available — just load with text query filter
     await loadListings()
   }
 

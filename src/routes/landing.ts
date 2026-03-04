@@ -161,22 +161,6 @@ landingPage.get('/', async (c) => {
     <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-indigo-900/10 rounded-full blur-3xl"></div>
     
     <div class="absolute inset-0 pointer-events-none">
-      <div class="absolute top-32 left-16 animate-bounce" style="animation-delay:0s;animation-duration:3s;">
-        <div class="bg-indigo-500 text-white text-xs font-bold px-3 py-1.5 rounded-full shadow-lg glow-indigo">$8/hr</div>
-        <div class="w-2 h-2 bg-indigo-500 rounded-full mx-auto mt-1"></div>
-      </div>
-      <div class="absolute top-48 right-20 animate-bounce" style="animation-delay:0.5s;animation-duration:3.5s;">
-        <div class="bg-lime-500 text-charcoal text-xs font-bold px-3 py-1.5 rounded-full shadow-lg glow-lime">$5/hr</div>
-        <div class="w-2 h-2 bg-lime-500 rounded-full mx-auto mt-1"></div>
-      </div>
-      <div class="absolute bottom-48 left-24 animate-bounce" style="animation-delay:1s;animation-duration:4s;">
-        <div class="bg-indigo-500 text-white text-xs font-bold px-3 py-1.5 rounded-full shadow-lg glow-indigo">$12/hr</div>
-        <div class="w-2 h-2 bg-indigo-500 rounded-full mx-auto mt-1"></div>
-      </div>
-      <div class="absolute bottom-32 right-32 animate-bounce" style="animation-delay:1.5s;animation-duration:2.8s;">
-        <div class="bg-indigo-400 text-white text-xs font-bold px-3 py-1.5 rounded-full shadow-lg">$6/hr</div>
-        <div class="w-2 h-2 bg-indigo-400 rounded-full mx-auto mt-1"></div>
-      </div>
     </div>
 
     <div class="relative z-10 max-w-5xl mx-auto px-4 text-center slide-up">
@@ -230,10 +214,6 @@ landingPage.get('/', async (c) => {
         <div class="flex items-center gap-2">
           <i class="fas fa-lock text-green-400"></i>
           <span>Secure Payments</span>
-        </div>
-        <div class="flex items-center gap-2">
-          <i class="fas fa-star text-amber-400"></i>
-          <span>4.8/5 Average Rating</span>
         </div>
         <div class="flex items-center gap-2">
           <i class="fas fa-headset text-green-400"></i>
@@ -361,21 +341,21 @@ landingPage.get('/', async (c) => {
           How Much Can <br/><span class="gradient-text">Your Space Earn?</span>
         </h2>
         <p class="text-gray-400 text-lg mb-8 leading-relaxed">
-          Hosts in Chicago average <strong class="text-white">$350–$900/month</strong> from a single parking spot. Airport-adjacent spaces earn even more.
+          Hosts earn passive income from their unused parking space. Earnings vary by location, type, and availability.
         </p>
         <div class="space-y-4">
           ${[
-            { label: 'Driveway', range: '$150–$400/mo', icon: 'fa-home' },
-            { label: 'Garage',   range: '$300–$800/mo', icon: 'fa-warehouse' },
-            { label: 'Lot Space',range: '$200–$600/mo', icon: 'fa-parking' },
-            { label: 'Airport Spot', range: '$500–$1,200/mo', icon: 'fa-plane' },
+            { label: 'Driveway',     icon: 'fa-home' },
+            { label: 'Garage',       icon: 'fa-warehouse' },
+            { label: 'Lot Space',    icon: 'fa-parking' },
+            { label: 'Airport Spot', icon: 'fa-plane' },
           ].map(e => `
             <div class="flex items-center gap-4 p-4 bg-charcoal-100 rounded-xl border border-white/5 hover:border-lime-500/30 transition-all">
               <div class="w-10 h-10 bg-lime-500/10 rounded-xl flex items-center justify-center flex-shrink-0">
                 <i class="fas ${e.icon} text-lime-500"></i>
               </div>
               <span class="text-white font-medium flex-1">${e.label}</span>
-              <span class="text-lime-500 font-bold">${e.range}</span>
+              <span class="text-lime-500 font-bold text-sm">Varies by location</span>
             </div>
           `).join('')}
         </div>
@@ -447,34 +427,7 @@ landingPage.get('/', async (c) => {
     </div>
   </section>
 
-  <!-- Testimonials (marketing copy — intentionally static) -->
-  <section class="py-24 max-w-7xl mx-auto px-4">
-    <div class="text-center mb-16">
-      <span class="text-indigo-400 text-sm font-semibold uppercase tracking-widest">Reviews</span>
-      <h2 class="text-4xl md:text-5xl font-black mt-3">Real Stories from Real Users</h2>
-    </div>
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-      ${[
-        { name:'Marcus Johnson', role:'Daily Commuter', avatar:'M', stars:5, quote:'Saved me $180/month compared to the downtown garage. Found a spot 2 blocks from my office. Game changer!', location:'Chicago, IL', joined:'Driver since 2024' },
-        { name:'Sarah Chen', role:'Homeowner & Host', avatar:'S', stars:5, quote:"My driveway makes $420/month while I'm at work. I literally do nothing and money appears in my account. Incredible.", location:'Lincoln Park, IL', joined:'Host since 2024' },
-        { name:'Derek Williams', role:'Event Goer', avatar:'D', stars:5, quote:'Used ParkPeer for 3 Cubs games last month. Found spots for $8 while everyone else was paying $35. Never going back.', location:'Wrigleyville, IL', joined:'Driver since 2023' },
-      ].map(t => `
-        <div class="bg-charcoal-100 rounded-2xl p-6 border border-white/5 card-hover">
-          <div class="flex gap-1 mb-4">
-            ${Array(t.stars).fill('<i class="fas fa-star text-amber-400 text-sm"></i>').join('')}
-          </div>
-          <p class="text-gray-300 leading-relaxed mb-6 italic">"${t.quote}"</p>
-          <div class="flex items-center gap-3">
-            <div class="w-11 h-11 gradient-bg rounded-full flex items-center justify-center font-bold text-white flex-shrink-0">${t.avatar}</div>
-            <div>
-              <p class="font-bold text-white text-sm">${t.name}</p>
-              <p class="text-gray-500 text-xs">${t.role} · ${t.location}</p>
-            </div>
-          </div>
-        </div>
-      `).join('')}
-    </div>
-  </section>
+  <!-- Testimonials removed — replaced with live reviews on listing pages -->
 
   <!-- Safety Section -->
   <section class="py-16 bg-charcoal-100 border-y border-white/5">

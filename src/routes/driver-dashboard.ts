@@ -18,7 +18,9 @@ driverDashboard.get('/', async (c) => {
 
   if (db) {
     try {
-      // Summary stats (for demo user_id=1 or first driver in DB)
+      // Note: driver_id scoping requires auth middleware to pass user context.
+      // Until session-based auth is wired to SSR routes, we show aggregate counts
+      // across all bookings as a platform-level summary (no PII exposed).
       const stats = await db.prepare(`
         SELECT
           COUNT(*) as total_bookings,

@@ -227,11 +227,11 @@ authPages.get('/signup', (c) => {
           <div class="grid grid-cols-2 gap-3">
             <div>
               <label class="text-xs text-gray-400 font-medium block mb-1.5">First Name</label>
-              <input type="text" id="signup-first" placeholder="Alex" required class="w-full bg-charcoal-100 border border-white/10 rounded-xl px-3 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 transition-all"/>
+              <input type="text" id="signup-first" placeholder="First name" required class="w-full bg-charcoal-100 border border-white/10 rounded-xl px-3 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 transition-all"/>
             </div>
             <div>
               <label class="text-xs text-gray-400 font-medium block mb-1.5">Last Name</label>
-              <input type="text" id="signup-last" placeholder="Martinez" required class="w-full bg-charcoal-100 border border-white/10 rounded-xl px-3 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 transition-all"/>
+              <input type="text" id="signup-last" placeholder="Last name" required class="w-full bg-charcoal-100 border border-white/10 rounded-xl px-3 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 transition-all"/>
             </div>
           </div>
           <div>
