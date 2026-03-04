@@ -208,6 +208,523 @@ export const Layout = (title: string, content: string, extraHead = '') => `<!DOC
       document.addEventListener('click', () => userMenu.classList.add('hidden'));
     }
   </script>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       PARKPEER AI CHAT WIDGET
+       Floating circular button (bottom-right) → slide-up chat panel
+       All API calls go to /api/chat — key is never in frontend code
+  ═══════════════════════════════════════════════════════════════════ -->
+
+  <!-- Chat Styles -->
+  <style>
+    /* ── Chat button ── */
+    #pp-chat-btn {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 9998;
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #5B2EFF 0%, #4a20f0 100%);
+      box-shadow: 0 4px 24px rgba(91,46,255,0.55);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      border: none;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+      outline: none;
+    }
+    #pp-chat-btn:hover {
+      transform: scale(1.08) translateY(-2px);
+      box-shadow: 0 8px 32px rgba(91,46,255,0.65);
+    }
+    #pp-chat-btn:active { transform: scale(0.96); }
+
+    /* Unread badge */
+    #pp-chat-badge {
+      position: absolute;
+      top: -2px;
+      right: -2px;
+      width: 14px;
+      height: 14px;
+      background: #C6FF00;
+      border-radius: 50%;
+      border: 2px solid #121212;
+      display: none;
+    }
+    #pp-chat-badge.visible { display: block; }
+
+    /* ── Chat panel ── */
+    #pp-chat-panel {
+      position: fixed;
+      bottom: 92px;
+      right: 24px;
+      z-index: 9999;
+      width: 360px;
+      max-width: calc(100vw - 32px);
+      height: 520px;
+      max-height: calc(100vh - 120px);
+      background: #1a1a2e;
+      border: 1px solid rgba(91,46,255,0.35);
+      border-radius: 20px;
+      box-shadow: 0 24px 60px rgba(0,0,0,0.7), 0 0 0 1px rgba(91,46,255,0.15);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      /* Closed state */
+      opacity: 0;
+      transform: translateY(20px) scale(0.97);
+      pointer-events: none;
+      transition: opacity 0.25s ease, transform 0.25s cubic-bezier(0.34,1.56,0.64,1);
+    }
+    #pp-chat-panel.open {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+      pointer-events: all;
+    }
+
+    /* Header */
+    #pp-chat-header {
+      background: linear-gradient(135deg, #5B2EFF 0%, #3a12d4 100%);
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+    .pp-avatar {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    #pp-chat-close {
+      margin-left: auto;
+      background: rgba(255,255,255,0.15);
+      border: none;
+      color: white;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.2s;
+    }
+    #pp-chat-close:hover { background: rgba(255,255,255,0.25); }
+
+    /* Messages area */
+    #pp-chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px 14px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      scrollbar-width: thin;
+      scrollbar-color: #5B2EFF #1a1a2e;
+    }
+    #pp-chat-messages::-webkit-scrollbar { width: 4px; }
+    #pp-chat-messages::-webkit-scrollbar-track { background: #1a1a2e; }
+    #pp-chat-messages::-webkit-scrollbar-thumb { background: #5B2EFF; border-radius: 2px; }
+
+    /* Bubbles */
+    .pp-bubble {
+      max-width: 82%;
+      padding: 9px 13px;
+      border-radius: 14px;
+      font-size: 13.5px;
+      line-height: 1.5;
+      word-break: break-word;
+      animation: pp-pop-in 0.2s ease forwards;
+    }
+    @keyframes pp-pop-in {
+      from { opacity: 0; transform: scale(0.92) translateY(4px); }
+      to   { opacity: 1; transform: scale(1) translateY(0); }
+    }
+    .pp-bubble-bot {
+      background: rgba(91,46,255,0.18);
+      border: 1px solid rgba(91,46,255,0.25);
+      color: #e0d5ff;
+      align-self: flex-start;
+      border-bottom-left-radius: 4px;
+    }
+    .pp-bubble-user {
+      background: linear-gradient(135deg, #5B2EFF, #4a20f0);
+      color: #fff;
+      align-self: flex-end;
+      border-bottom-right-radius: 4px;
+    }
+    .pp-bubble-error {
+      background: rgba(239,68,68,0.15);
+      border: 1px solid rgba(239,68,68,0.3);
+      color: #fca5a5;
+      align-self: flex-start;
+      border-bottom-left-radius: 4px;
+    }
+
+    /* Typing indicator */
+    .pp-typing {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 9px 13px;
+      background: rgba(91,46,255,0.12);
+      border: 1px solid rgba(91,46,255,0.2);
+      border-radius: 14px;
+      border-bottom-left-radius: 4px;
+      align-self: flex-start;
+    }
+    .pp-typing span {
+      width: 6px;
+      height: 6px;
+      background: #9e7aff;
+      border-radius: 50%;
+      animation: pp-bounce 1.2s infinite;
+    }
+    .pp-typing span:nth-child(2) { animation-delay: 0.2s; }
+    .pp-typing span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes pp-bounce {
+      0%, 80%, 100% { transform: translateY(0); opacity: 0.5; }
+      40% { transform: translateY(-6px); opacity: 1; }
+    }
+
+    /* Quick-reply chips */
+    #pp-chat-chips {
+      padding: 4px 14px 8px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .pp-chip {
+      background: rgba(91,46,255,0.15);
+      border: 1px solid rgba(91,46,255,0.35);
+      color: #c2aaff;
+      font-size: 11.5px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+      white-space: nowrap;
+    }
+    .pp-chip:hover { background: rgba(91,46,255,0.32); color: #fff; }
+
+    /* Input row */
+    #pp-chat-input-row {
+      padding: 10px 12px 12px;
+      display: flex;
+      gap: 8px;
+      border-top: 1px solid rgba(255,255,255,0.07);
+      flex-shrink: 0;
+      background: #16162a;
+    }
+    #pp-chat-input {
+      flex: 1;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 12px;
+      color: #fff;
+      font-size: 13px;
+      padding: 8px 12px;
+      outline: none;
+      resize: none;
+      min-height: 38px;
+      max-height: 90px;
+      font-family: inherit;
+      transition: border-color 0.2s;
+    }
+    #pp-chat-input:focus { border-color: rgba(91,46,255,0.6); }
+    #pp-chat-input::placeholder { color: #666; }
+    #pp-chat-send {
+      width: 38px;
+      height: 38px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #5B2EFF, #4a20f0);
+      border: none;
+      color: #fff;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: opacity 0.2s, transform 0.15s;
+      align-self: flex-end;
+    }
+    #pp-chat-send:hover { opacity: 0.88; transform: translateY(-1px); }
+    #pp-chat-send:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+    /* Powered-by footer */
+    #pp-chat-footer {
+      padding: 5px 0 7px;
+      text-align: center;
+      font-size: 10px;
+      color: #444;
+      flex-shrink: 0;
+      background: #16162a;
+    }
+
+    /* ── Mobile tweaks ── */
+    @media (max-width: 480px) {
+      #pp-chat-btn  { bottom: 16px; right: 16px; }
+      #pp-chat-panel {
+        bottom: 80px;
+        right: 8px;
+        left: 8px;
+        width: auto;
+        max-width: none;
+      }
+    }
+  </style>
+
+  <!-- Chat Button -->
+  <button id="pp-chat-btn" aria-label="Open ParkPeer support chat" title="Chat with ParkPeer Assistant">
+    <i class="fas fa-comment-dots text-white text-xl" id="pp-chat-icon-open"></i>
+    <i class="fas fa-times text-white text-xl hidden" id="pp-chat-icon-close"></i>
+    <span id="pp-chat-badge" class="visible"></span>
+  </button>
+
+  <!-- Chat Panel -->
+  <div id="pp-chat-panel" role="dialog" aria-label="ParkPeer Support Chat" aria-modal="true">
+
+    <!-- Header -->
+    <div id="pp-chat-header">
+      <div class="pp-avatar">
+        <i class="fas fa-parking text-white text-sm"></i>
+      </div>
+      <div>
+        <p class="text-white font-semibold text-sm leading-tight">ParkPeer Assistant</p>
+        <p class="text-indigo-200 text-xs mt-0.5 flex items-center gap-1">
+          <span class="w-1.5 h-1.5 bg-lime-400 rounded-full inline-block"></span>
+          Online · AI-powered support
+        </p>
+      </div>
+      <button id="pp-chat-close" aria-label="Close chat">
+        <i class="fas fa-times text-xs"></i>
+      </button>
+    </div>
+
+    <!-- Messages -->
+    <div id="pp-chat-messages" aria-live="polite" aria-relevant="additions">
+      <!-- Greeting injected by JS -->
+    </div>
+
+    <!-- Quick-reply chips -->
+    <div id="pp-chat-chips">
+      <button class="pp-chip" data-msg="How do I find parking?">Find parking</button>
+      <button class="pp-chip" data-msg="How do I list my parking space?">List my space</button>
+      <button class="pp-chip" data-msg="How do host earnings work?">Host earnings</button>
+      <button class="pp-chip" data-msg="What is the cancellation policy?">Cancellations</button>
+      <button class="pp-chip" data-msg="How does payment work?">Payments</button>
+    </div>
+
+    <!-- Input -->
+    <div id="pp-chat-input-row">
+      <textarea
+        id="pp-chat-input"
+        placeholder="Ask me anything about ParkPeer…"
+        rows="1"
+        maxlength="800"
+        aria-label="Chat message"
+      ></textarea>
+      <button id="pp-chat-send" aria-label="Send message" disabled>
+        <i class="fas fa-paper-plane text-sm"></i>
+      </button>
+    </div>
+
+    <div id="pp-chat-footer">Powered by ParkPeer AI</div>
+  </div>
+
+  <!-- Chat Script -->
+  <script>
+  (function() {
+    // ── DOM refs ─────────────────────────────────────────────────────────────
+    const btn        = document.getElementById('pp-chat-btn');
+    const panel      = document.getElementById('pp-chat-panel');
+    const closeBtn   = document.getElementById('pp-chat-close');
+    const messages   = document.getElementById('pp-chat-messages');
+    const input      = document.getElementById('pp-chat-input');
+    const sendBtn    = document.getElementById('pp-chat-send');
+    const badge      = document.getElementById('pp-chat-badge');
+    const iconOpen   = document.getElementById('pp-chat-icon-open');
+    const iconClose  = document.getElementById('pp-chat-icon-close');
+    const chips      = document.querySelectorAll('.pp-chip');
+
+    // ── State ─────────────────────────────────────────────────────────────────
+    let isOpen     = false;
+    let isWaiting  = false;
+    let history    = []; // {role, content}
+    let sessionId  = 'sess_' + Math.random().toString(36).slice(2, 10);
+    let greeted    = false;
+
+    // ── Open / close ─────────────────────────────────────────────────────────
+    function openPanel() {
+      isOpen = true;
+      panel.classList.add('open');
+      iconOpen.classList.add('hidden');
+      iconClose.classList.remove('hidden');
+      badge.classList.remove('visible');
+      if (!greeted) { showGreeting(); greeted = true; }
+      setTimeout(() => input.focus(), 260);
+    }
+
+    function closePanel() {
+      isOpen = false;
+      panel.classList.remove('open');
+      iconOpen.classList.remove('hidden');
+      iconClose.classList.add('hidden');
+    }
+
+    btn.addEventListener('click', () => isOpen ? closePanel() : openPanel());
+    closeBtn.addEventListener('click', closePanel);
+
+    // Close on Escape
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && isOpen) closePanel();
+    });
+
+    // ── Greeting ─────────────────────────────────────────────────────────────
+    function showGreeting() {
+      appendBubble('bot',
+        "Hi! I'm the ParkPeer Assistant. How can I help you today? " +
+        "I can help you find parking, list your space, or answer questions about bookings and payments."
+      );
+    }
+
+    // ── Append bubble ─────────────────────────────────────────────────────────
+    function appendBubble(type, text) {
+      const div = document.createElement('div');
+      div.className = 'pp-bubble ' +
+        (type === 'user' ? 'pp-bubble-user' : type === 'error' ? 'pp-bubble-error' : 'pp-bubble-bot');
+      // Render newlines as <br>
+      div.innerHTML = text.replace(/\\n/g, '<br>').replace(/\\r\\n/g, '<br>');
+      messages.appendChild(div);
+      scrollBottom();
+      return div;
+    }
+
+    // ── Typing indicator ──────────────────────────────────────────────────────
+    function showTyping() {
+      const d = document.createElement('div');
+      d.className = 'pp-typing';
+      d.id = 'pp-typing-indicator';
+      d.innerHTML = '<span></span><span></span><span></span>';
+      messages.appendChild(d);
+      scrollBottom();
+    }
+
+    function hideTyping() {
+      const d = document.getElementById('pp-typing-indicator');
+      if (d) d.remove();
+    }
+
+    // ── Scroll to bottom ──────────────────────────────────────────────────────
+    function scrollBottom() {
+      requestAnimationFrame(() => {
+        messages.scrollTop = messages.scrollHeight;
+      });
+    }
+
+    // ── Input helpers ─────────────────────────────────────────────────────────
+    input.addEventListener('input', function() {
+      sendBtn.disabled = !this.value.trim() || isWaiting;
+      // Auto-grow textarea
+      this.style.height = 'auto';
+      this.style.height = Math.min(this.scrollHeight, 90) + 'px';
+    });
+
+    input.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        if (!sendBtn.disabled) handleSend();
+      }
+    });
+
+    sendBtn.addEventListener('click', handleSend);
+
+    // ── Quick-reply chips ─────────────────────────────────────────────────────
+    chips.forEach(chip => {
+      chip.addEventListener('click', function() {
+        const msg = this.getAttribute('data-msg');
+        if (msg && !isWaiting) sendMessage(msg);
+      });
+    });
+
+    // ── Send flow ─────────────────────────────────────────────────────────────
+    function handleSend() {
+      const text = input.value.trim();
+      if (!text || isWaiting) return;
+      input.value = '';
+      input.style.height = 'auto';
+      sendBtn.disabled = true;
+      sendMessage(text);
+    }
+
+    async function sendMessage(text) {
+      if (isWaiting) return;
+
+      // Optimistic UI: show user bubble
+      appendBubble('user', text);
+      history.push({ role: 'user', content: text });
+
+      isWaiting = true;
+      sendBtn.disabled = true;
+      showTyping();
+
+      try {
+        const res = await fetch('/api/chat', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: history, sessionId }),
+        });
+
+        hideTyping();
+
+        if (res.status === 429) {
+          appendBubble('error',
+            'You\\'re sending messages too quickly. Please wait a moment and try again.'
+          );
+          history.pop(); // remove the failed user message
+        } else if (!res.ok) {
+          appendBubble('error',
+            'Something went wrong on our end. Please try again or email support@parkpeer.com.'
+          );
+          history.pop();
+        } else {
+          const data = await res.json();
+          const reply = data.reply || data.error || 'I couldn\\'t generate a response. Please try again.';
+          appendBubble('bot', reply);
+          history.push({ role: 'assistant', content: reply });
+
+          // Keep history manageable (last 20 turns)
+          if (history.length > 20) history = history.slice(-20);
+        }
+      } catch (err) {
+        hideTyping();
+        appendBubble('error',
+          'Network error. Please check your connection and try again.'
+        );
+        history.pop();
+      }
+
+      isWaiting = false;
+      sendBtn.disabled = !input.value.trim();
+    }
+
+    // ── Show badge after 3 s if panel has not been opened ────────────────────
+    setTimeout(() => {
+      if (!greeted) badge.classList.add('visible');
+    }, 3000);
+
+  })();
+  </script>
 </body>
 </html>`
 

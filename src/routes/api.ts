@@ -38,6 +38,8 @@ type Bindings = {
   ADMIN_PASSWORD: string
   ADMIN_TOKEN_SECRET: string
   MAPBOX_TOKEN: string
+  OPENAI_API_KEY: string
+  OPENAI_BASE_URL: string
 }
 
 export const apiRoutes = new Hono<{ Bindings: Bindings }>()
@@ -174,6 +176,7 @@ apiRoutes.get('/health', (c) => {
       stripe:       env?.STRIPE_SECRET_KEY ? 'configured' : 'not configured',
       resend:     (env?.RESEND_API_KEY && env.RESEND_API_KEY !== 'PLACEHOLDER_RESEND_KEY') ? 'configured' : 'placeholder',
       twilio:       env?.TWILIO_ACCOUNT_SID ? 'configured' : 'not configured',
+      ai_chat:      env?.OPENAI_API_KEY ? 'configured' : 'not configured',
     }
   })
 })
@@ -871,4 +874,224 @@ apiRoutes.post('/webhooks/twilio/voice', async (c) => {
     `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice">Welcome to ParkPeer. For support, please visit parkpeer dot pages dot dev or send us a text message.</Say></Response>`,
     { headers: { 'Content-Type': 'text/xml' } }
   )
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// AI SUPPORT CHAT
+// POST /api/chat
+//
+// Body:  { messages: [{role:'user'|'assistant', content:string}], sessionId?:string }
+// Returns: { reply: string }
+//
+// Security:
+//   • API key stored only in env — never exposed to frontend
+//   • Rate limit: 20 requests / IP / minute (in-memory sliding window)
+//   • Prompt injection guard: strips control characters, limits input length
+//   • Response max tokens: 400 (keeps answers concise)
+//   • Error logging omits all PII
+//
+// Future-ready hooks (marked TODO):
+//   • Live listing lookup from D1
+//   • Booking status lookup
+//   • Admin monitoring / chat-log storage in D1
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── In-memory rate-limit store (resets on Worker restart, good enough for CF) ─
+const RL_WINDOW_MS = 60_000   // 1 minute window
+const RL_MAX       = 20       // max requests per IP per window
+
+interface RLEntry { count: number; windowStart: number }
+const rateLimitStore = new Map<string, RLEntry>()
+
+function isRateLimited(ip: string): boolean {
+  const now = Date.now()
+  const entry = rateLimitStore.get(ip)
+  if (!entry || now - entry.windowStart > RL_WINDOW_MS) {
+    rateLimitStore.set(ip, { count: 1, windowStart: now })
+    return false
+  }
+  if (entry.count >= RL_MAX) return true
+  entry.count++
+  return false
+}
+
+// ── Prompt injection / safety guard ───────────────────────────────────────
+const BLOCKED_PATTERNS = [
+  /ignore (previous|above|all) instructions/i,
+  /you are now/i,
+  /pretend (you are|to be)/i,
+  /act as (a|an)\s+\w/i,
+  /\bsystem\s*:/i,
+  /\bDAN\b/i,
+  /jailbreak/i,
+]
+
+function sanitizeInput(text: string): string | null {
+  // Strip null bytes & Unicode control chars, collapse whitespace
+  const clean = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '').trim()
+  if (clean.length === 0 || clean.length > 800) return null
+  for (const re of BLOCKED_PATTERNS) {
+    if (re.test(clean)) return null
+  }
+  return clean
+}
+
+// ── ParkPeer system prompt ─────────────────────────────────────────────────
+const SYSTEM_PROMPT = `You are the ParkPeer Support Assistant — a friendly, helpful, concise, and professional AI assistant built exclusively for the ParkPeer peer-to-peer parking marketplace.
+
+PERSONALITY
+• Warm, approachable, and encouraging — use short sentences and a conversational tone.
+• Professional: no slang, no emojis, no exclamation-point spam.
+• Concise: keep answers under 120 words unless a step-by-step guide is necessary.
+
+SCOPE — ONLY answer questions about:
+1. Finding & booking parking on ParkPeer (search, filters, map, booking flow)
+2. Listing a parking space as a host (how to list, pricing tips, availability settings)
+3. Payments & pricing (how billing works, platform fee of ~15%, payout timeline)
+4. Cancellation policy (drivers: free cancel ≥1 hr before; hosts: free cancel ≥24 hr before)
+5. Host earnings (65 % of booking revenue after platform fee, weekly payouts via Stripe)
+6. Account & onboarding for both drivers and hosts
+7. Safety & trust features (verified profiles, secure payments via Stripe, host protection)
+8. General platform FAQs
+
+HARD RULES — NEVER:
+• Mention or compare any competitor (SpotHero, ParkWhiz, ParkingPanda, Airbnb, etc.)
+• Give legal, tax, insurance, or financial advice
+• Access, guess at, or fabricate specific user data, bookings, or account details
+• Claim to be a human
+• Respond to requests outside ParkPeer's scope — politely redirect instead
+• Use placeholder or made-up statistics
+
+DRIVER SIGN-UP CTA: When a user asks about finding parking, mention they can sign up free at /auth/register.
+HOST SIGN-UP CTA: When a user asks about listing a space, mention they can start hosting at /host.
+
+STEP-BY-STEP GUIDES (use numbered lists):
+• Booking a spot: 1) Search by address or landmark → 2) Pick dates & times → 3) Choose a listing → 4) Pay securely via Stripe → 5) Get confirmation with directions.
+• Listing a space: 1) Go to /host → 2) Add your address & photos → 3) Set your rate & availability → 4) Publish — you're live!
+
+FALLBACK: If you are unsure, say "I'm not sure about that — please email support@parkpeer.com for help."
+
+Remember: You represent ParkPeer and must always be helpful, honest, and on-brand.`
+
+// ── Route handler ──────────────────────────────────────────────────────────
+apiRoutes.post('/chat', async (c) => {
+  // 1. Rate limiting
+  const ip = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || 'unknown'
+  if (isRateLimited(ip)) {
+    return c.json({ error: 'Too many requests — please wait a moment and try again.' }, 429)
+  }
+
+  // 2. Parse & validate body
+  let body: { messages?: Array<{ role: string; content: string }>; sessionId?: string }
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ error: 'Invalid request body.' }, 400)
+  }
+
+  const rawMessages = body.messages
+  if (!Array.isArray(rawMessages) || rawMessages.length === 0) {
+    return c.json({ error: 'messages array is required.' }, 400)
+  }
+
+  // 3. Sanitize and validate each message (keep last 10 for context window)
+  const recent = rawMessages.slice(-10)
+  const safeMessages: Array<{ role: string; content: string }> = []
+
+  for (const msg of recent) {
+    if (!msg || typeof msg.content !== 'string') continue
+    const role = msg.role === 'assistant' ? 'assistant' : 'user'
+
+    if (role === 'user') {
+      const safe = sanitizeInput(msg.content)
+      if (!safe) {
+        // Blocked message — return a polite refusal immediately
+        return c.json({
+          reply: "I'm sorry, I can only help with ParkPeer-related questions. Is there something about finding or listing parking I can assist with?"
+        })
+      }
+      safeMessages.push({ role: 'user', content: safe })
+    } else {
+      // Assistant history — truncate only, no injection risk
+      safeMessages.push({ role: 'assistant', content: msg.content.slice(0, 800) })
+    }
+  }
+
+  if (safeMessages.length === 0) {
+    return c.json({ error: 'No valid messages.' }, 400)
+  }
+
+  // 4. Check OpenAI key — try c.env first, then globalThis (CF Pages fallback)
+  const apiKey  = c.env?.OPENAI_API_KEY || (globalThis as Record<string, string>)['OPENAI_API_KEY'] || ''
+  const baseURL = c.env?.OPENAI_BASE_URL || (globalThis as Record<string, string>)['OPENAI_BASE_URL'] || 'https://www.genspark.ai/api/llm_proxy/v1'
+
+  if (!apiKey) {
+    console.error('[Chat] OPENAI_API_KEY not configured')
+    return c.json({
+      reply: "I'm temporarily unavailable. Please email support@parkpeer.com for help."
+    })
+  }
+
+  // 5. TODO: Live listing lookup hook
+  //    const lastUserMsg = safeMessages.filter(m => m.role === 'user').at(-1)?.content ?? ''
+  //    if (/available|listing|spot|price/i.test(lastUserMsg) && c.env?.DB) {
+  //      const rows = await c.env.DB.prepare("SELECT title, city, rate_hourly FROM listings WHERE status='active' LIMIT 5").all()
+  //      — inject rows as additional context message
+  //    }
+
+  // 5. TODO: Booking lookup hook
+  //    if (/my booking|booking id|PP-\d/i.test(lastUserMsg)) {
+  //      — lookup booking from D1 by user session (once auth is implemented)
+  //    }
+
+  // 5. TODO: Chat-log storage (admin monitoring)
+  //    await c.env?.DB?.prepare("INSERT INTO chat_logs (session_id, messages_json, created_at) VALUES (?,?,?)")
+  //      .bind(body.sessionId || 'anon', JSON.stringify(safeMessages), new Date().toISOString()).run()
+
+  // 6. Call OpenAI-compatible endpoint
+  try {
+    const response = await fetch(`${baseURL}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': 'Bearer ' + apiKey,
+      },
+      body: JSON.stringify({
+        model:       'gpt-5-mini',
+        messages:    [{ role: 'system', content: SYSTEM_PROMPT }, ...safeMessages],
+        max_tokens:  400,
+        temperature: 0.55,
+        top_p:       0.9,
+      }),
+    })
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '')
+      // Log without PII
+      console.error('[Chat] OpenAI error ' + response.status + ': ' + errText.slice(0, 200))
+      return c.json({
+        reply: "I'm having trouble connecting right now. Please try again in a moment or email support@parkpeer.com."
+      })
+    }
+
+    const data = await response.json() as {
+      choices?: Array<{ message?: { content?: string } }>
+    }
+
+    const reply = data?.choices?.[0]?.message?.content?.trim() || ''
+    if (!reply) {
+      return c.json({ reply: "I couldn't generate a response. Please try rephrasing your question." })
+    }
+
+    // Enforce max length on our side too (belt-and-suspenders)
+    const truncated = reply.length > 1200 ? reply.slice(0, 1200) + '…' : reply
+
+    return c.json({ reply: truncated })
+
+  } catch (err) {
+    console.error('[Chat] Fetch error:', (err as Error).message?.slice(0, 100))
+    return c.json({
+      reply: "I'm temporarily unavailable. Please email support@parkpeer.com for help."
+    })
+  }
 })
