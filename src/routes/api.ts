@@ -43,6 +43,122 @@ type Bindings = {
 export const apiRoutes = new Hono<{ Bindings: Bindings }>()
 
 // ════════════════════════════════════════════════════════════════════════════
+// PLATFORM STATS — real D1 aggregates for homepage
+// GET /api/platform/stats
+// Returns: total_spots, total_hosts, total_cities, total_earnings
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.get('/platform/stats', async (c) => {
+  const db = c.env?.DB
+  const zero = { total_spots: 0, total_hosts: 0, total_cities: 0, total_earnings: 0, source: 'fallback' }
+  if (!db) return c.json(zero)
+
+  try {
+    const [spots, hosts, cities, earnings] = await Promise.all([
+      // Active listing count
+      db.prepare("SELECT COUNT(*) as n FROM listings WHERE status = 'active'")
+        .first<{ n: number }>(),
+      // Distinct hosts with active listings
+      db.prepare("SELECT COUNT(DISTINCT host_id) as n FROM listings WHERE status = 'active'")
+        .first<{ n: number }>(),
+      // Distinct cities with active listings
+      db.prepare("SELECT COUNT(DISTINCT city) as n FROM listings WHERE status = 'active'")
+        .first<{ n: number }>(),
+      // Total paid-out host earnings (sum of host_payout on succeeded payments)
+      db.prepare("SELECT COALESCE(SUM(host_payout), 0) as n FROM payments WHERE status = 'succeeded'")
+        .first<{ n: number }>(),
+    ])
+
+    return c.json({
+      total_spots:    spots?.n    ?? 0,
+      total_hosts:    hosts?.n    ?? 0,
+      total_cities:   cities?.n   ?? 0,
+      total_earnings: earnings?.n ?? 0,
+      source: 'd1'
+    })
+  } catch (e: any) {
+    console.error('[platform/stats]', e.message)
+    return c.json(zero)
+  }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// FEATURED LISTINGS — top-rated active listings for homepage
+// GET /api/platform/featured?limit=4
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.get('/platform/featured', async (c) => {
+  const db  = c.env?.DB
+  const lim = Math.min(12, parseInt(c.req.query('limit') || '4'))
+  if (!db) return c.json({ data: [], source: 'fallback' })
+
+  try {
+    const rows = await db.prepare(`
+      SELECT l.id, l.title, l.type, l.address, l.city, l.state,
+             l.lat, l.lng,
+             l.rate_hourly, l.rate_daily,
+             l.avg_rating, l.review_count,
+             l.instant_book, l.amenities,
+             l.max_vehicle_size,
+             u.full_name as host_name
+      FROM listings l
+      LEFT JOIN users u ON l.host_id = u.id
+      WHERE l.status = 'active'
+      ORDER BY l.avg_rating DESC, l.review_count DESC, l.created_at DESC
+      LIMIT ?
+    `).bind(lim).all<any>()
+
+    const data = (rows.results || []).map((r: any) => {
+      let amenities: string[] = []
+      try { amenities = JSON.parse(r.amenities || '[]') } catch {}
+      return {
+        id:           r.id,
+        title:        r.title,
+        type:         r.type,
+        address:      r.address,
+        city:         r.city,
+        state:        r.state,
+        lat:          r.lat,
+        lng:          r.lng,
+        price_hourly: r.rate_hourly,
+        price_daily:  r.rate_daily,
+        rating:       r.avg_rating,
+        review_count: r.review_count,
+        instant_book: r.instant_book === 1,
+        amenities,
+        host:         r.host_name,
+      }
+    })
+    return c.json({ data, source: 'd1' })
+  } catch (e: any) {
+    console.error('[platform/featured]', e.message)
+    return c.json({ data: [], source: 'error' })
+  }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// CITY BREAKDOWN — active listing counts per city
+// GET /api/platform/cities
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.get('/platform/cities', async (c) => {
+  const db = c.env?.DB
+  if (!db) return c.json({ data: [], source: 'fallback' })
+
+  try {
+    const rows = await db.prepare(`
+      SELECT city, state, COUNT(*) as spot_count
+      FROM listings
+      WHERE status = 'active'
+      GROUP BY city, state
+      ORDER BY spot_count DESC
+      LIMIT 10
+    `).all<any>()
+
+    return c.json({ data: rows.results || [], source: 'd1' })
+  } catch (e: any) {
+    return c.json({ data: [], source: 'error' })
+  }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
 // HEALTH
 // ════════════════════════════════════════════════════════════════════════════
 apiRoutes.get('/health', (c) => {

@@ -262,7 +262,7 @@ export const Navbar = () => `
                   </div>
                   <div>
                     <p class="text-sm text-white font-medium">New booking request!</p>
-                    <p class="text-xs text-gray-400 mt-1">Marcus B. wants to book your driveway on Sat</p>
+                    <p class="text-xs text-gray-400 mt-1">A driver wants to book your space</p>
                     <span class="text-xs text-indigo-400 mt-1 block">2 min ago</span>
                   </div>
                 </div>
@@ -298,15 +298,15 @@ export const Navbar = () => `
         <!-- User Menu -->
         <div class="relative">
           <button id="user-menu-btn" class="flex items-center gap-2 bg-charcoal-100 border border-white/10 rounded-full pl-3 pr-2 py-1.5 hover:border-indigo-500/50 transition-all group">
-            <span class="text-sm font-medium text-gray-300 group-hover:text-white hide-mobile">Alex M.</span>
+            <span class="text-sm font-medium text-gray-300 group-hover:text-white hide-mobile">My Account</span>
             <div class="w-7 h-7 gradient-bg rounded-full flex items-center justify-center">
-              <span class="text-xs font-bold text-white">A</span>
+              <i class="fas fa-user text-xs text-white"></i>
             </div>
           </button>
           <div id="user-menu-dropdown" class="hidden absolute right-0 top-12 w-56 glass rounded-2xl border border-white/10 shadow-2xl overflow-hidden">
             <div class="p-4 border-b border-white/10">
-              <p class="font-semibold text-white text-sm">Alex Martinez</p>
-              <p class="text-xs text-gray-400">alex@example.com</p>
+              <p class="font-semibold text-white text-sm">ParkPeer Account</p>
+              <p class="text-xs text-gray-400">Sign in to continue</p>
             </div>
             <div class="p-2">
               <a href="/dashboard" class="flex items-center gap-3 px-3 py-2.5 hover:bg-white/5 rounded-xl text-sm text-gray-300 hover:text-white transition-colors">

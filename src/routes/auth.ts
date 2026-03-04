@@ -157,7 +157,7 @@ authPages.get('/signup', (c) => {
           </div>
           <span class="text-3xl font-black">Park<span class="gradient-text">Peer</span></span>
         </a>
-        <p class="text-gray-400 mt-2 text-sm">Join 89,000+ drivers and hosts.</p>
+        <p class="text-gray-400 mt-2 text-sm">Join drivers and hosts on ParkPeer.</p>
       </div>
 
       <div class="glass rounded-3xl p-8 border border-white/10">
