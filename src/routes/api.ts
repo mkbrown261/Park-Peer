@@ -820,14 +820,18 @@ apiRoutes.get('/listings', async (c) => {
     }
 
     // Geo-radius filter using Haversine approximation (SQLite-friendly)
+    // Skip filter when lat=0,lng=0 (sentinel "no location set" value)
     if (lat && lng) {
       const latF = parseFloat(lat)
       const lngF = parseFloat(lng)
-      const km   = parseFloat(radius_km)
-      const latDelta = km / 111.0
-      const lngDelta = km / (111.0 * Math.cos(latF * Math.PI / 180))
-      where.push('l.lat BETWEEN ? AND ? AND l.lng BETWEEN ? AND ?')
-      params.push(latF - latDelta, latF + latDelta, lngF - lngDelta, lngF + lngDelta)
+      // lat=0,lng=0 means the frontend had no real location — skip geo filter
+      if (latF !== 0 || lngF !== 0) {
+        const km   = parseFloat(radius_km)
+        const latDelta = km / 111.0
+        const lngDelta = km / (111.0 * Math.cos(latF * Math.PI / 180))
+        where.push('l.lat BETWEEN ? AND ? AND l.lng BETWEEN ? AND ?')
+        params.push(latF - latDelta, latF + latDelta, lngF - lngDelta, lngF + lngDelta)
+      }
     }
 
     const whereClause = where.length ? 'WHERE ' + where.join(' AND ') : ''

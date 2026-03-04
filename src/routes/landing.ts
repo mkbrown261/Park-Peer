@@ -314,7 +314,8 @@ landingPage.get('/', async (c) => {
     </div>
   </section>
 
-  <!-- Featured Listings — real D1 -->
+  <!-- Featured Listings — real D1 (only shown when listings exist) -->
+  ${featured.length > 0 ? `
   <section class="py-16 bg-charcoal-100 border-y border-white/5">
     <div class="max-w-7xl mx-auto px-4">
       <div class="flex items-center justify-between mb-10">
@@ -331,6 +332,7 @@ landingPage.get('/', async (c) => {
       </div>
     </div>
   </section>
+  ` : ''}
 
   <!-- Earnings Calculator -->
   <section class="py-24 max-w-7xl mx-auto px-4">
@@ -414,18 +416,20 @@ landingPage.get('/', async (c) => {
     </div>
   </section>
 
-  <!-- City Coverage — real D1 -->
+  <!-- City Coverage — real D1 (only shown when cities exist) -->
+  ${cityRows.length > 0 ? `
   <section class="py-16 bg-charcoal-100 border-y border-white/5">
     <div class="max-w-7xl mx-auto px-4">
       <div class="text-center mb-12">
         <span class="text-indigo-400 text-sm font-semibold uppercase tracking-widest">Coverage</span>
         <h2 class="text-3xl md:text-4xl font-black mt-3">Available In Your City</h2>
       </div>
-      <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-${Math.min(cityRows.length || 4, 8)} gap-4">
+      <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-${Math.min(cityRows.length, 8)} gap-4">
         ${cityHTML}
       </div>
     </div>
   </section>
+  ` : ''}
 
   <!-- Testimonials removed — replaced with live reviews on listing pages -->
 

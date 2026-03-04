@@ -123,6 +123,16 @@ searchPage.get('/', (c) => {
           <p class="text-white font-bold mb-1">No spots found</p>
           <p class="text-gray-500 text-sm">Try adjusting your filters or searching a different area</p>
         </div>
+        <div id="prompt-location" class="hidden text-center py-16">
+          <div class="w-16 h-16 bg-indigo-500/10 border border-indigo-500/20 rounded-2xl flex items-center justify-center mx-auto mb-4">
+            <i class="fas fa-search-location text-2xl text-indigo-400"></i>
+          </div>
+          <p class="text-white font-bold mb-1">Search for parking</p>
+          <p class="text-gray-500 text-sm mb-4">Enter a city, address, or neighborhood above to find spots near you</p>
+          <button onclick="locateUser()" class="inline-flex items-center gap-2 px-4 py-2 bg-indigo-500/20 border border-indigo-500/30 rounded-xl text-indigo-300 text-sm font-medium hover:bg-indigo-500/30 transition-colors">
+            <i class="fas fa-crosshairs"></i> Use my current location
+          </button>
+        </div>
       </div>
     </div>
 
@@ -391,13 +401,21 @@ searchPage.get('/', (c) => {
             if (map) map.flyTo({ center: [mapCenter.lng, mapCenter.lat], zoom: 12 })
             loadListings()
           },
-          () => loadListings()  // Fallback: load without geo filter
+          () => showPromptLocation()  // User denied location — ask them to search
         )
       } else {
-        loadListings()
+        showPromptLocation()  // No geolocation API — ask them to search
       }
     }
   })
+
+  function showPromptLocation() {
+    document.getElementById('loading-skeleton').style.display = 'none'
+    document.getElementById('no-results').classList.add('hidden')
+    document.getElementById('prompt-location').classList.remove('hidden')
+    document.getElementById('count-num').textContent = '–'
+    document.getElementById('count-label').textContent = 'enter a location'
+  }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   // MAP INIT
@@ -463,18 +481,21 @@ searchPage.get('/', (c) => {
   async function loadListings() {
     document.getElementById('loading-skeleton').style.display = 'block'
     document.getElementById('no-results').classList.add('hidden')
+    document.getElementById('prompt-location').classList.add('hidden')
 
     // Clear existing cards (but keep skeleton)
     const container = document.getElementById('listings-container')
     const existingCards = container.querySelectorAll('.listing-card')
     existingCards.forEach(c => c.remove())
 
-    const params = new URLSearchParams({
-      lat: mapCenter.lat,
-      lng: mapCenter.lng,
-      radius_km: mapRadius,
-      limit: 100
-    })
+    const params = new URLSearchParams({ limit: 100 })
+
+    // Only apply geo filter when we have a real location (non-zero coords)
+    if (mapCenter.lat !== 0 || mapCenter.lng !== 0) {
+      params.set('lat', mapCenter.lat)
+      params.set('lng', mapCenter.lng)
+      params.set('radius_km', mapRadius)
+    }
 
     if (currentType !== 'all') params.set('type', currentType)
 
