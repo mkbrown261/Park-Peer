@@ -182,6 +182,17 @@ searchPage.get('/', (c) => {
           <p class="text-gray-400 text-sm">Loading map...</p>
         </div>
       </div>
+
+      <!-- No listings overlay (shown over the map when API returns 0 results) -->
+      <div id="map-no-listings" class="hidden absolute inset-0 bg-charcoal/80 backdrop-blur-sm flex items-center justify-center z-10 pointer-events-none">
+        <div class="text-center px-6">
+          <div class="w-16 h-16 bg-indigo-500/10 rounded-2xl flex items-center justify-center mx-auto mb-4">
+            <i class="fas fa-map-marker-alt text-indigo-400 text-2xl"></i>
+          </div>
+          <p class="text-white font-semibold text-lg">No listings available yet.</p>
+          <p class="text-gray-400 text-sm mt-1">Be the first to list your space!</p>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -528,9 +539,16 @@ searchPage.get('/', (c) => {
         document.getElementById('no-results').classList.remove('hidden')
         document.getElementById('count-num').textContent = '0'
         document.getElementById('count-label').textContent = 'spots found'
+        // Show the "No listings available yet" overlay on the map
+        const mapOverlay = document.getElementById('map-no-listings')
+        if (mapOverlay) mapOverlay.classList.remove('hidden')
         clearMarkers()
         return
       }
+
+      // Hide map no-listings overlay when listings are present
+      const mapOverlay = document.getElementById('map-no-listings')
+      if (mapOverlay) mapOverlay.classList.add('hidden')
 
       allListings = data.data
       applySortAndRender()

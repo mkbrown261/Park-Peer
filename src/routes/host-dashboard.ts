@@ -9,6 +9,17 @@ export const hostDashboard = new Hono<{ Bindings: Bindings }>()
 // ── Protect ALL /host/* routes — redirect unauthenticated users to login ──────
 hostDashboard.use('/*', requireUserAuth({ redirectOnFail: true }))
 
+// ── Role guard: only HOST, BOTH, or ADMIN may access /host/* ─────────────────
+hostDashboard.use('/*', async (c, next) => {
+  const session = c.get('user') as any
+  const role = (session?.role || '').toUpperCase()
+  if (role !== 'HOST' && role !== 'BOTH' && role !== 'ADMIN') {
+    // Drivers who navigate directly to /host are redirected to their dashboard
+    return c.redirect('/dashboard?reason=wrong_role')
+  }
+  await next()
+})
+
 hostDashboard.get('/', async (c) => {
   const db = c.env?.DB
   const session = c.get('user') as any
@@ -621,6 +632,19 @@ hostDashboard.get('/', async (c) => {
 
         if (res.status === 401) {
           showListingError('You must be signed in to create a listing. Please log in and try again.');
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fas fa-plus-circle"></i> Create Listing';
+          return;
+        }
+
+        if (res.status === 403) {
+          // CSRF mismatch or wrong role
+          const msg = data.error || 'Access denied.';
+          if (msg.toLowerCase().includes('csrf')) {
+            showListingError('Security token expired. Please refresh the page and try again.');
+          } else {
+            showListingError(msg);
+          }
           btn.disabled = false;
           btn.innerHTML = '<i class="fas fa-plus-circle"></i> Create Listing';
           return;

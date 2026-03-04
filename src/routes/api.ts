@@ -899,6 +899,13 @@ apiRoutes.post('/listings', requireUserAuth(), async (c) => {
   const session = c.get('user') as any
   if (!session?.userId) return c.json({ error: 'Authentication required' }, 401)
 
+  // ── Server-side CSRF verification ───────────────────────────────────────
+  const tokenSecret = c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod'
+  const csrfOk = await verifyCsrf(c, tokenSecret + '.csrf')
+  if (!csrfOk) {
+    return c.json({ error: 'Invalid or expired CSRF token. Please refresh the page and try again.' }, 403)
+  }
+
   // Only hosts (or users with BOTH role) can create listings
   const userRole = (session.role || '').toUpperCase()
   if (userRole !== 'HOST' && userRole !== 'BOTH' && userRole !== 'ADMIN') {
@@ -1172,8 +1179,17 @@ apiRoutes.get('/listings/:id/availability', async (c) => {
 //   existing.start < new.end  AND  existing.end > new.start
 // If found → 409 Conflict. Otherwise insert atomically.
 // ════════════════════════════════════════════════════════════════════════════
-apiRoutes.post('/bookings', async (c) => {
+apiRoutes.post('/bookings', requireUserAuth(), async (c) => {
   const db   = c.env?.DB
+  const session = c.get('user') as any
+
+  // ── Server-side CSRF verification ───────────────────────────────────────
+  const tokenSecret = c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod'
+  const csrfOk = await verifyCsrf(c, tokenSecret + '.csrf')
+  if (!csrfOk) {
+    return c.json({ error: 'Invalid or expired CSRF token. Please refresh the page and try again.' }, 403)
+  }
+
   const body = await c.req.json().catch(() => ({})) as any
 
   // ── Input validation ────────────────────────────────────────────────────
@@ -1198,7 +1214,8 @@ apiRoutes.post('/bookings', async (c) => {
 
   const hours     = Math.max(1, Math.round((end.getTime() - start.getTime()) / 3600000))
   const vehicle_plate = validateInput(body.vehicle_plate, { maxLength: 20 })
-  const driver_id = body.driver_id ? parseInt(body.driver_id) : null
+  // Always use authenticated user as driver_id — prevents IDOR
+  const driver_id = session?.userId ?? (body.driver_id ? parseInt(body.driver_id) : null)
 
   // ── Race-condition / overlap check (D1) ────────────────────────────────
   if (db) {
@@ -1219,10 +1236,10 @@ apiRoutes.post('/bookings', async (c) => {
         }, 409)
       }
 
-      // ── Fetch real rate from listing ──────────────────────────────────
+      // ── Fetch real rate and host_id from listing ─────────────────────
       const listing = await db.prepare(
-        'SELECT rate_hourly, status FROM listings WHERE id = ? AND status = ?'
-      ).bind(listing_id, 'active').first<{ rate_hourly: number; status: string }>()
+        'SELECT rate_hourly, status, host_id FROM listings WHERE id = ? AND status = ?'
+      ).bind(listing_id, 'active').first<{ rate_hourly: number; status: string; host_id: number }>()
 
       if (!listing) {
         return c.json({ error: 'Listing not found or not available' }, 404)
@@ -1231,25 +1248,26 @@ apiRoutes.post('/bookings', async (c) => {
       const rate      = listing.rate_hourly || 12
       const base      = Math.round(rate * hours * 100) / 100
       const fee       = Math.round(base * 0.15 * 100) / 100
+      const hostPay   = Math.round((base - fee) * 100) / 100
       const total     = Math.round((base + fee) * 100) / 100
-      const bookingId = 'PP-' + new Date().getFullYear() + '-' + Math.floor(1000 + Math.random() * 9000)
-
-      // ── Insert booking record ─────────────────────────────────────────
-      await db.prepare(`
+      const insertResult = await db.prepare(`
         INSERT INTO bookings
-          (listing_id, driver_id, start_time, end_time,
+          (listing_id, driver_id, host_id, start_time, end_time,
            duration_hours, status, subtotal, platform_fee, host_payout,
-           total_charged, vehicle_description, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+           total_charged, vehicle_plate, vehicle_description, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
       `).bind(
-        listing_id, driver_id || null,
+        listing_id, driver_id || null, listing.host_id,
         start_datetime, end_datetime, hours,
-        base, fee, Math.round((base - fee) * 100) / 100, total,
-        vehicle_plate || null
+        base, fee, hostPay, total,
+        vehicle_plate || null, vehicle_plate || null
       ).run()
 
+      const dbBookingId = insertResult.meta?.last_row_id ?? 0
+      const bookingRef  = 'PP-' + new Date().getFullYear() + '-' + String(dbBookingId).padStart(4, '0')
+
       return c.json({
-        id: bookingId, listing_id,
+        id: bookingRef, db_id: dbBookingId, listing_id,
         start_time: start_datetime, end_time: end_datetime, hours,
         vehicle_description: vehicle_plate || null,
         pricing: { rate_per_hour: rate, base, service_fee: fee, total },

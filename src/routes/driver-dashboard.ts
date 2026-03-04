@@ -9,6 +9,17 @@ export const driverDashboard = new Hono<{ Bindings: Bindings }>()
 // ── Protect ALL /dashboard/* routes — redirect unauthenticated users to login ──────
 driverDashboard.use('/*', requireUserAuth({ redirectOnFail: true }))
 
+// ── Role guard: HOST-only users are redirected to /host ───────────────────────
+driverDashboard.use('/*', async (c, next) => {
+  const session = c.get('user') as any
+  const role = (session?.role || '').toUpperCase()
+  if (role === 'HOST') {
+    // Pure hosts should use /host, not /dashboard
+    return c.redirect('/host?reason=wrong_role')
+  }
+  await next()
+})
+
 driverDashboard.get('/', async (c) => {
   const db = c.env?.DB
   const session = c.get('user') as any

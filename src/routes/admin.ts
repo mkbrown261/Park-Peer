@@ -334,8 +334,7 @@ adminPanel.get('/users', async (c: any) => {
   if (db) {
     try {
       const rows = await db.prepare(`
-        SELECT id, full_name, email, role, status, created_at, id_verified,
-               avg_rating
+        SELECT id, full_name, email, role, status, created_at, id_verified
         FROM users
         ORDER BY created_at DESC
         LIMIT 100
