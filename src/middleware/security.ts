@@ -55,14 +55,15 @@ export function securityHeaders() {
         "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://js.stripe.com https://api.mapbox.com https://events.mapbox.com",
         "style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://fonts.googleapis.com https://api.mapbox.com",
         "font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net",
-        "img-src 'self' data: blob: https://*.mapbox.com https://tile.openstreetmap.org",
-        // Backend API + Stripe + Mapbox + AI proxy
-        "connect-src 'self' https://api.mapbox.com https://events.mapbox.com https://js.stripe.com https://api.stripe.com https://www.genspark.ai",
+        "img-src 'self' data: blob: https://*.mapbox.com https://tile.openstreetmap.org https://lh3.googleusercontent.com https://lh4.googleusercontent.com https://lh5.googleusercontent.com https://lh6.googleusercontent.com",
+        // Backend API + Stripe + Mapbox + AI proxy + Google OAuth + Apple OAuth
+        "connect-src 'self' https://api.mapbox.com https://events.mapbox.com https://js.stripe.com https://api.stripe.com https://www.genspark.ai https://accounts.google.com https://oauth2.googleapis.com https://www.googleapis.com https://appleid.apple.com",
         // Stripe iframes only
         "frame-src https://js.stripe.com https://hooks.stripe.com",
+        // Apple Sign In JS popup (if used in future)
+        "form-action 'self' https://appleid.apple.com",
         "object-src 'none'",
         "base-uri 'self'",
-        "form-action 'self'",
         "upgrade-insecure-requests",
       ].join('; ')
     )

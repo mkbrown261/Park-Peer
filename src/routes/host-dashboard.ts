@@ -392,63 +392,139 @@ hostDashboard.get('/', async (c) => {
           <i class="fas fa-times text-sm"></i>
         </button>
       </div>
+
+      <!-- Error/Success banners -->
+      <div id="listing-error" class="hidden mx-6 mt-4 p-3 bg-red-500/10 border border-red-500/20 rounded-xl flex items-center gap-2">
+        <i class="fas fa-exclamation-circle text-red-400 text-sm"></i>
+        <p id="listing-error-msg" class="text-red-400 text-sm">Please fill in all required fields.</p>
+      </div>
+      <div id="listing-success" class="hidden mx-6 mt-4 p-3 bg-green-500/10 border border-green-500/20 rounded-xl flex items-center gap-2">
+        <i class="fas fa-check-circle text-green-400 text-sm"></i>
+        <p class="text-green-400 text-sm font-semibold">Listing created! Redirecting…</p>
+      </div>
+
       <div class="p-6 space-y-5">
+        <!-- Title -->
         <div>
-          <label class="text-sm text-gray-400 font-medium block mb-2">Space Title</label>
-          <input type="text" placeholder="e.g. Secure Downtown Driveway" class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
+          <label class="text-sm text-gray-400 font-medium block mb-2">Space Title <span class="text-red-400">*</span></label>
+          <input type="text" id="listing-title" maxlength="120"
+            placeholder="e.g. Secure Downtown Driveway"
+            class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
         </div>
+
+        <!-- Type -->
         <div>
-          <label class="text-sm text-gray-400 font-medium block mb-2">Space Type</label>
+          <label class="text-sm text-gray-400 font-medium block mb-2">Space Type <span class="text-red-400">*</span></label>
+          <input type="hidden" id="listing-type" value="driveway"/>
           <div class="grid grid-cols-3 gap-2">
-            ${[{t:'Driveway',icon:'🏠'},{t:'Garage',icon:'🏗️'},{t:'Lot',icon:'🅿️'},{t:'Covered',icon:'🏢'},{t:'Uncovered',icon:'☁️'},{t:'Indoor',icon:'🏛️'}].map(type => `
-              <button onclick="selectType(this)" class="type-btn p-3 bg-charcoal-200 border border-white/5 hover:border-indigo-500/40 rounded-xl text-center transition-all">
+            ${[{t:'Driveway',v:'driveway',icon:'🏠'},{t:'Garage',v:'garage',icon:'🏗️'},{t:'Lot',v:'lot',icon:'🅿️'},{t:'Covered',v:'covered',icon:'🏢'},{t:'Street',v:'street',icon:'🛣️'},{t:'Indoor',v:'covered',icon:'🏛️'}].map((type, i) => `
+              <button type="button" onclick="selectType(this, '${type.v}')"
+                class="type-btn p-3 bg-charcoal-200 border ${i===0?'border-indigo-500 bg-indigo-500/10':'border-white/5 hover:border-indigo-500/40'} rounded-xl text-center transition-all">
                 <span class="text-2xl block mb-1">${type.icon}</span>
                 <span class="text-xs text-gray-400">${type.t}</span>
               </button>
             `).join('')}
           </div>
         </div>
+
+        <!-- Address (full) -->
         <div>
-          <label class="text-sm text-gray-400 font-medium block mb-2">Address</label>
-          <input type="text" placeholder="Enter your space address" class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
+          <label class="text-sm text-gray-400 font-medium block mb-2">Street Address <span class="text-red-400">*</span></label>
+          <input type="text" id="listing-address" maxlength="200"
+            placeholder="e.g. 123 Main St"
+            class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
         </div>
         <div class="grid grid-cols-3 gap-3">
-          ${[{label:'Hourly Rate ($)',placeholder:'e.g. 8'},{label:'Daily Rate ($)',placeholder:'e.g. 35'},{label:'Monthly Rate ($)',placeholder:'e.g. 180'}].map(f => `
-            <div>
-              <label class="text-sm text-gray-400 font-medium block mb-2">${f.label}</label>
-              <input type="number" placeholder="${f.placeholder}" class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
-            </div>
-          `).join('')}
+          <div>
+            <label class="text-sm text-gray-400 font-medium block mb-2">City <span class="text-red-400">*</span></label>
+            <input type="text" id="listing-city" maxlength="100"
+              placeholder="e.g. Austin"
+              class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
+          </div>
+          <div>
+            <label class="text-sm text-gray-400 font-medium block mb-2">State <span class="text-red-400">*</span></label>
+            <input type="text" id="listing-state" maxlength="50"
+              placeholder="e.g. TX"
+              class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
+          </div>
+          <div>
+            <label class="text-sm text-gray-400 font-medium block mb-2">ZIP <span class="text-red-400">*</span></label>
+            <input type="text" id="listing-zip" maxlength="20"
+              placeholder="e.g. 78701"
+              class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
+          </div>
         </div>
+
+        <!-- Rates -->
+        <div class="grid grid-cols-3 gap-3">
+          <div>
+            <label class="text-sm text-gray-400 font-medium block mb-2">Hourly Rate ($)</label>
+            <input type="number" id="listing-rate-hourly" min="0.5" max="500" step="0.5"
+              placeholder="e.g. 8"
+              class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
+          </div>
+          <div>
+            <label class="text-sm text-gray-400 font-medium block mb-2">Daily Rate ($)</label>
+            <input type="number" id="listing-rate-daily" min="1" max="5000" step="1"
+              placeholder="e.g. 35"
+              class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
+          </div>
+          <div>
+            <label class="text-sm text-gray-400 font-medium block mb-2">Monthly Rate ($)</label>
+            <input type="number" id="listing-rate-monthly" min="10" max="50000" step="5"
+              placeholder="e.g. 180"
+              class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
+          </div>
+        </div>
+
+        <!-- Description -->
         <div>
           <label class="text-sm text-gray-400 font-medium block mb-2">Description</label>
-          <textarea placeholder="Describe your space, access instructions, nearby landmarks..." rows="3" class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 resize-none"></textarea>
+          <textarea id="listing-description" maxlength="2000" rows="3"
+            placeholder="Describe your space, access instructions, nearby landmarks..."
+            class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 resize-none"></textarea>
         </div>
+
+        <!-- Amenities -->
         <div>
-          <label class="text-sm text-gray-400 font-medium block mb-2">Security Features</label>
+          <label class="text-sm text-gray-400 font-medium block mb-2">Amenities</label>
           <div class="grid grid-cols-2 gap-2">
-            ${['CCTV Camera','Gated Access','24/7 Lighting','Covered/Indoor','EV Charging','Attended'].map(f => `
+            ${[
+              {v:'security_camera', label:'CCTV Camera'},
+              {v:'gated',           label:'Gated Access'},
+              {v:'lighting',        label:'24/7 Lighting'},
+              {v:'covered',         label:'Covered/Indoor'},
+              {v:'ev_charging',     label:'EV Charging'},
+              {v:'24hr_access',     label:'24/7 Access'},
+            ].map(f => `
               <label class="flex items-center gap-3 p-3 bg-charcoal-200 rounded-xl cursor-pointer border border-white/5 hover:border-indigo-500/30">
-                <input type="checkbox" class="accent-indigo-500 w-4 h-4"/>
-                <span class="text-sm text-gray-300">${f}</span>
+                <input type="checkbox" value="${f.v}" class="amenity-check accent-indigo-500 w-4 h-4"/>
+                <span class="text-sm text-gray-300">${f.label}</span>
               </label>
             `).join('')}
           </div>
         </div>
+
+        <!-- Instant Book -->
         <div class="flex items-center justify-between p-4 bg-indigo-500/10 border border-indigo-500/20 rounded-xl">
           <div>
             <p class="font-semibold text-white text-sm">Enable Instant Book</p>
             <p class="text-gray-400 text-xs mt-0.5">Guests can book without your manual approval</p>
           </div>
-          <button id="instant-toggle" onclick="toggleInstant(this)" class="w-12 h-6 bg-charcoal-300 rounded-full relative transition-colors">
+          <button type="button" id="instant-toggle" onclick="toggleInstant(this)" class="w-12 h-6 bg-charcoal-300 rounded-full relative transition-colors">
             <div class="w-5 h-5 bg-white rounded-full absolute top-0.5 left-0.5 shadow transition-transform" id="instant-dot"></div>
           </button>
         </div>
       </div>
+
       <div class="p-4 border-t border-white/10 flex gap-3 sticky bottom-0 bg-charcoal-100">
-        <button onclick="hideAddListing()" class="flex-1 py-3 bg-charcoal-200 text-gray-400 rounded-xl font-semibold text-sm hover:text-white">Cancel</button>
-        <button class="flex-2 flex-1 py-3 btn-primary text-white rounded-xl font-semibold text-sm">
-          Continue <i class="fas fa-arrow-right ml-2"></i>
+        <button type="button" onclick="hideAddListing()"
+          class="flex-1 py-3 bg-charcoal-200 text-gray-400 rounded-xl font-semibold text-sm hover:text-white transition-colors">
+          Cancel
+        </button>
+        <button type="button" id="listing-submit-btn" onclick="submitListing()"
+          class="flex-1 py-3 btn-primary text-white rounded-xl font-semibold text-sm flex items-center justify-center gap-2">
+          <i class="fas fa-plus-circle"></i> Create Listing
         </button>
       </div>
     </div>
@@ -456,28 +532,130 @@ hostDashboard.get('/', async (c) => {
 
   <script>
     function showAddListing() { document.getElementById('add-listing-modal').classList.remove('hidden'); }
-    function hideAddListing() { document.getElementById('add-listing-modal').classList.add('hidden'); }
-    
-    function selectType(btn) {
-      document.querySelectorAll('.type-btn').forEach(b => b.classList.remove('border-indigo-500','bg-indigo-500/10'));
-      btn.classList.add('border-indigo-500','bg-indigo-500/10');
+    function hideAddListing() {
+      document.getElementById('add-listing-modal').classList.add('hidden');
+      document.getElementById('listing-error').classList.add('hidden');
+      document.getElementById('listing-success').classList.add('hidden');
     }
-    
+
+    function selectType(btn, value) {
+      document.querySelectorAll('.type-btn').forEach(b => {
+        b.classList.remove('border-indigo-500', 'bg-indigo-500/10');
+        b.classList.add('border-white/5');
+      });
+      btn.classList.add('border-indigo-500', 'bg-indigo-500/10');
+      btn.classList.remove('border-white/5');
+      document.getElementById('listing-type').value = value;
+    }
+
     let instantEnabled = false;
     function toggleInstant(btn) {
       instantEnabled = !instantEnabled;
       btn.style.backgroundColor = instantEnabled ? '#5B2EFF' : '';
       document.getElementById('instant-dot').style.transform = instantEnabled ? 'translateX(24px)' : '';
     }
-    
+
+    async function submitListing() {
+      const errEl  = document.getElementById('listing-error');
+      const errMsg = document.getElementById('listing-error-msg');
+      const succEl = document.getElementById('listing-success');
+      const btn    = document.getElementById('listing-submit-btn');
+      errEl.classList.add('hidden');
+      succEl.classList.add('hidden');
+
+      // Collect values
+      const title   = document.getElementById('listing-title')?.value?.trim() || '';
+      const type    = document.getElementById('listing-type')?.value || 'driveway';
+      const address = document.getElementById('listing-address')?.value?.trim() || '';
+      const city    = document.getElementById('listing-city')?.value?.trim() || '';
+      const state   = document.getElementById('listing-state')?.value?.trim() || '';
+      const zip     = document.getElementById('listing-zip')?.value?.trim() || '';
+      const rateH   = document.getElementById('listing-rate-hourly')?.value || '';
+      const rateD   = document.getElementById('listing-rate-daily')?.value || '';
+      const rateM   = document.getElementById('listing-rate-monthly')?.value || '';
+      const desc    = document.getElementById('listing-description')?.value?.trim() || '';
+      const amenities = Array.from(document.querySelectorAll('.amenity-check:checked')).map(cb => cb.value);
+
+      // Validate required fields
+      if (!title) { showListingError('Space title is required.'); return; }
+      if (!address) { showListingError('Address is required.'); return; }
+      if (!city) { showListingError('City is required.'); return; }
+      if (!state) { showListingError('State is required.'); return; }
+      if (!zip) { showListingError('ZIP code is required.'); return; }
+      if (!rateH && !rateD && !rateM) { showListingError('Please set at least one rate (hourly, daily, or monthly).'); return; }
+
+      // Get CSRF token from sessionStorage (set at login)
+      const csrfToken = sessionStorage.getItem('pp_csrf') || '';
+
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Creating...';
+
+      try {
+        const res = await fetch('/api/listings', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': csrfToken,
+          },
+          credentials: 'same-origin',
+          body: JSON.stringify({
+            title, type, address, city, state, zip,
+            rate_hourly:  rateH  ? parseFloat(rateH)  : null,
+            rate_daily:   rateD  ? parseFloat(rateD)   : null,
+            rate_monthly: rateM  ? parseFloat(rateM) : null,
+            description: desc,
+            amenities,
+            instant_book: instantEnabled,
+          }),
+        });
+
+        const data = await res.json().catch(() => ({}));
+        console.log('[submitListing] status=' + res.status, data);
+
+        if (res.status === 401) {
+          showListingError('You must be signed in to create a listing. Please log in and try again.');
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fas fa-plus-circle"></i> Create Listing';
+          return;
+        }
+
+        if (!res.ok) {
+          showListingError(data.error || 'Failed to create listing. Please try again.');
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fas fa-plus-circle"></i> Create Listing';
+          return;
+        }
+
+        // Success
+        succEl.classList.remove('hidden');
+        setTimeout(() => {
+          window.location.href = data.redirect || '/host';
+        }, 1200);
+
+      } catch (err) {
+        console.error('[submitListing] network error', err);
+        showListingError('Network error. Please check your connection and try again.');
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-plus-circle"></i> Create Listing';
+      }
+    }
+
+    function showListingError(msg) {
+      const errEl  = document.getElementById('listing-error');
+      const errMsg = document.getElementById('listing-error-msg');
+      errMsg.textContent = msg;
+      errEl.classList.remove('hidden');
+      errEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
     function acceptBooking(btn, id) {
       btn.closest('.flex').innerHTML = '<span class="text-green-400 text-sm font-semibold flex items-center gap-2"><i class="fas fa-check-circle"></i> Booking Accepted</span>';
-      fetch('/api/bookings/' + id + '/confirm', { method: 'POST' }).catch(() => {});
+      fetch('/api/bookings/' + id + '/confirm', { method: 'POST', credentials: 'same-origin' }).catch(() => {});
     }
-    
+
     function declineBooking(btn, id) {
       btn.closest('.flex').innerHTML = '<span class="text-red-400 text-sm font-semibold flex items-center gap-2"><i class="fas fa-times-circle"></i> Booking Declined</span>';
-      fetch('/api/bookings/' + id + '/cancel', { method: 'POST' }).catch(() => {});
+      fetch('/api/bookings/' + id + '/cancel', { method: 'POST', credentials: 'same-origin' }).catch(() => {});
     }
   </script>
   `

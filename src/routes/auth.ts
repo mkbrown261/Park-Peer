@@ -4,6 +4,20 @@ import { Layout } from '../components/layout'
 export const authPages = new Hono()
 
 authPages.get('/login', (c) => {
+  // Surface errors from OAuth redirects
+  const oauthError = c.req.query('error') || ''
+  const oauthReason = c.req.query('reason') || ''
+  const errorMessages: Record<string, string> = {
+    oauth_not_configured: 'Social login is not configured yet. Please use email/password.',
+    google_denied:        'Google sign-in was cancelled.',
+    google_token_failed:  'Google authentication failed. Please try again.',
+    apple_denied:         'Apple sign-in was cancelled.',
+    apple_token_failed:   'Apple authentication failed. Please try again.',
+    account_suspended:    'This account has been suspended. Contact support.',
+    db_unavailable:       'Service temporarily unavailable. Please try again.',
+    auth:                 'Please sign in to continue.',
+  }
+  const oauthMsg = errorMessages[oauthError] || (oauthError ? 'Authentication error. Please try again.' : '')
   const content = `
   <div class="pt-16 min-h-screen flex items-center justify-center px-4 py-12">
     <div class="absolute inset-0 map-bg opacity-20"></div>
@@ -27,17 +41,24 @@ authPages.get('/login', (c) => {
         <h2 class="text-2xl font-black text-white text-center mb-6">Sign In</h2>
         
         <!-- Social Login -->
+        ${oauthMsg ? `
+        <div class="mb-4 p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl flex items-center gap-2">
+          <i class="fas fa-exclamation-triangle text-amber-400 text-sm"></i>
+          <p class="text-amber-300 text-sm">${oauthMsg}</p>
+        </div>` : ''}
         <div class="grid grid-cols-2 gap-3 mb-6">
-          <button class="flex items-center justify-center gap-2 p-3 bg-charcoal-100 border border-white/10 rounded-xl hover:border-white/30 transition-all text-white text-sm font-medium group">
+          <a href="/api/auth/google?role=driver"
+            class="flex items-center justify-center gap-2 p-3 bg-charcoal-100 border border-white/10 rounded-xl hover:border-white/30 transition-all text-white text-sm font-medium group">
             <div class="w-5 h-5 bg-white rounded-sm flex items-center justify-center">
               <i class="fab fa-google text-gray-800 text-xs"></i>
             </div>
             Google
-          </button>
-          <button class="flex items-center justify-center gap-2 p-3 bg-charcoal-100 border border-white/10 rounded-xl hover:border-white/30 transition-all text-white text-sm font-medium">
+          </a>
+          <a href="/api/auth/apple?role=driver"
+            class="flex items-center justify-center gap-2 p-3 bg-charcoal-100 border border-white/10 rounded-xl hover:border-white/30 transition-all text-white text-sm font-medium">
             <i class="fab fa-apple text-white text-lg"></i>
             Apple
-          </button>
+          </a>
         </div>
 
         <div class="relative flex items-center gap-3 mb-6">
@@ -165,6 +186,15 @@ authPages.get('/login', (c) => {
 })
 
 authPages.get('/signup', (c) => {
+  const oauthError = c.req.query('error') || ''
+  const errorMessages: Record<string, string> = {
+    oauth_not_configured: 'Social login is not configured yet. Please use email/password.',
+    google_denied:        'Google sign-up was cancelled.',
+    google_token_failed:  'Google authentication failed. Please try again.',
+    apple_denied:         'Apple sign-up was cancelled.',
+    apple_token_failed:   'Apple authentication failed. Please try again.',
+  }
+  const oauthMsg = errorMessages[oauthError] || (oauthError ? 'Authentication error. Please try again.' : '')
   const content = `
   <div class="pt-16 min-h-screen flex items-center justify-center px-4 py-12">
     <div class="absolute inset-0 map-bg opacity-20"></div>
@@ -202,17 +232,24 @@ authPages.get('/signup', (c) => {
         <p class="text-xs text-gray-500 text-center mb-6 -mt-2">You can do both — choose your primary role</p>
 
         <!-- Social Signup -->
+        ${oauthMsg ? `
+        <div class="mb-4 p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl flex items-center gap-2">
+          <i class="fas fa-exclamation-triangle text-amber-400 text-sm"></i>
+          <p class="text-amber-300 text-sm">${oauthMsg}</p>
+        </div>` : ''}
         <div class="grid grid-cols-2 gap-3 mb-5">
-          <button class="flex items-center justify-center gap-2 p-3 bg-charcoal-100 border border-white/10 rounded-xl hover:border-white/30 transition-all text-white text-sm font-medium">
+          <a id="google-signup-btn" href="/api/auth/google?role=driver"
+            class="flex items-center justify-center gap-2 p-3 bg-charcoal-100 border border-white/10 rounded-xl hover:border-white/30 transition-all text-white text-sm font-medium">
             <div class="w-5 h-5 bg-white rounded-sm flex items-center justify-center">
               <i class="fab fa-google text-gray-800 text-xs"></i>
             </div>
             Google
-          </button>
-          <button class="flex items-center justify-center gap-2 p-3 bg-charcoal-100 border border-white/10 rounded-xl hover:border-white/30 transition-all text-white text-sm font-medium">
+          </a>
+          <a id="apple-signup-btn" href="/api/auth/apple?role=driver"
+            class="flex items-center justify-center gap-2 p-3 bg-charcoal-100 border border-white/10 rounded-xl hover:border-white/30 transition-all text-white text-sm font-medium">
             <i class="fab fa-apple text-white text-lg"></i>
             Apple
-          </button>
+          </a>
         </div>
 
         <div class="relative flex items-center gap-3 mb-5">
@@ -323,6 +360,11 @@ authPages.get('/signup', (c) => {
         btn.className = 'role-btn p-4 rounded-2xl border border-lime-500 bg-lime-500/10 text-center transition-all';
         btn.querySelector('i').className = btn.querySelector('i').className.replace('text-gray-400', 'text-lime-500');
       }
+      // Update OAuth button URLs to pass the chosen role
+      const googleBtn = document.getElementById('google-signup-btn');
+      const appleBtn  = document.getElementById('apple-signup-btn');
+      if (googleBtn) googleBtn.href = '/api/auth/google?role=' + role;
+      if (appleBtn)  appleBtn.href  = '/api/auth/apple?role='  + role;
     }
 
     function checkStrength(inp) {

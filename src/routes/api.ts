@@ -63,6 +63,13 @@ type Bindings = {
   OPENAI_BASE_URL: string
   USER_TOKEN_SECRET: string
   ENCRYPTION_SECRET: string
+  GOOGLE_CLIENT_ID: string
+  GOOGLE_CLIENT_SECRET: string
+  APPLE_CLIENT_ID: string
+  APPLE_TEAM_ID: string
+  APPLE_KEY_ID: string
+  APPLE_PRIVATE_KEY: string
+  OAUTH_REDIRECT_BASE: string   // e.g. https://parkpeer.pages.dev
 }
 
 export const apiRoutes = new Hono<{ Bindings: Bindings }>()
@@ -874,6 +881,175 @@ apiRoutes.get('/listings', async (c) => {
     console.error('[API] listings error:', e.message)
     return c.json({ error: 'Failed to fetch listings', detail: e.message }, 500)
   }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// POST /api/listings — Create a new listing (authenticated hosts)
+// Body: { title, type, address, city, state, zip, rate_hourly, rate_daily?,
+//         rate_monthly?, description?, amenities?, instant_book?, lat?, lng? }
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.post('/listings', requireUserAuth(), async (c) => {
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+
+  const session = c.get('user') as any
+  if (!session?.userId) return c.json({ error: 'Authentication required' }, 401)
+
+  let body: any = {}
+  try { body = await c.req.json() } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400)
+  }
+
+  console.log(`[POST /api/listings] user=${session.userId} body=`, JSON.stringify(body).substring(0, 300))
+
+  // ── Validate required fields ────────────────────────────────────────────
+  try {
+    const title   = validateInput(body.title,   { maxLength: 120, required: true,  fieldName: 'title' })
+    const address = validateInput(body.address, { maxLength: 200, required: true,  fieldName: 'address' })
+    const city    = validateInput(body.city,    { maxLength: 100, required: true,  fieldName: 'city' })
+    const state   = validateInput(body.state,   { maxLength: 50,  required: true,  fieldName: 'state' })
+    const zip     = validateInput(body.zip,     { maxLength: 20,  required: true,  fieldName: 'zip' })
+
+    const VALID_TYPES = ['driveway','garage','lot','street','covered']
+    const type = body.type && VALID_TYPES.includes(body.type.toLowerCase())
+      ? body.type.toLowerCase()
+      : 'driveway'
+
+    const rateHourly  = body.rate_hourly  ? parseFloat(body.rate_hourly)  : null
+    const rateDaily   = body.rate_daily   ? parseFloat(body.rate_daily)   : null
+    const rateMonthly = body.rate_monthly ? parseFloat(body.rate_monthly) : null
+
+    if (rateHourly !== null && (isNaN(rateHourly)  || rateHourly  < 0.5 || rateHourly  > 500)) {
+      return c.json({ error: 'Hourly rate must be between $0.50 and $500' }, 400)
+    }
+    if (rateDaily !== null && (isNaN(rateDaily) || rateDaily < 1 || rateDaily > 5000)) {
+      return c.json({ error: 'Daily rate must be between $1 and $5,000' }, 400)
+    }
+
+    const description  = validateInput(body.description,  { maxLength: 2000 })
+    const instantBook  = body.instant_book === true || body.instant_book === 1 || body.instant_book === '1' ? 1 : 0
+    const lat          = body.lat  ? parseFloat(body.lat)  : null
+    const lng          = body.lng  ? parseFloat(body.lng)  : null
+
+    // Sanitize amenities — must be array of known values
+    const VALID_AMENITIES = ['covered','ev_charging','security_camera','gated','lighting','24hr_access','shuttle','attended']
+    let amenities: string[] = []
+    if (Array.isArray(body.amenities)) {
+      amenities = body.amenities.filter((a: any) => VALID_AMENITIES.includes(String(a)))
+    }
+
+    // Geocode address if lat/lng not provided and Mapbox token is available
+    let finalLat = lat
+    let finalLng = lng
+    if ((!finalLat || !finalLng) && c.env?.MAPBOX_TOKEN) {
+      try {
+        const fullAddr = encodeURIComponent(`${address}, ${city}, ${state} ${zip}`)
+        const geoRes = await fetch(
+          `https://api.mapbox.com/geocoding/v5/mapbox.places/${fullAddr}.json?access_token=${c.env.MAPBOX_TOKEN}&limit=1`
+        )
+        const geoData: any = await geoRes.json()
+        if (geoData.features?.length > 0) {
+          const [geoLng, geoLat] = geoData.features[0].center
+          finalLat = geoLat
+          finalLng = geoLng
+          console.log(`[POST /api/listings] Geocoded: ${finalLat},${finalLng}`)
+        }
+      } catch (e: any) {
+        console.warn('[POST /api/listings] Geocoding failed (non-fatal):', e.message)
+      }
+    }
+
+    // ── Insert into D1 ────────────────────────────────────────────────────
+    const result = await db.prepare(`
+      INSERT INTO listings
+        (host_id, title, type, description, address, city, state, zip, country,
+         lat, lng, rate_hourly, rate_daily, rate_monthly,
+         amenities, instant_book, status, created_at, updated_at)
+      VALUES
+        (?, ?, ?, ?, ?, ?, ?, ?, 'US',
+         ?, ?, ?, ?, ?,
+         ?, ?, 'active', datetime('now'), datetime('now'))
+    `).bind(
+      session.userId,
+      sanitizeHtml(title),
+      type,
+      sanitizeHtml(description) || null,
+      sanitizeHtml(address),
+      sanitizeHtml(city),
+      sanitizeHtml(state),
+      sanitizeHtml(zip),
+      finalLat, finalLng,
+      rateHourly, rateDaily, rateMonthly,
+      JSON.stringify(amenities),
+      instantBook
+    ).run()
+
+    const newId = result.meta?.last_row_id ?? null
+    console.log(`[POST /api/listings] Created listing id=${newId} for user=${session.userId}`)
+
+    return c.json({
+      success: true,
+      listing_id: newId,
+      message: 'Listing created successfully',
+      redirect: newId ? `/listing/${newId}` : '/host'
+    }, 201)
+
+  } catch (e: any) {
+    console.error('[POST /api/listings] Error:', e.message)
+    if (e.message?.includes('required') || e.message?.includes('exceeds') || e.message?.includes('rate')) {
+      return c.json({ error: e.message }, 400)
+    }
+    return c.json({ error: 'Failed to create listing', detail: e.message }, 500)
+  }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// PUT /api/listings/:id — Update a listing (owner only)
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.put('/listings/:id', requireUserAuth(), async (c) => {
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+
+  const session = c.get('user') as any
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: 'Invalid listing ID' }, 400)
+
+  // IDOR check — ensure user owns this listing
+  const existing = await db.prepare('SELECT host_id FROM listings WHERE id = ?').bind(id).first<any>()
+  if (!existing) return c.json({ error: 'Listing not found' }, 404)
+  try { assertOwnership(session, existing.host_id) } catch {
+    return c.json({ error: 'Access denied' }, 403)
+  }
+
+  let body: any = {}
+  try { body = await c.req.json() } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400)
+  }
+
+  const updates: string[] = []
+  const params: any[] = []
+
+  if (body.title !== undefined)       { updates.push('title = ?');        params.push(sanitizeHtml(validateInput(body.title, { maxLength: 120 }))) }
+  if (body.description !== undefined) { updates.push('description = ?');  params.push(sanitizeHtml(validateInput(body.description, { maxLength: 2000 }))) }
+  if (body.type !== undefined)        { updates.push('type = ?');          params.push(body.type) }
+  if (body.address !== undefined)     { updates.push('address = ?');       params.push(sanitizeHtml(validateInput(body.address, { maxLength: 200 }))) }
+  if (body.city !== undefined)        { updates.push('city = ?');          params.push(sanitizeHtml(body.city)) }
+  if (body.state !== undefined)       { updates.push('state = ?');         params.push(sanitizeHtml(body.state)) }
+  if (body.zip !== undefined)         { updates.push('zip = ?');           params.push(sanitizeHtml(body.zip)) }
+  if (body.rate_hourly !== undefined) { updates.push('rate_hourly = ?');   params.push(parseFloat(body.rate_hourly) || null) }
+  if (body.rate_daily !== undefined)  { updates.push('rate_daily = ?');    params.push(parseFloat(body.rate_daily) || null) }
+  if (body.rate_monthly !== undefined){ updates.push('rate_monthly = ?');  params.push(parseFloat(body.rate_monthly) || null) }
+  if (body.status !== undefined)      { updates.push('status = ?');        params.push(body.status) }
+  if (body.instant_book !== undefined){ updates.push('instant_book = ?');  params.push(body.instant_book ? 1 : 0) }
+  if (body.amenities !== undefined)   { updates.push('amenities = ?');     params.push(JSON.stringify(body.amenities)) }
+
+  if (updates.length === 0) return c.json({ error: 'No fields to update' }, 400)
+
+  updates.push('updated_at = datetime(\'now\')')
+  params.push(id)
+
+  await db.prepare(`UPDATE listings SET ${updates.join(', ')} WHERE id = ?`).bind(...params).run()
+  return c.json({ success: true, message: 'Listing updated' })
 })
 
 // GET /api/listings/:id — full listing detail from D1
@@ -1763,5 +1939,366 @@ apiRoutes.post('/chat', async (c) => {
     return c.json({
       reply: "I'm temporarily unavailable. Please email support@parkpeer.com for help."
     })
+  }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// GOOGLE OAUTH  —  /api/auth/google  +  /api/auth/google/callback
+// ════════════════════════════════════════════════════════════════════════════
+
+// Step 1 — redirect browser to Google's OAuth consent screen
+// GET /api/auth/google?role=driver|host
+apiRoutes.get('/auth/google', (c) => {
+  const googleClientId = c.env?.GOOGLE_CLIENT_ID
+  if (!googleClientId) {
+    console.error('[OAuth/Google] GOOGLE_CLIENT_ID not configured')
+    return c.redirect('/auth/login?error=oauth_not_configured')
+  }
+
+  const base    = c.env?.OAUTH_REDIRECT_BASE || 'https://parkpeer.pages.dev'
+  const role    = c.req.query('role') || 'driver'
+  const state   = btoa(JSON.stringify({ role, ts: Date.now() }))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+
+  const params = new URLSearchParams({
+    client_id:     googleClientId,
+    redirect_uri:  `${base}/api/auth/google/callback`,
+    response_type: 'code',
+    scope:         'openid email profile',
+    access_type:   'offline',
+    prompt:        'select_account',
+    state,
+  })
+
+  return c.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`)
+})
+
+// Step 2 — Google redirects back with ?code=...&state=...
+// GET /api/auth/google/callback
+apiRoutes.get('/auth/google/callback', async (c) => {
+  const { code, state, error } = c.req.query()
+  const db = c.env?.DB
+
+  if (error || !code) {
+    console.error('[OAuth/Google] Callback error:', error)
+    return c.redirect(`/auth/login?error=${encodeURIComponent(error || 'google_denied')}`)
+  }
+
+  if (!db) return c.redirect('/auth/login?error=db_unavailable')
+
+  const base            = c.env?.OAUTH_REDIRECT_BASE || 'https://parkpeer.pages.dev'
+  const googleClientId  = c.env?.GOOGLE_CLIENT_ID
+  const googleClientSecret = c.env?.GOOGLE_CLIENT_SECRET
+  const tokenSecret     = c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod'
+
+  if (!googleClientId || !googleClientSecret) {
+    console.error('[OAuth/Google] Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET')
+    return c.redirect('/auth/login?error=oauth_not_configured')
+  }
+
+  // Decode role from state
+  let role = 'driver'
+  try {
+    const padded = state.replace(/-/g, '+').replace(/_/g, '/')
+    const decoded = JSON.parse(atob(padded + '==='.slice((padded.length + 3) % 4 || 4)))
+    role = decoded.role || 'driver'
+  } catch { /* ignore */ }
+
+  try {
+    // Exchange code for tokens
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id:     googleClientId,
+        client_secret: googleClientSecret,
+        redirect_uri:  `${base}/api/auth/google/callback`,
+        grant_type:    'authorization_code',
+      }).toString(),
+    })
+
+    if (!tokenRes.ok) {
+      const e = await tokenRes.text()
+      console.error('[OAuth/Google] Token exchange failed:', e.substring(0, 200))
+      return c.redirect('/auth/login?error=google_token_failed')
+    }
+
+    const tokens: any = await tokenRes.json()
+    const accessToken = tokens.access_token
+    if (!accessToken) return c.redirect('/auth/login?error=google_no_token')
+
+    // Fetch user profile from Google
+    const profileRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
+
+    if (!profileRes.ok) return c.redirect('/auth/login?error=google_profile_failed')
+
+    const profile: any = await profileRes.json()
+    const email    = profile.email?.toLowerCase()?.trim()
+    const fullName = profile.name || profile.given_name || email?.split('@')[0] || 'User'
+
+    if (!email) return c.redirect('/auth/login?error=google_no_email')
+
+    console.log(`[OAuth/Google] Login: ${email} role=${role}`)
+
+    // Upsert user in D1
+    let user: any = await db.prepare(
+      'SELECT id, email, full_name, role, status FROM users WHERE email = ?'
+    ).bind(email).first()
+
+    if (!user) {
+      // New user — create account
+      const insertResult = await db.prepare(`
+        INSERT INTO users (email, password_hash, full_name, role, status, email_verified, created_at, updated_at)
+        VALUES (?, '', ?, ?, 'active', 1, datetime('now'), datetime('now'))
+      `).bind(email, sanitizeHtml(fullName), role.toUpperCase()).run()
+      const newId = insertResult.meta?.last_row_id
+      user = { id: newId, email, full_name: fullName, role: role.toUpperCase(), status: 'active' }
+      console.log(`[OAuth/Google] Created new user id=${newId}`)
+    } else {
+      if (user.status === 'suspended') {
+        return c.redirect('/auth/login?error=account_suspended')
+      }
+      // Update last-seen (non-blocking)
+      db.prepare('UPDATE users SET updated_at = datetime(\'now\') WHERE id = ?').bind(user.id).run().catch(() => {})
+    }
+
+    // Issue JWT session cookie
+    await issueUserToken(c, {
+      userId: user.id,
+      email:  user.email,
+      role:   (user.role || role).toLowerCase(),
+    }, tokenSecret)
+
+    // Generate CSRF token
+    const csrfSecret = tokenSecret + '.csrf'
+    await generateCsrfToken(c, csrfSecret)
+
+    // Redirect to appropriate dashboard
+    const userRole = (user.role || role).toLowerCase()
+    return c.redirect(userRole === 'host' ? '/host' : '/dashboard')
+
+  } catch (e: any) {
+    console.error('[OAuth/Google] Unexpected error:', e.message)
+    return c.redirect('/auth/login?error=google_unexpected')
+  }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// APPLE OAUTH  —  /api/auth/apple  +  /api/auth/apple/callback
+//
+// Apple Sign In uses:
+//   APPLE_CLIENT_ID   = your Services ID (e.g. com.parkpeer.web)
+//   APPLE_TEAM_ID     = 10-char Team ID from Apple Developer console
+//   APPLE_KEY_ID      = Key ID for the Sign in with Apple private key
+//   APPLE_PRIVATE_KEY = PEM content of the .p8 file (newlines as \n)
+//   OAUTH_REDIRECT_BASE = https://parkpeer.pages.dev
+// ════════════════════════════════════════════════════════════════════════════
+
+// Helper: generate Apple client_secret JWT (ES256, valid 180 days)
+async function generateAppleClientSecret(env: any): Promise<string> {
+  const now     = Math.floor(Date.now() / 1000)
+  const teamId  = env.APPLE_TEAM_ID
+  const keyId   = env.APPLE_KEY_ID
+  const clientId = env.APPLE_CLIENT_ID
+
+  const header  = { alg: 'ES256', kid: keyId }
+  const payload = {
+    iss: teamId,
+    iat: now,
+    exp: now + 15552000,   // 180 days
+    aud: 'https://appleid.apple.com',
+    sub: clientId,
+  }
+
+  const enc = (obj: object) =>
+    btoa(JSON.stringify(obj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+
+  const signingInput = `${enc(header)}.${enc(payload)}`
+
+  // Import Apple .p8 EC private key (PKCS8 PEM → ArrayBuffer)
+  const pem = env.APPLE_PRIVATE_KEY
+    .replace(/-----BEGIN PRIVATE KEY-----/, '')
+    .replace(/-----END PRIVATE KEY-----/, '')
+    .replace(/\s/g, '')
+
+  const keyBuffer = Uint8Array.from(atob(pem), (c) => c.charCodeAt(0))
+  const cryptoKey = await crypto.subtle.importKey(
+    'pkcs8', keyBuffer,
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    false, ['sign']
+  )
+
+  const sigBuffer = await crypto.subtle.sign(
+    { name: 'ECDSA', hash: { name: 'SHA-256' } },
+    cryptoKey,
+    new TextEncoder().encode(signingInput)
+  )
+
+  // Convert DER-encoded signature to raw R||S (64 bytes) for JWT
+  const der    = new Uint8Array(sigBuffer)
+  const r      = der.slice(4, 4 + der[3])
+  const sStart = 4 + der[3] + 2
+  const s      = der.slice(sStart, sStart + der[sStart - 1])
+  const pad    = (b: Uint8Array) => {
+    const a = new Uint8Array(32); a.set(b.length > 32 ? b.slice(b.length - 32) : b, 32 - b.length); return a
+  }
+  const rawSig = new Uint8Array(64)
+  rawSig.set(pad(r), 0)
+  rawSig.set(pad(s), 32)
+
+  const sigB64 = btoa(String.fromCharCode(...rawSig))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+
+  return `${signingInput}.${sigB64}`
+}
+
+// GET /api/auth/apple?role=driver|host
+apiRoutes.get('/auth/apple', (c) => {
+  const appleClientId = c.env?.APPLE_CLIENT_ID
+  if (!appleClientId) {
+    console.error('[OAuth/Apple] APPLE_CLIENT_ID not configured')
+    return c.redirect('/auth/login?error=oauth_not_configured')
+  }
+
+  const base  = c.env?.OAUTH_REDIRECT_BASE || 'https://parkpeer.pages.dev'
+  const role  = c.req.query('role') || 'driver'
+  const state = btoa(JSON.stringify({ role, ts: Date.now() }))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+
+  const params = new URLSearchParams({
+    client_id:     appleClientId,
+    redirect_uri:  `${base}/api/auth/apple/callback`,
+    response_type: 'code id_token',
+    scope:         'name email',
+    response_mode: 'form_post',
+    state,
+  })
+
+  return c.redirect(`https://appleid.apple.com/auth/authorize?${params.toString()}`)
+})
+
+// POST /api/auth/apple/callback  — Apple posts back with form data
+apiRoutes.post('/auth/apple/callback', async (c) => {
+  const db = c.env?.DB
+  if (!db) return c.redirect('/auth/login?error=db_unavailable')
+
+  const tokenSecret = c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod'
+  const base = c.env?.OAUTH_REDIRECT_BASE || 'https://parkpeer.pages.dev'
+
+  let formData: FormData
+  try { formData = await c.req.formData() } catch {
+    return c.redirect('/auth/login?error=apple_bad_response')
+  }
+
+  const code  = formData.get('code') as string | null
+  const state = formData.get('state') as string | null
+  const user  = formData.get('user') as string | null   // only on first login
+  const error = formData.get('error') as string | null
+
+  if (error || !code) {
+    console.error('[OAuth/Apple] Callback error:', error)
+    return c.redirect(`/auth/login?error=${encodeURIComponent(error || 'apple_denied')}`)
+  }
+
+  if (!c.env?.APPLE_CLIENT_ID || !c.env?.APPLE_TEAM_ID || !c.env?.APPLE_KEY_ID || !c.env?.APPLE_PRIVATE_KEY) {
+    console.error('[OAuth/Apple] Missing required Apple env vars')
+    return c.redirect('/auth/login?error=oauth_not_configured')
+  }
+
+  // Decode role from state
+  let role = 'driver'
+  try {
+    const padded = (state || '').replace(/-/g, '+').replace(/_/g, '/')
+    const decoded = JSON.parse(atob(padded + '==='.slice((padded.length + 3) % 4 || 4)))
+    role = decoded.role || 'driver'
+  } catch { /* ignore */ }
+
+  try {
+    const clientSecret = await generateAppleClientSecret(c.env)
+
+    // Exchange code for tokens
+    const tokenRes = await fetch('https://appleid.apple.com/auth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id:     c.env.APPLE_CLIENT_ID,
+        client_secret: clientSecret,
+        code,
+        grant_type:    'authorization_code',
+        redirect_uri:  `${base}/api/auth/apple/callback`,
+      }).toString(),
+    })
+
+    if (!tokenRes.ok) {
+      const e = await tokenRes.text()
+      console.error('[OAuth/Apple] Token exchange failed:', e.substring(0, 200))
+      return c.redirect('/auth/login?error=apple_token_failed')
+    }
+
+    const tokens: any = await tokenRes.json()
+    const idToken = tokens.id_token
+    if (!idToken) return c.redirect('/auth/login?error=apple_no_id_token')
+
+    // Decode the id_token payload (not verifying Apple's signature — trusting HTTPS exchange)
+    const parts  = idToken.split('.')
+    if (parts.length < 2) return c.redirect('/auth/login?error=apple_bad_token')
+    const padded = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    const claims: any = JSON.parse(atob(padded + '==='.slice((padded.length + 3) % 4 || 4)))
+
+    const email = claims.email?.toLowerCase()?.trim()
+    if (!email) return c.redirect('/auth/login?error=apple_no_email')
+
+    // Apple provides user name only on FIRST login via form_post
+    let fullName = email.split('@')[0]
+    if (user) {
+      try {
+        const userObj = JSON.parse(user)
+        const fn = userObj?.name
+        if (fn?.firstName || fn?.lastName) {
+          fullName = [fn.firstName, fn.lastName].filter(Boolean).join(' ')
+        }
+      } catch { /* ignore */ }
+    }
+
+    console.log(`[OAuth/Apple] Login: ${email} role=${role}`)
+
+    // Upsert user
+    let dbUser: any = await db.prepare(
+      'SELECT id, email, full_name, role, status FROM users WHERE email = ?'
+    ).bind(email).first()
+
+    if (!dbUser) {
+      const res = await db.prepare(`
+        INSERT INTO users (email, password_hash, full_name, role, status, email_verified, created_at, updated_at)
+        VALUES (?, '', ?, ?, 'active', 1, datetime('now'), datetime('now'))
+      `).bind(email, sanitizeHtml(fullName), role.toUpperCase()).run()
+      const newId = res.meta?.last_row_id
+      dbUser = { id: newId, email, full_name: fullName, role: role.toUpperCase(), status: 'active' }
+      console.log(`[OAuth/Apple] Created new user id=${newId}`)
+    } else {
+      if (dbUser.status === 'suspended') {
+        return c.redirect('/auth/login?error=account_suspended')
+      }
+      db.prepare('UPDATE users SET updated_at = datetime(\'now\') WHERE id = ?').bind(dbUser.id).run().catch(() => {})
+    }
+
+    await issueUserToken(c, {
+      userId: dbUser.id,
+      email:  dbUser.email,
+      role:   (dbUser.role || role).toLowerCase(),
+    }, tokenSecret)
+
+    const csrfSecret = tokenSecret + '.csrf'
+    await generateCsrfToken(c, csrfSecret)
+
+    const userRole = (dbUser.role || role).toLowerCase()
+    return c.redirect(userRole === 'host' ? '/host' : '/dashboard')
+
+  } catch (e: any) {
+    console.error('[OAuth/Apple] Unexpected error:', e.message)
+    return c.redirect('/auth/login?error=apple_unexpected')
   }
 })
