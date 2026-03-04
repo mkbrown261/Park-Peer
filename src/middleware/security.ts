@@ -170,16 +170,20 @@ export async function issueUserToken(
   const body   = b64uEncode(JSON.stringify(payload))
   const sig    = await hmacSign(`${header}.${body}`, secret)
 
-  // Access token — HttpOnly, Secure, SameSite=Strict
+  // Access token — HttpOnly, Secure, SameSite=Lax
+  // NOTE: Must be Lax (not Strict) so the cookie is sent on the 303 redirect chain
+  // that follows OAuth callbacks (cross-site top-level navigation from accounts.google.com).
+  // SameSite=Strict blocks the cookie on that redirect chain, causing immediate logout.
+  // Lax still blocks CSRF on cross-origin subresource requests (images, iframes, fetch).
   setCookie(c, USER_COOKIE, `${header}.${body}.${sig}`, {
-    httpOnly: true, secure: true, sameSite: 'Strict', path: '/', maxAge: USER_TOKEN_TTL,
+    httpOnly: true, secure: true, sameSite: 'Lax', path: '/', maxAge: USER_TOKEN_TTL,
   })
 
   // Refresh token — scoped to /auth path only
   const rp  = b64uEncode(JSON.stringify({ userId: session.userId, iat: payload.iat, type: 'refresh' }))
   const rs  = await hmacSign(`refresh.${rp}`, secret)
   setCookie(c, REFRESH_COOKIE, `${rp}.${rs}`, {
-    httpOnly: true, secure: true, sameSite: 'Strict', path: '/auth', maxAge: REFRESH_TTL,
+    httpOnly: true, secure: true, sameSite: 'Lax', path: '/auth', maxAge: REFRESH_TTL,
   })
 }
 
@@ -198,8 +202,8 @@ export async function verifyUserToken(c: any, secret: string): Promise<UserSessi
 }
 
 export function clearUserToken(c: any): void {
-  setCookie(c, USER_COOKIE,    '', { httpOnly: true, secure: true, sameSite: 'Strict', path: '/',     maxAge: 0 })
-  setCookie(c, REFRESH_COOKIE, '', { httpOnly: true, secure: true, sameSite: 'Strict', path: '/auth', maxAge: 0 })
+  setCookie(c, USER_COOKIE,    '', { httpOnly: true, secure: true, sameSite: 'Lax', path: '/',     maxAge: 0 })
+  setCookie(c, REFRESH_COOKIE, '', { httpOnly: true, secure: true, sameSite: 'Lax', path: '/auth', maxAge: 0 })
 }
 
 // ─── 5. requireUserAuth middleware ───────────────────────────────────────────
