@@ -22,7 +22,7 @@ listingPage.get('/:id', async (c) => {
                l.address, l.city, l.state, l.zip, l.lat, l.lng,
                l.rate_hourly, l.rate_daily, l.rate_monthly,
                l.max_vehicle_size, l.amenities, l.photos,
-               l.instant_book, l.availability_start, l.availability_end,
+               l.instant_book, l.available_from, l.available_to,
                l.avg_rating, l.review_count, l.total_bookings,
                l.status,
                u.full_name as host_name, u.created_at as host_joined,
