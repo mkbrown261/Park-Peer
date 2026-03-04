@@ -11,7 +11,8 @@ import {
   sendHostBookingAlert,
   sendCancellationEmail,
   sendPaymentReceipt,
-  sendWelcomeEmail
+  sendWelcomeEmail,
+  sendListingRemovedEmail
 } from '../services/sendgrid'
 import {
   smsSendBookingConfirmation,
@@ -1102,6 +1103,187 @@ apiRoutes.put('/listings/:id', requireUserAuth(), async (c) => {
 
   await db.prepare(`UPDATE listings SET ${updates.join(', ')} WHERE id = ?`).bind(...params).run()
   return c.json({ success: true, message: 'Listing updated' })
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// PATCH /api/listings/:id/archive — Archive a listing (owner only, no active bookings)
+// PATCH /api/listings/:id/restore — Restore an archived listing (owner only)
+// DELETE /api/listings/:id        — Permanently remove a listing (owner only, no active bookings)
+//
+// Active-booking guard: rejects if any booking for this listing has status
+// in ('pending','confirmed','active') — meaning a driver has reserved or is
+// currently occupying the space.
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── Archive ──────────────────────────────────────────────────────────────────
+apiRoutes.patch('/listings/:id/archive', requireUserAuth(), async (c) => {
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+
+  const session = c.get('user') as any
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: 'Invalid listing ID' }, 400)
+
+  // IDOR — ownership check
+  const listing = await db.prepare(
+    'SELECT id, host_id, title, address, city, state, status FROM listings WHERE id = ?'
+  ).bind(id).first<any>()
+  if (!listing) return c.json({ error: 'Listing not found' }, 404)
+
+  try { assertOwnership(session, listing.host_id) } catch {
+    return c.json({ error: 'Access denied — you do not own this listing' }, 403)
+  }
+
+  if (listing.status === 'archived') {
+    return c.json({ error: 'Listing is already archived' }, 409)
+  }
+
+  // Active-booking guard — block if any booking is pending / confirmed / active
+  const active = await db.prepare(`
+    SELECT COUNT(*) as n FROM bookings
+    WHERE listing_id = ? AND status IN ('pending','confirmed','active')
+  `).bind(id).first<{ n: number }>()
+
+  if (active && active.n > 0) {
+    return c.json({
+      error: 'Cannot archive a listing with active or upcoming bookings. Please wait until all current bookings are completed.',
+      active_bookings: active.n
+    }, 409)
+  }
+
+  // Archive — sets status to 'archived', hides from search results
+  await db.prepare(
+    "UPDATE listings SET status = 'archived', updated_at = datetime('now') WHERE id = ?"
+  ).bind(id).run()
+
+  console.log(`[Archive listing] id=${id} by user=${session.userId}`)
+
+  // Confirmation email (non-blocking)
+  const host = await db.prepare('SELECT email, full_name FROM users WHERE id = ?')
+    .bind(listing.host_id).first<any>()
+  if (host) {
+    sendListingRemovedEmail(c.env as any, {
+      hostEmail: host.email,
+      hostName:  host.full_name,
+      listingTitle:   listing.title,
+      listingAddress: `${listing.address}, ${listing.city}, ${listing.state}`,
+      action: 'archived'
+    }).catch(() => {})
+  }
+
+  return c.json({ success: true, message: 'Listing archived successfully', action: 'archived' })
+})
+
+// ── Restore ──────────────────────────────────────────────────────────────────
+apiRoutes.patch('/listings/:id/restore', requireUserAuth(), async (c) => {
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+
+  const session = c.get('user') as any
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: 'Invalid listing ID' }, 400)
+
+  const listing = await db.prepare(
+    'SELECT id, host_id, status FROM listings WHERE id = ?'
+  ).bind(id).first<any>()
+  if (!listing) return c.json({ error: 'Listing not found' }, 404)
+
+  try { assertOwnership(session, listing.host_id) } catch {
+    return c.json({ error: 'Access denied — you do not own this listing' }, 403)
+  }
+
+  if (listing.status !== 'archived') {
+    return c.json({ error: 'Listing is not archived' }, 409)
+  }
+
+  await db.prepare(
+    "UPDATE listings SET status = 'active', updated_at = datetime('now') WHERE id = ?"
+  ).bind(id).run()
+
+  console.log(`[Restore listing] id=${id} by user=${session.userId}`)
+  return c.json({ success: true, message: 'Listing restored and is now active', action: 'restored' })
+})
+
+// ── Permanent delete ─────────────────────────────────────────────────────────
+apiRoutes.delete('/listings/:id', requireUserAuth(), async (c) => {
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+
+  const session = c.get('user') as any
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: 'Invalid listing ID' }, 400)
+
+  // IDOR — ownership check
+  const listing = await db.prepare(
+    'SELECT id, host_id, title, address, city, state, status FROM listings WHERE id = ?'
+  ).bind(id).first<any>()
+  if (!listing) return c.json({ error: 'Listing not found' }, 404)
+
+  try { assertOwnership(session, listing.host_id) } catch {
+    return c.json({ error: 'Access denied — you do not own this listing' }, 403)
+  }
+
+  // Active-booking guard — same check as archive
+  const active = await db.prepare(`
+    SELECT COUNT(*) as n FROM bookings
+    WHERE listing_id = ? AND status IN ('pending','confirmed','active')
+  `).bind(id).first<{ n: number }>()
+
+  if (active && active.n > 0) {
+    return c.json({
+      error: 'Cannot remove a listing with active or upcoming bookings. Please wait until all current bookings are completed.',
+      active_bookings: active.n
+    }, 409)
+  }
+
+  // Hard delete (cascades via schema FK rules; completed bookings are preserved)
+  await db.prepare('DELETE FROM listings WHERE id = ?').bind(id).run()
+
+  console.log(`[Delete listing] id=${id} by user=${session.userId}`)
+
+  // Confirmation email (non-blocking)
+  const host = await db.prepare('SELECT email, full_name FROM users WHERE id = ?')
+    .bind(listing.host_id).first<any>()
+  if (host) {
+    sendListingRemovedEmail(c.env as any, {
+      hostEmail: host.email,
+      hostName:  host.full_name,
+      listingTitle:   listing.title,
+      listingAddress: `${listing.address}, ${listing.city}, ${listing.state}`,
+      action: 'removed'
+    }).catch(() => {})
+  }
+
+  return c.json({ success: true, message: 'Listing permanently removed', action: 'removed' })
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// GET /api/listings/:id/booking-check — lightweight active-booking pre-check
+// Called by the host dashboard before showing the archive/remove modal so the
+// UI can immediately surface a "blocked" state without attempting the action.
+// Requires auth (only the listing owner may check).
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.get('/listings/:id/booking-check', requireUserAuth(), async (c) => {
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'Database unavailable', active_bookings: 0 }, 503)
+
+  const session = c.get('user') as any
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id)) return c.json({ error: 'Invalid listing ID', active_bookings: 0 }, 400)
+
+  // IDOR — only the owner may check
+  const listing = await db.prepare('SELECT host_id FROM listings WHERE id = ?').bind(id).first<any>()
+  if (!listing) return c.json({ error: 'Listing not found', active_bookings: 0 }, 404)
+  try { assertOwnership(session, listing.host_id) } catch {
+    return c.json({ error: 'Access denied', active_bookings: 0 }, 403)
+  }
+
+  const active = await db.prepare(`
+    SELECT COUNT(*) as n FROM bookings
+    WHERE listing_id = ? AND status IN ('pending','confirmed','active')
+  `).bind(id).first<{ n: number }>()
+
+  return c.json({ listing_id: id, active_bookings: active?.n ?? 0 })
 })
 
 // GET /api/listings/:id — full listing detail from D1

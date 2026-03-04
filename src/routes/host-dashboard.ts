@@ -148,17 +148,22 @@ hostDashboard.get('/', async (c) => {
        </div>`
     : myListings.map(l => {
         const typeIcon = l.type === 'garage' ? 'warehouse' : l.type === 'driveway' ? 'home' : 'parking'
+        const isArchived = l.status === 'archived'
         return `
-          <div class="p-4 hover:bg-white/5 transition-colors">
+          <div class="p-4 hover:bg-white/5 transition-colors listing-row" data-id="${l.id}" data-title="${l.title.replace(/"/g,'&quot;')}">
             <div class="flex items-center gap-4">
-              <div class="w-16 h-16 bg-gradient-to-br from-charcoal-300 to-charcoal-400 rounded-xl flex items-center justify-center flex-shrink-0">
+              <div class="w-16 h-16 bg-gradient-to-br from-charcoal-300 to-charcoal-400 rounded-xl flex items-center justify-center flex-shrink-0 ${isArchived ? 'opacity-40' : ''}">
                 <i class="fas fa-${typeIcon} text-white/30 text-2xl"></i>
               </div>
               <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-2 mb-1">
-                  <p class="font-bold text-white text-sm">${l.title}</p>
-                  <span class="text-xs px-2 py-0.5 rounded-full ${l.status === 'active' ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'}">${l.status}</span>
-                  ${l.instant_book ? '<span class="text-xs bg-lime-500/20 text-lime-500 px-2 py-0.5 rounded-full">⚡ Instant</span>' : ''}
+                  <p class="font-bold text-white text-sm ${isArchived ? 'text-gray-400' : ''}">${l.title}</p>
+                  <span class="text-xs px-2 py-0.5 rounded-full ${
+                    l.status === 'active'   ? 'bg-green-500/20 text-green-400' :
+                    l.status === 'archived' ? 'bg-amber-500/20 text-amber-400' :
+                                              'bg-gray-500/20 text-gray-400'
+                  }">${l.status === 'archived' ? '📦 archived' : l.status}</span>
+                  ${l.instant_book && !isArchived ? '<span class="text-xs bg-lime-500/20 text-lime-500 px-2 py-0.5 rounded-full">⚡ Instant</span>' : ''}
                 </div>
                 <div class="flex items-center gap-3 text-xs text-gray-400 flex-wrap">
                   <span><i class="fas fa-dollar-sign text-indigo-400 mr-1"></i>$${l.rate_hourly}/hr</span>
@@ -167,13 +172,20 @@ hostDashboard.get('/', async (c) => {
                   ${l.revenue > 0 ? `<span class="text-lime-500 font-semibold"><i class="fas fa-dollar-sign mr-0.5"></i>${Number(l.revenue).toFixed(0)} earned</span>` : ''}
                 </div>
               </div>
-              <div class="flex flex-col gap-2">
-                <a href="/listing/${l.id}" class="px-3 py-1.5 bg-charcoal-200 hover:bg-indigo-500/20 text-gray-400 hover:text-indigo-300 rounded-xl text-xs font-medium transition-colors border border-white/5">
+              <div class="flex flex-col gap-2 relative">
+                <a href="/listing/${l.id}" class="px-3 py-1.5 bg-charcoal-200 hover:bg-indigo-500/20 text-gray-400 hover:text-indigo-300 rounded-xl text-xs font-medium transition-colors border border-white/5 text-center">
                   View
                 </a>
-                <button class="px-3 py-1.5 bg-charcoal-200 hover:bg-charcoal-300 text-gray-400 hover:text-white rounded-xl text-xs transition-colors border border-white/5">
-                  ${l.status === 'active' ? 'Pause' : 'Activate'}
-                </button>
+                ${isArchived
+                  ? `<button onclick="confirmRestore(${l.id},'${l.title.replace(/'/g,'\\\'')}')"
+                       class="px-3 py-1.5 bg-green-500/10 hover:bg-green-500/20 text-green-400 hover:text-green-300 rounded-xl text-xs font-medium transition-colors border border-green-500/20 whitespace-nowrap">
+                       <i class="fas fa-undo mr-1"></i>Restore
+                     </button>`
+                  : `<button onclick="openManageListing(${l.id},'${l.title.replace(/'/g,'\\\'')}')"
+                       class="px-3 py-1.5 bg-charcoal-200 hover:bg-red-500/10 text-gray-400 hover:text-red-400 rounded-xl text-xs font-medium transition-colors border border-white/5 hover:border-red-500/20 whitespace-nowrap">
+                       <i class="fas fa-ellipsis-h mr-1"></i>Manage
+                     </button>`
+                }
               </div>
             </div>
           </div>
@@ -397,6 +409,165 @@ hostDashboard.get('/', async (c) => {
             </ul>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Manage Listing Modal (Archive / Remove) -->
+  <div id="manage-listing-modal" class="hidden fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4" onclick="closeManageModal(event)">
+    <div class="bg-charcoal-100 rounded-3xl w-full max-w-md border border-white/10 overflow-hidden" onclick="event.stopPropagation()">
+
+      <!-- Header -->
+      <div class="flex items-center justify-between p-6 border-b border-white/10">
+        <div>
+          <h3 class="text-xl font-bold text-white">Manage Listing</h3>
+          <p id="manage-listing-subtitle" class="text-gray-400 text-sm mt-0.5 truncate max-w-xs"></p>
+        </div>
+        <button onclick="hideManageModal()" class="w-8 h-8 bg-charcoal-200 rounded-full flex items-center justify-center text-gray-400 hover:text-white transition-colors">
+          <i class="fas fa-times text-sm"></i>
+        </button>
+      </div>
+
+      <!-- State: checking bookings (spinner) -->
+      <div id="manage-state-loading" class="hidden p-8 text-center">
+        <i class="fas fa-spinner fa-spin text-indigo-400 text-2xl mb-3 block"></i>
+        <p class="text-gray-400 text-sm">Checking for active bookings…</p>
+      </div>
+
+      <!-- State: has active bookings — cannot remove -->
+      <div id="manage-state-blocked" class="hidden p-6">
+        <div class="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-5 mb-5">
+          <div class="flex items-start gap-3">
+            <i class="fas fa-exclamation-triangle text-amber-400 text-lg mt-0.5 flex-shrink-0"></i>
+            <div>
+              <p class="text-amber-300 font-semibold text-sm mb-1">Active Booking in Progress</p>
+              <p id="manage-blocked-msg" class="text-amber-200/70 text-xs leading-relaxed">
+                This listing has an active or upcoming booking. You can archive or remove it once all current reservations are completed.
+              </p>
+            </div>
+          </div>
+        </div>
+        <button onclick="hideManageModal()" class="w-full py-3 bg-charcoal-200 hover:bg-charcoal-300 text-white rounded-xl text-sm font-semibold transition-colors border border-white/10">
+          Got it
+        </button>
+      </div>
+
+      <!-- State: available — show archive + remove options -->
+      <div id="manage-state-options" class="hidden p-6 space-y-3">
+
+        <!-- Archive option -->
+        <div class="bg-charcoal-200 border border-white/5 hover:border-amber-500/30 rounded-2xl p-4 transition-colors cursor-pointer" onclick="showConfirm('archive')">
+          <div class="flex items-center gap-4">
+            <div class="w-11 h-11 bg-amber-500/10 rounded-xl flex items-center justify-center flex-shrink-0">
+              <i class="fas fa-box-archive text-amber-400 text-lg"></i>
+            </div>
+            <div class="flex-1">
+              <p class="text-white font-semibold text-sm">Archive Listing</p>
+              <p class="text-gray-400 text-xs mt-0.5">Hide from search results. All reviews &amp; history are preserved. Restore any time.</p>
+            </div>
+            <i class="fas fa-chevron-right text-gray-600 text-xs"></i>
+          </div>
+        </div>
+
+        <!-- Permanent remove option -->
+        <div class="bg-charcoal-200 border border-white/5 hover:border-red-500/30 rounded-2xl p-4 transition-colors cursor-pointer" onclick="showConfirm('remove')">
+          <div class="flex items-center gap-4">
+            <div class="w-11 h-11 bg-red-500/10 rounded-xl flex items-center justify-center flex-shrink-0">
+              <i class="fas fa-trash-alt text-red-400 text-lg"></i>
+            </div>
+            <div class="flex-1">
+              <p class="text-white font-semibold text-sm">Remove Listing</p>
+              <p class="text-gray-400 text-xs mt-0.5">Permanently delete this listing. This action cannot be undone.</p>
+            </div>
+            <i class="fas fa-chevron-right text-gray-600 text-xs"></i>
+          </div>
+        </div>
+
+        <button onclick="hideManageModal()" class="w-full py-2.5 bg-transparent hover:bg-white/5 text-gray-400 rounded-xl text-sm transition-colors">
+          Cancel
+        </button>
+      </div>
+
+      <!-- State: confirm archive -->
+      <div id="manage-state-confirm-archive" class="hidden p-6 space-y-4">
+        <div class="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-4">
+          <p class="text-amber-300 font-semibold text-sm mb-1"><i class="fas fa-box-archive mr-2"></i>Archive this listing?</p>
+          <p class="text-amber-200/70 text-xs leading-relaxed">
+            Your listing will be hidden from search results and new bookings will be paused. Reviews and booking history are kept. You can restore it any time from this dashboard.
+          </p>
+        </div>
+        <div id="manage-action-error" class="hidden bg-red-500/10 border border-red-500/20 rounded-xl p-3">
+          <p id="manage-action-error-msg" class="text-red-400 text-sm"></p>
+        </div>
+        <div class="flex gap-3">
+          <button onclick="showState('options')" class="flex-1 py-3 bg-charcoal-200 hover:bg-charcoal-300 text-gray-300 rounded-xl text-sm font-semibold transition-colors border border-white/10">
+            Back
+          </button>
+          <button id="manage-archive-btn" onclick="executeAction('archive')"
+            class="flex-1 py-3 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 hover:text-amber-200 rounded-xl text-sm font-bold transition-colors border border-amber-500/20">
+            <i class="fas fa-box-archive mr-2"></i>Archive Listing
+          </button>
+        </div>
+      </div>
+
+      <!-- State: confirm remove -->
+      <div id="manage-state-confirm-remove" class="hidden p-6 space-y-4">
+        <div class="bg-red-500/10 border border-red-500/20 rounded-2xl p-4">
+          <p class="text-red-400 font-semibold text-sm mb-1"><i class="fas fa-exclamation-triangle mr-2"></i>Permanently remove this listing?</p>
+          <p class="text-red-300/70 text-xs leading-relaxed">
+            This will permanently delete the listing and cannot be undone. Past completed bookings will remain in booking history.
+          </p>
+        </div>
+        <div id="manage-remove-error" class="hidden bg-red-500/10 border border-red-500/20 rounded-xl p-3">
+          <p id="manage-remove-error-msg" class="text-red-400 text-sm"></p>
+        </div>
+        <div class="flex gap-3">
+          <button onclick="showState('options')" class="flex-1 py-3 bg-charcoal-200 hover:bg-charcoal-300 text-gray-300 rounded-xl text-sm font-semibold transition-colors border border-white/10">
+            Back
+          </button>
+          <button id="manage-remove-btn" onclick="executeAction('remove')"
+            class="flex-1 py-3 bg-red-500/20 hover:bg-red-500/30 text-red-400 hover:text-red-300 rounded-xl text-sm font-bold transition-colors border border-red-500/20">
+            <i class="fas fa-trash-alt mr-2"></i>Remove Listing
+          </button>
+        </div>
+      </div>
+
+      <!-- State: success -->
+      <div id="manage-state-success" class="hidden p-8 text-center">
+        <div id="manage-success-icon" class="w-16 h-16 bg-green-500/10 rounded-full flex items-center justify-center mx-auto mb-4">
+          <i class="fas fa-check text-green-400 text-2xl"></i>
+        </div>
+        <p id="manage-success-title" class="text-white font-bold text-lg mb-2">Done!</p>
+        <p id="manage-success-msg" class="text-gray-400 text-sm">Refreshing your dashboard…</p>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Restore Confirmation Modal -->
+  <div id="restore-modal" class="hidden fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4" onclick="closeRestoreModal(event)">
+    <div class="bg-charcoal-100 rounded-3xl w-full max-w-sm border border-white/10 overflow-hidden p-6 space-y-4" onclick="event.stopPropagation()">
+      <div class="flex items-center gap-3">
+        <div class="w-11 h-11 bg-green-500/10 rounded-xl flex items-center justify-center flex-shrink-0">
+          <i class="fas fa-undo text-green-400 text-lg"></i>
+        </div>
+        <div>
+          <p class="text-white font-bold text-sm">Restore Listing?</p>
+          <p id="restore-listing-name" class="text-gray-400 text-xs mt-0.5"></p>
+        </div>
+      </div>
+      <p class="text-gray-400 text-sm">This listing will become active again and visible to drivers on ParkPeer.</p>
+      <div id="restore-error" class="hidden bg-red-500/10 border border-red-500/20 rounded-xl p-3">
+        <p id="restore-error-msg" class="text-red-400 text-sm"></p>
+      </div>
+      <div class="flex gap-3">
+        <button onclick="document.getElementById('restore-modal').classList.add('hidden')" class="flex-1 py-3 bg-charcoal-200 hover:bg-charcoal-300 text-gray-300 rounded-xl text-sm font-semibold transition-colors border border-white/10">
+          Cancel
+        </button>
+        <button id="restore-btn" onclick="executeRestore()"
+          class="flex-1 py-3 bg-green-500/20 hover:bg-green-500/30 text-green-400 hover:text-green-300 rounded-xl text-sm font-bold transition-colors border border-green-500/20">
+          <i class="fas fa-undo mr-2"></i>Restore
+        </button>
       </div>
     </div>
   </div>
@@ -687,6 +858,187 @@ hostDashboard.get('/', async (c) => {
     function declineBooking(btn, id) {
       btn.closest('.flex').innerHTML = '<span class="text-red-400 text-sm font-semibold flex items-center gap-2"><i class="fas fa-times-circle"></i> Booking Declined</span>';
       fetch('/api/bookings/' + id + '/cancel', { method: 'POST', credentials: 'same-origin' }).catch(() => {});
+    }
+
+    // ── Manage Listing Modal ────────────────────────────────────────────────
+    let _managingId    = null;
+    let _managingTitle = '';
+    const MANAGE_STATES = ['loading','blocked','options','confirm-archive','confirm-remove','success'];
+
+    function showState(name) {
+      MANAGE_STATES.forEach(s => {
+        const el = document.getElementById('manage-state-' + s);
+        if (el) el.classList.add('hidden');
+      });
+      const target = document.getElementById('manage-state-' + name);
+      if (target) target.classList.remove('hidden');
+    }
+
+    function openManageListing(id, title) {
+      _managingId    = id;
+      _managingTitle = title;
+      document.getElementById('manage-listing-subtitle').textContent = title;
+      // clear error states
+      ['manage-action-error','manage-remove-error'].forEach(eid => {
+        const el = document.getElementById(eid);
+        if (el) el.classList.add('hidden');
+      });
+      document.getElementById('manage-listing-modal').classList.remove('hidden');
+      showState('loading');
+
+      // Check for active bookings via a quick OPTIONS-like GET (no dedicated endpoint needed:
+      // the archive/delete endpoint returns 409 if active — but we pre-check via a lightweight
+      // fetch to avoid two round trips; we hit archive with a dry-run flag approach instead
+      // we simply try to get the listing status inline from the available status API)
+      // Use the archive attempt as a pre-check by passing a preview query param
+      fetch('/api/listings/' + id + '/booking-check', { credentials: 'same-origin' })
+        .then(r => r.json())
+        .catch(() => ({ active_bookings: 0 }))
+        .then(data => {
+          if (data.active_bookings > 0) {
+            const n = data.active_bookings;
+            document.getElementById('manage-blocked-msg').textContent =
+              'This listing has ' + n + ' active or upcoming booking' + (n > 1 ? 's' : '') +
+              '. You can archive or remove it once all reservations are completed.';
+            showState('blocked');
+          } else {
+            showState('options');
+          }
+        });
+    }
+
+    function showConfirm(action) {
+      showState('confirm-' + action);
+    }
+
+    function hideManageModal() {
+      document.getElementById('manage-listing-modal').classList.add('hidden');
+      _managingId    = null;
+      _managingTitle = '';
+    }
+
+    function closeManageModal(e) {
+      if (e.target === document.getElementById('manage-listing-modal')) hideManageModal();
+    }
+
+    function getCsrfToken() {
+      // Read from cookie __pp_csrf (non-httpOnly, written by server)
+      const m = document.cookie.match(/(?:^|;\\s*)__pp_csrf=([^;]+)/);
+      if (m) return decodeURIComponent(m[1]).split('.').slice(0,3).join('.');
+      return sessionStorage.getItem('csrf_token') || '';
+    }
+
+    async function executeAction(action) {
+      if (!_managingId) return;
+      const errId  = action === 'archive' ? 'manage-action-error' : 'manage-remove-error';
+      const errMsg = action === 'archive' ? 'manage-action-error-msg' : 'manage-remove-error-msg';
+      const btnId  = action === 'archive' ? 'manage-archive-btn' : 'manage-remove-btn';
+
+      const errEl  = document.getElementById(errId);
+      const btn    = document.getElementById(btnId);
+      errEl.classList.add('hidden');
+
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Processing…';
+
+      const csrf = getCsrfToken();
+      try {
+        const url = action === 'archive'
+          ? '/api/listings/' + _managingId + '/archive'
+          : '/api/listings/' + _managingId;
+        const method = action === 'archive' ? 'PATCH' : 'DELETE';
+
+        const res = await fetch(url, {
+          method,
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': csrf,
+          },
+          credentials: 'same-origin',
+        });
+
+        const data = await res.json().catch(() => ({}));
+
+        if (!res.ok) {
+          const msg = data.error || 'Action failed. Please try again.';
+          document.getElementById(errMsg).textContent = msg;
+          errEl.classList.remove('hidden');
+          btn.disabled = false;
+          btn.innerHTML = action === 'archive'
+            ? '<i class="fas fa-box-archive mr-2"></i>Archive Listing'
+            : '<i class="fas fa-trash-alt mr-2"></i>Remove Listing';
+          return;
+        }
+
+        // Success
+        showState('success');
+        if (action === 'archive') {
+          document.getElementById('manage-success-icon').innerHTML = '<i class="fas fa-box-archive text-amber-400 text-2xl"></i>';
+          document.getElementById('manage-success-icon').className = 'w-16 h-16 bg-amber-500/10 rounded-full flex items-center justify-center mx-auto mb-4';
+          document.getElementById('manage-success-title').textContent = 'Listing Archived';
+          document.getElementById('manage-success-msg').textContent   = 'Hidden from search. Refreshing your dashboard…';
+        } else {
+          document.getElementById('manage-success-title').textContent = 'Listing Removed';
+          document.getElementById('manage-success-msg').textContent   = 'Permanently deleted. Refreshing your dashboard…';
+        }
+        setTimeout(() => { window.location.reload(); }, 1500);
+
+      } catch (err) {
+        document.getElementById(errMsg).textContent = 'Network error. Please check your connection.';
+        errEl.classList.remove('hidden');
+        btn.disabled = false;
+        btn.innerHTML = action === 'archive'
+          ? '<i class="fas fa-box-archive mr-2"></i>Archive Listing'
+          : '<i class="fas fa-trash-alt mr-2"></i>Remove Listing';
+      }
+    }
+
+    // ── Restore Modal ───────────────────────────────────────────────────────
+    let _restoringId = null;
+
+    function confirmRestore(id, title) {
+      _restoringId = id;
+      document.getElementById('restore-listing-name').textContent = title;
+      document.getElementById('restore-error').classList.add('hidden');
+      document.getElementById('restore-btn').disabled = false;
+      document.getElementById('restore-btn').innerHTML = '<i class="fas fa-undo mr-2"></i>Restore';
+      document.getElementById('restore-modal').classList.remove('hidden');
+    }
+
+    function closeRestoreModal(e) {
+      if (e.target === document.getElementById('restore-modal'))
+        document.getElementById('restore-modal').classList.add('hidden');
+    }
+
+    async function executeRestore() {
+      if (!_restoringId) return;
+      const btn = document.getElementById('restore-btn');
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Restoring…';
+
+      const csrf = getCsrfToken();
+      try {
+        const res = await fetch('/api/listings/' + _restoringId + '/restore', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+          credentials: 'same-origin',
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          document.getElementById('restore-error-msg').textContent = data.error || 'Restore failed.';
+          document.getElementById('restore-error').classList.remove('hidden');
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fas fa-undo mr-2"></i>Restore';
+          return;
+        }
+        btn.innerHTML = '<i class="fas fa-check mr-2"></i>Restored!';
+        setTimeout(() => { window.location.reload(); }, 1200);
+      } catch {
+        document.getElementById('restore-error-msg').textContent = 'Network error. Please try again.';
+        document.getElementById('restore-error').classList.remove('hidden');
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-undo mr-2"></i>Restore';
+      }
     }
   </script>
   `

@@ -296,3 +296,51 @@ export async function sendWelcomeEmail(env: Env, data: {
     textContent: `Welcome to ParkPeer, ${data.toName}! Your account is ready. Visit https://parkpeer.pages.dev to get started.`
   })
 }
+
+// ── 6. Listing Removed / Archived → Host ─────────────────────────────────────
+export async function sendListingRemovedEmail(env: Env, data: {
+  hostEmail: string
+  hostName: string
+  listingTitle: string
+  listingAddress: string
+  action: 'archived' | 'removed'
+}): Promise<boolean> {
+  const isArchive = data.action === 'archived'
+  const html = emailWrapper(`
+    <h2 style="color:#121212;font-size:22px;font-weight:800;margin:0 0 8px;">
+      ${isArchive ? '📦 Listing Archived' : '🗑️ Listing Removed'}
+    </h2>
+    <p style="color:#6b7280;font-size:15px;margin:0 0 24px;">
+      Your parking space has been ${isArchive ? 'archived and is no longer visible to drivers. You can restore it any time from your Host Dashboard.' : 'permanently removed from ParkPeer.'}</p>
+
+    <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:12px;padding:24px;margin-bottom:24px;">
+      <table width="100%" cellpadding="0" cellspacing="0">
+        <tr><td style="padding:6px 0;color:#6b7280;font-size:13px;width:140px;">Space</td>
+            <td style="padding:6px 0;color:#121212;font-size:13px;font-weight:700;">${data.listingTitle}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280;font-size:13px;">Address</td>
+            <td style="padding:6px 0;color:#121212;font-size:13px;">${data.listingAddress}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280;font-size:13px;">Status</td>
+            <td style="padding:6px 0;font-size:13px;font-weight:700;color:${isArchive ? '#d97706' : '#dc2626'};">${isArchive ? '📦 Archived' : '🗑️ Removed'}</td></tr>
+      </table>
+    </div>
+
+    ${isArchive ? `
+    <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:12px;padding:16px;margin-bottom:24px;">
+      <p style="color:#92400e;font-size:13px;margin:0;"><strong>💡 Tip:</strong> Archived listings keep all their reviews and booking history. Restore your listing in the Host Dashboard whenever you're ready to accept bookings again.</p>
+    </div>
+    ` : ''}
+
+    <a href="https://parkpeer.pages.dev/host" style="display:inline-block;background:linear-gradient(135deg,#5B2EFF,#4a20f0);color:#fff;font-weight:700;font-size:14px;padding:14px 28px;border-radius:10px;text-decoration:none;">Go to Host Dashboard →</a>
+    <p style="color:#9ca3af;font-size:13px;margin-top:24px;">Have questions? Contact us at <a href="mailto:support@parkpeer.com" style="color:#5B2EFF;">support@parkpeer.com</a></p>
+  `)
+
+  return sendEmail(env, {
+    to: data.hostEmail,
+    toName: data.hostName,
+    subject: isArchive
+      ? `📦 Listing Archived — ${data.listingTitle}`
+      : `🗑️ Listing Removed — ${data.listingTitle}`,
+    htmlContent: html,
+    textContent: `Your listing "${data.listingTitle}" at ${data.listingAddress} has been ${data.action}. Visit https://parkpeer.pages.dev/host to manage your listings.`
+  })
+}
