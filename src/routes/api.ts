@@ -899,6 +899,24 @@ apiRoutes.post('/listings', requireUserAuth(), async (c) => {
   const session = c.get('user') as any
   if (!session?.userId) return c.json({ error: 'Authentication required' }, 401)
 
+  // Only hosts (or users with BOTH role) can create listings
+  const userRole = (session.role || '').toUpperCase()
+  if (userRole !== 'HOST' && userRole !== 'BOTH' && userRole !== 'ADMIN') {
+    // Also re-check DB in case role was updated after JWT was issued
+    try {
+      const dbUser = await db.prepare('SELECT role FROM users WHERE id = ?').bind(session.userId).first<{role: string}>()
+      const dbRole = (dbUser?.role || '').toUpperCase()
+      if (dbRole !== 'HOST' && dbRole !== 'BOTH' && dbRole !== 'ADMIN') {
+        return c.json({ error: 'Only hosts can create listings. Please switch to a host account.' }, 403)
+      }
+    } catch {
+      // If DB check fails, fall through and allow the create (the JWT role check is the primary guard)
+      if (userRole !== 'HOST' && userRole !== 'BOTH' && userRole !== 'ADMIN') {
+        return c.json({ error: 'Only hosts can create listings. Please switch to a host account.' }, 403)
+      }
+    }
+  }
+
   let body: any = {}
   try { body = await c.req.json() } catch {
     return c.json({ error: 'Invalid JSON body' }, 400)
@@ -1188,9 +1206,9 @@ apiRoutes.post('/bookings', async (c) => {
       const conflict = await db.prepare(`
         SELECT id FROM bookings
         WHERE listing_id = ?
-          AND status IN ('confirmed','active','pending_payment')
-          AND start_datetime < ?
-          AND end_datetime   > ?
+          AND status IN ('confirmed','active','pending')
+          AND start_time < ?
+          AND end_time   > ?
         LIMIT 1
       `).bind(listing_id, end_datetime, start_datetime).first<{ id: number }>()
 
@@ -1219,17 +1237,23 @@ apiRoutes.post('/bookings', async (c) => {
       // ── Insert booking record ─────────────────────────────────────────
       await db.prepare(`
         INSERT INTO bookings
-          (listing_id, driver_id, start_datetime, end_datetime,
-           status, total_amount, vehicle_plate, created_at)
-        VALUES (?, ?, ?, ?, 'pending_payment', ?, ?, datetime('now'))
-      `).bind(listing_id, driver_id, start_datetime, end_datetime,
-              total, vehicle_plate || null).run()
+          (listing_id, driver_id, start_time, end_time,
+           duration_hours, status, subtotal, platform_fee, host_payout,
+           total_charged, vehicle_description, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+      `).bind(
+        listing_id, driver_id || null,
+        start_datetime, end_datetime, hours,
+        base, fee, Math.round((base - fee) * 100) / 100, total,
+        vehicle_plate || null
+      ).run()
 
       return c.json({
-        id: bookingId, listing_id, start_datetime, end_datetime, hours,
-        vehicle_plate: vehicle_plate || null,
+        id: bookingId, listing_id,
+        start_time: start_datetime, end_time: end_datetime, hours,
+        vehicle_description: vehicle_plate || null,
         pricing: { rate_per_hour: rate, base, service_fee: fee, total },
-        status: 'pending_payment',
+        status: 'pending',
         created_at: new Date().toISOString()
       }, 201)
 
@@ -1254,8 +1278,8 @@ apiRoutes.get('/bookings', requireUserAuth(), async (c) => {
   if (!db) return c.json({ data: [], total: 0 })
   try {
     const rows = await db.prepare(`
-      SELECT b.id, b.listing_id, b.start_datetime, b.end_datetime,
-             b.status, b.total_amount, b.vehicle_plate, b.created_at,
+      SELECT b.id, b.listing_id, b.start_time, b.end_time,
+             b.status, b.total_charged, b.vehicle_description, b.created_at,
              l.title as listing_title, l.address, l.city
       FROM bookings b
       LEFT JOIN listings l ON b.listing_id = l.id

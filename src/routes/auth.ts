@@ -1,9 +1,16 @@
 import { Hono } from 'hono'
 import { Layout } from '../components/layout'
 
-export const authPages = new Hono()
+type Bindings = {
+  APPLE_CLIENT_ID: string
+  GOOGLE_CLIENT_ID: string
+}
+
+export const authPages = new Hono<{ Bindings: Bindings }>()
 
 authPages.get('/login', (c) => {
+  const appleConfigured  = !!(c.env?.APPLE_CLIENT_ID)
+  const googleConfigured = !!(c.env?.GOOGLE_CLIENT_ID)
   // Surface errors from OAuth redirects
   const oauthError = c.req.query('error') || ''
   const oauthReason = c.req.query('reason') || ''
@@ -47,18 +54,34 @@ authPages.get('/login', (c) => {
           <p class="text-amber-300 text-sm">${oauthMsg}</p>
         </div>` : ''}
         <div class="grid grid-cols-2 gap-3 mb-6">
-          <a href="/api/auth/google?role=driver"
-            class="flex items-center justify-center gap-2 p-3 bg-charcoal-100 border border-white/10 rounded-xl hover:border-white/30 transition-all text-white text-sm font-medium group">
-            <div class="w-5 h-5 bg-white rounded-sm flex items-center justify-center">
-              <i class="fab fa-google text-gray-800 text-xs"></i>
-            </div>
-            Google
-          </a>
-          <a href="/api/auth/apple?role=driver"
-            class="flex items-center justify-center gap-2 p-3 bg-charcoal-100 border border-white/10 rounded-xl hover:border-white/30 transition-all text-white text-sm font-medium">
-            <i class="fab fa-apple text-white text-lg"></i>
-            Apple
-          </a>
+          ${googleConfigured
+            ? `<a href="/api/auth/google?role=driver"
+                class="flex items-center justify-center gap-2 p-3 bg-charcoal-100 border border-white/10 rounded-xl hover:border-white/30 transition-all text-white text-sm font-medium group">
+                <div class="w-5 h-5 bg-white rounded-sm flex items-center justify-center">
+                  <i class="fab fa-google text-gray-800 text-xs"></i>
+                </div>
+                Google
+               </a>`
+            : `<button disabled title="Google login not configured"
+                class="flex items-center justify-center gap-2 p-3 bg-charcoal-100 border border-white/5 rounded-xl text-gray-600 text-sm font-medium cursor-not-allowed opacity-40">
+                <div class="w-5 h-5 bg-gray-700 rounded-sm flex items-center justify-center">
+                  <i class="fab fa-google text-gray-500 text-xs"></i>
+                </div>
+                Google
+               </button>`
+          }
+          ${appleConfigured
+            ? `<a href="/api/auth/apple?role=driver"
+                class="flex items-center justify-center gap-2 p-3 bg-charcoal-100 border border-white/10 rounded-xl hover:border-white/30 transition-all text-white text-sm font-medium">
+                <i class="fab fa-apple text-white text-lg"></i>
+                Apple
+               </a>`
+            : `<button disabled title="Apple login not configured"
+                class="flex items-center justify-center gap-2 p-3 bg-charcoal-100 border border-white/5 rounded-xl text-gray-600 text-sm font-medium cursor-not-allowed opacity-40">
+                <i class="fab fa-apple text-gray-600 text-lg"></i>
+                Apple
+               </button>`
+          }
         </div>
 
         <div class="relative flex items-center gap-3 mb-6">
@@ -186,6 +209,8 @@ authPages.get('/login', (c) => {
 })
 
 authPages.get('/signup', (c) => {
+  const appleConfigured  = !!(c.env?.APPLE_CLIENT_ID)
+  const googleConfigured = !!(c.env?.GOOGLE_CLIENT_ID)
   const oauthError = c.req.query('error') || ''
   const errorMessages: Record<string, string> = {
     oauth_not_configured: 'Social login is not configured yet. Please use email/password.',
@@ -238,18 +263,34 @@ authPages.get('/signup', (c) => {
           <p class="text-amber-300 text-sm">${oauthMsg}</p>
         </div>` : ''}
         <div class="grid grid-cols-2 gap-3 mb-5">
-          <a id="google-signup-btn" href="/api/auth/google?role=driver"
-            class="flex items-center justify-center gap-2 p-3 bg-charcoal-100 border border-white/10 rounded-xl hover:border-white/30 transition-all text-white text-sm font-medium">
-            <div class="w-5 h-5 bg-white rounded-sm flex items-center justify-center">
-              <i class="fab fa-google text-gray-800 text-xs"></i>
-            </div>
-            Google
-          </a>
-          <a id="apple-signup-btn" href="/api/auth/apple?role=driver"
-            class="flex items-center justify-center gap-2 p-3 bg-charcoal-100 border border-white/10 rounded-xl hover:border-white/30 transition-all text-white text-sm font-medium">
-            <i class="fab fa-apple text-white text-lg"></i>
-            Apple
-          </a>
+          ${googleConfigured
+            ? `<a id="google-signup-btn" href="/api/auth/google?role=driver"
+                class="flex items-center justify-center gap-2 p-3 bg-charcoal-100 border border-white/10 rounded-xl hover:border-white/30 transition-all text-white text-sm font-medium">
+                <div class="w-5 h-5 bg-white rounded-sm flex items-center justify-center">
+                  <i class="fab fa-google text-gray-800 text-xs"></i>
+                </div>
+                Google
+               </a>`
+            : `<button disabled title="Google signup not configured"
+                class="flex items-center justify-center gap-2 p-3 bg-charcoal-100 border border-white/5 rounded-xl text-gray-600 text-sm font-medium cursor-not-allowed opacity-40">
+                <div class="w-5 h-5 bg-gray-700 rounded-sm flex items-center justify-center">
+                  <i class="fab fa-google text-gray-500 text-xs"></i>
+                </div>
+                Google
+               </button>`
+          }
+          ${appleConfigured
+            ? `<a id="apple-signup-btn" href="/api/auth/apple?role=driver"
+                class="flex items-center justify-center gap-2 p-3 bg-charcoal-100 border border-white/10 rounded-xl hover:border-white/30 transition-all text-white text-sm font-medium">
+                <i class="fab fa-apple text-white text-lg"></i>
+                Apple
+               </a>`
+            : `<button disabled title="Apple signup not configured"
+                class="flex items-center justify-center gap-2 p-3 bg-charcoal-100 border border-white/5 rounded-xl text-gray-600 text-sm font-medium cursor-not-allowed opacity-40">
+                <i class="fab fa-apple text-gray-600 text-lg"></i>
+                Apple
+               </button>`
+          }
         </div>
 
         <div class="relative flex items-center gap-3 mb-5">
@@ -360,11 +401,11 @@ authPages.get('/signup', (c) => {
         btn.className = 'role-btn p-4 rounded-2xl border border-lime-500 bg-lime-500/10 text-center transition-all';
         btn.querySelector('i').className = btn.querySelector('i').className.replace('text-gray-400', 'text-lime-500');
       }
-      // Update OAuth button URLs to pass the chosen role
+      // Update OAuth button URLs to pass the chosen role (only if buttons are anchor tags)
       const googleBtn = document.getElementById('google-signup-btn');
       const appleBtn  = document.getElementById('apple-signup-btn');
-      if (googleBtn) googleBtn.href = '/api/auth/google?role=' + role;
-      if (appleBtn)  appleBtn.href  = '/api/auth/apple?role='  + role;
+      if (googleBtn && googleBtn.tagName === 'A') googleBtn.href = '/api/auth/google?role=' + role;
+      if (appleBtn  && appleBtn.tagName  === 'A') appleBtn.href  = '/api/auth/apple?role='  + role;
     }
 
     function checkStrength(inp) {

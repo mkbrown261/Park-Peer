@@ -2,7 +2,17 @@ import { Hono } from 'hono'
 import { AdminLayout } from '../components/admin-layout'
 import { adminAuthMiddleware } from './admin-auth'
 
-export const adminPanel = new Hono()
+type Bindings = {
+  DB: D1Database
+  MEDIA: R2Bucket
+  STRIPE_SECRET_KEY: string
+  RESEND_API_KEY: string
+  TWILIO_ACCOUNT_SID: string
+  TWILIO_AUTH_TOKEN: string
+  MAPBOX_TOKEN: string
+}
+
+export const adminPanel = new Hono<{ Bindings: Bindings }>()
 
 // ── All admin routes require authentication ──────────────────────────────────
 adminPanel.use('/*', adminAuthMiddleware)
@@ -30,12 +40,171 @@ const StatCard = (label: string, value: string, icon: string, colorClass: string
     ${note ? `<p class="text-gray-600 text-xs mt-0.5">${note}</p>` : ''}
   </div>`
 
+// ── Format helpers ────────────────────────────────────────────────────────────
+const fmtMoney = (n: number) => '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const fmtDate = (dt: string) => {
+  if (!dt) return '–'
+  try { return new Date(dt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) } catch { return dt }
+}
+const fmtTime = (dt: string) => {
+  if (!dt) return ''
+  try { return new Date(dt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) } catch { return '' }
+}
+
 // ════════════════════════════════════════════════════════════════════════════
-// GET /admin  — Dashboard
+// GET /admin  — Dashboard (with real D1 data)
 // ════════════════════════════════════════════════════════════════════════════
-adminPanel.get('/', (c: any) => {
+adminPanel.get('/', async (c: any) => {
+  const db: D1Database | undefined = c.env?.DB
   const now = new Date()
   const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
+
+  // ── Real KPIs from D1 ─────────────────────────────────────────────────────
+  let totalRevenueMtd  = 0
+  let platformFeeMtd   = 0
+  let totalBookings    = 0
+  let totalUsers       = 0
+  let activeListings   = 0
+  let pendingListings  = 0
+  let openDisputes     = 0
+  let recentUsers:     any[] = []
+  let pendingListRows: any[] = []
+  let recentBookings:  any[] = []
+
+  if (db) {
+    try {
+      // Month-to-date revenue and platform fees from payments
+      const mtdStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10)
+      const rev = await db.prepare(`
+        SELECT COALESCE(SUM(amount),0) as total, COALESCE(SUM(platform_fee),0) as fees
+        FROM payments WHERE status='succeeded' AND created_at >= ?
+      `).bind(mtdStart).first<any>()
+      totalRevenueMtd = Math.round((rev?.total ?? 0) * 100) / 100
+      platformFeeMtd  = Math.round((rev?.fees  ?? 0) * 100) / 100
+
+      // Total bookings count
+      const bk = await db.prepare(`SELECT COUNT(*) as n FROM bookings`).first<any>()
+      totalBookings = bk?.n ?? 0
+
+      // Total users
+      const us = await db.prepare(`SELECT COUNT(*) as n FROM users WHERE status != 'banned'`).first<any>()
+      totalUsers = us?.n ?? 0
+
+      // Active listings
+      const al = await db.prepare(`SELECT COUNT(*) as n FROM listings WHERE status='active'`).first<any>()
+      activeListings = al?.n ?? 0
+
+      // Pending listings
+      const pl = await db.prepare(`SELECT COUNT(*) as n FROM listings WHERE status='pending'`).first<any>()
+      pendingListings = pl?.n ?? 0
+
+      // Open disputes
+      const od = await db.prepare(`SELECT COUNT(*) as n FROM disputes WHERE status IN ('open','in_progress')`).first<any>()
+      openDisputes = od?.n ?? 0
+
+      // Recent 5 users
+      const ru = await db.prepare(`
+        SELECT id, full_name, email, role, status, created_at FROM users
+        ORDER BY created_at DESC LIMIT 5
+      `).all<any>()
+      recentUsers = ru.results || []
+
+      // Up to 5 pending listings
+      const pendR = await db.prepare(`
+        SELECT l.id, l.title, l.type, l.city, l.state, l.created_at,
+               u.full_name as host_name, u.email as host_email
+        FROM listings l LEFT JOIN users u ON l.host_id = u.id
+        WHERE l.status = 'pending'
+        ORDER BY l.created_at DESC LIMIT 5
+      `).all<any>()
+      pendingListRows = pendR.results || []
+
+      // Recent 5 bookings
+      const rb = await db.prepare(`
+        SELECT b.id, b.start_time, b.end_time, b.total_charged, b.status,
+               l.title as listing_title, l.city,
+               u.full_name as driver_name, u.email as driver_email
+        FROM bookings b
+        LEFT JOIN listings l ON b.listing_id = l.id
+        LEFT JOIN users u    ON b.driver_id  = u.id
+        ORDER BY b.created_at DESC LIMIT 5
+      `).all<any>()
+      recentBookings = rb.results || []
+
+    } catch(e: any) {
+      console.error('[admin] dashboard query error:', e.message)
+    }
+  }
+
+  // ── Build table rows HTML ──────────────────────────────────────────────────
+  const recentUsersHTML = recentUsers.length === 0
+    ? `<tr><td colspan="5">${EmptyState('fa-user-plus', 'No users yet', 'New registrations will appear here.')}</td></tr>`
+    : recentUsers.map(u => {
+        const initials = (u.full_name || u.email || '?').substring(0, 2).toUpperCase()
+        const roleBadge = u.role === 'ADMIN'
+          ? 'bg-purple-500/20 text-purple-400'
+          : u.role === 'HOST'
+          ? 'bg-lime-500/20 text-lime-400'
+          : 'bg-indigo-500/20 text-indigo-400'
+        const statusBadge = u.status === 'active'
+          ? 'bg-green-500/20 text-green-400'
+          : u.status === 'suspended'
+          ? 'bg-red-500/20 text-red-400'
+          : 'bg-gray-500/20 text-gray-400'
+        return `
+          <tr class="border-b border-white/5 hover:bg-white/5 transition-colors">
+            <td class="px-4 py-3">
+              <div class="flex items-center gap-2">
+                <div class="w-7 h-7 gradient-bg rounded-full flex items-center justify-center text-xs font-bold text-white flex-shrink-0">${initials}</div>
+                <span class="text-white text-xs font-medium truncate max-w-[120px]">${u.full_name || '—'}</span>
+              </div>
+            </td>
+            <td class="px-4 py-3 text-gray-400 text-xs truncate max-w-[150px]">${u.email}</td>
+            <td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-semibold ${roleBadge}">${u.role || '—'}</span></td>
+            <td class="px-4 py-3 text-gray-500 text-xs">${fmtDate(u.created_at)}</td>
+            <td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-semibold ${statusBadge}">${u.status}</span></td>
+          </tr>`
+      }).join('')
+
+  const pendingListingsHTML = pendingListRows.length === 0
+    ? EmptyState('fa-parking', 'No pending listings', 'New listing submissions will appear here for moderation.')
+    : `<table class="w-full text-sm"><tbody>
+        ${pendingListRows.map(l => `
+          <tr class="border-b border-white/5 hover:bg-white/5 transition-colors">
+            <td class="px-4 py-3">
+              <p class="text-white text-xs font-medium">${l.title}</p>
+              <p class="text-gray-500 text-xs">${l.city || ''}, ${l.state || ''}</p>
+            </td>
+            <td class="px-4 py-3 text-gray-400 text-xs">${l.host_name || l.host_email || '—'}</td>
+            <td class="px-4 py-3 text-gray-500 text-xs">${fmtDate(l.created_at)}</td>
+            <td class="px-4 py-3">
+              <span class="text-xs px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-400 font-semibold">pending</span>
+            </td>
+          </tr>`).join('')}
+        </tbody></table>`
+
+  const recentBookingsHTML = recentBookings.length === 0
+    ? EmptyState('fa-calendar-check', 'No bookings yet', 'All platform bookings will be displayed here in real time.')
+    : `<table class="w-full text-sm"><tbody>
+        ${recentBookings.map(b => {
+          const statusColor = b.status === 'confirmed' ? 'bg-green-500/20 text-green-400'
+            : b.status === 'completed'   ? 'bg-blue-500/20 text-blue-400'
+            : b.status === 'cancelled'   ? 'bg-red-500/20 text-red-400'
+            : b.status === 'active'      ? 'bg-lime-500/20 text-lime-400'
+            : 'bg-gray-500/20 text-gray-400'
+          return `
+            <tr class="border-b border-white/5 hover:bg-white/5 transition-colors">
+              <td class="px-4 py-3 text-gray-400 text-xs">${b.driver_name || b.driver_email || '—'}</td>
+              <td class="px-4 py-3">
+                <p class="text-white text-xs font-medium truncate max-w-[120px]">${b.listing_title || '—'}</p>
+                <p class="text-gray-500 text-xs">${b.city || ''}</p>
+              </td>
+              <td class="px-4 py-3 text-gray-400 text-xs">${fmtDate(b.start_time)}</td>
+              <td class="px-4 py-3 text-lime-400 text-xs font-semibold">${fmtMoney(b.total_charged)}</td>
+              <td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-semibold ${statusColor}">${b.status}</span></td>
+            </tr>`
+        }).join('')}
+        </tbody></table>`
 
   const content = `
   <!-- Page header -->
@@ -44,26 +213,32 @@ adminPanel.get('/', (c: any) => {
       <p class="text-gray-500 text-sm">${dateStr}</p>
     </div>
     <div class="flex items-center gap-2">
-      <div class="flex items-center gap-1.5 bg-green-500/10 border border-green-500/20 rounded-full px-3 py-1.5">
-        <div class="w-2 h-2 bg-green-500 rounded-full pulse-dot"></div>
-        <span class="text-green-400 text-xs font-semibold">All Systems Operational</span>
-      </div>
+      ${db
+        ? `<div class="flex items-center gap-1.5 bg-green-500/10 border border-green-500/20 rounded-full px-3 py-1.5">
+             <div class="w-2 h-2 bg-green-500 rounded-full pulse-dot"></div>
+             <span class="text-green-400 text-xs font-semibold">All Systems Operational</span>
+           </div>`
+        : `<div class="flex items-center gap-1.5 bg-red-500/10 border border-red-500/20 rounded-full px-3 py-1.5">
+             <div class="w-2 h-2 bg-red-500 rounded-full"></div>
+             <span class="text-red-400 text-xs font-semibold">D1 Database Not Bound</span>
+           </div>`
+      }
     </div>
   </div>
 
-  <!-- KPI cards — all zeros until real DB is connected -->
+  <!-- KPI cards — live D1 data -->
   <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-    ${StatCard('Total Revenue (MTD)', '$0.00', 'fa-dollar-sign', 'text-lime-500', 'bg-lime-500/10', 'No transactions yet')}
-    ${StatCard('Total Bookings', '0', 'fa-calendar-check', 'text-indigo-400', 'bg-indigo-500/10', 'No bookings yet')}
-    ${StatCard('Registered Users', '0', 'fa-users', 'text-blue-400', 'bg-blue-500/10', 'No sign-ups yet')}
-    ${StatCard('Active Listings', '0', 'fa-parking', 'text-amber-400', 'bg-amber-500/10', 'No listings yet')}
+    ${StatCard('Total Revenue (MTD)', fmtMoney(totalRevenueMtd), 'fa-dollar-sign', 'text-lime-500', 'bg-lime-500/10')}
+    ${StatCard('Total Bookings', String(totalBookings), 'fa-calendar-check', 'text-indigo-400', 'bg-indigo-500/10')}
+    ${StatCard('Registered Users', String(totalUsers), 'fa-users', 'text-blue-400', 'bg-blue-500/10')}
+    ${StatCard('Active Listings', String(activeListings), 'fa-parking', 'text-amber-400', 'bg-amber-500/10')}
   </div>
 
   <!-- Secondary KPIs -->
   <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-    ${StatCard('Platform Fees Collected', '$0.00', 'fa-piggy-bank', 'text-purple-400', 'bg-purple-500/10')}
-    ${StatCard('Pending Listings', '0', 'fa-hourglass-half', 'text-amber-400', 'bg-amber-500/10', 'Awaiting review')}
-    ${StatCard('Open Disputes', '0', 'fa-gavel', 'text-red-400', 'bg-red-500/10')}
+    ${StatCard('Platform Fees (MTD)', fmtMoney(platformFeeMtd), 'fa-piggy-bank', 'text-purple-400', 'bg-purple-500/10')}
+    ${StatCard('Pending Listings', String(pendingListings), 'fa-hourglass-half', 'text-amber-400', 'bg-amber-500/10', pendingListings > 0 ? 'Awaiting review' : '')}
+    ${StatCard('Open Disputes', String(openDisputes), 'fa-gavel', 'text-red-400', 'bg-red-500/10')}
     ${StatCard('Fraud Alerts', '0', 'fa-triangle-exclamation', 'text-amber-400', 'bg-amber-500/10')}
   </div>
 
@@ -76,7 +251,16 @@ adminPanel.get('/', (c: any) => {
         <h3 class="font-bold text-white text-sm">Recent Registrations</h3>
         <a href="/admin/users" class="text-indigo-400 text-xs font-medium hover:text-indigo-300 transition-colors">View All →</a>
       </div>
-      ${EmptyState('fa-user-plus', 'No users yet', 'New registrations will appear here as people sign up.')}
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="bg-charcoal-200/40">
+            <tr>
+              ${['User','Email','Role','Joined','Status'].map(h => `<th class="px-4 py-2.5 text-left text-xs text-gray-500 uppercase tracking-wider font-semibold">${h}</th>`).join('')}
+            </tr>
+          </thead>
+          <tbody>${recentUsersHTML}</tbody>
+        </table>
+      </div>
     </div>
 
     <!-- Pending Listings -->
@@ -85,7 +269,7 @@ adminPanel.get('/', (c: any) => {
         <h3 class="font-bold text-white text-sm">Listings Pending Review</h3>
         <a href="/admin/listings" class="text-indigo-400 text-xs font-medium hover:text-indigo-300 transition-colors">View All →</a>
       </div>
-      ${EmptyState('fa-parking', 'No pending listings', 'New listing submissions will appear here for moderation.')}
+      ${pendingListingsHTML}
     </div>
   </div>
 
@@ -95,7 +279,7 @@ adminPanel.get('/', (c: any) => {
       <h3 class="font-bold text-white text-sm">Recent Bookings</h3>
       <a href="/admin/bookings" class="text-indigo-400 text-xs font-medium hover:text-indigo-300 transition-colors">View All →</a>
     </div>
-    ${EmptyState('fa-calendar-check', 'No bookings yet', 'All platform bookings will be displayed here in real time.')}
+    ${recentBookingsHTML}
   </div>
 
   <!-- Bottom row: Disputes + System Health -->
@@ -107,7 +291,7 @@ adminPanel.get('/', (c: any) => {
         <h3 class="font-bold text-white text-sm">Active Disputes</h3>
         <a href="/admin/disputes" class="text-indigo-400 text-xs font-medium hover:text-indigo-300 transition-colors">View All →</a>
       </div>
-      ${EmptyState('fa-gavel', 'No open disputes', 'Dispute requests from users will be listed here.')}
+      ${EmptyState('fa-gavel', openDisputes === 0 ? 'No open disputes' : `${openDisputes} open dispute${openDisputes > 1 ? 's' : ''}`, 'Dispute requests from users will be listed here.')}
     </div>
 
     <!-- System Health -->
@@ -119,11 +303,11 @@ adminPanel.get('/', (c: any) => {
           const services = [
             { name: 'Cloudflare Workers (API)',    ok: true },
             { name: 'Cloudflare Pages (Frontend)', ok: true },
-            { name: 'D1 Database',                 ok: !!(env.DB),                                                              note: env.DB ? '' : 'Not bound' },
-            { name: 'R2 Media Storage',            ok: !!(env.MEDIA),                                                           note: env.MEDIA ? '' : 'Not bound' },
-            { name: 'Stripe Payments',             ok: !!(env.STRIPE_SECRET_KEY),                                               note: env.STRIPE_SECRET_KEY ? '' : 'Key not configured' },
-            { name: 'Resend Email',              ok: !!(env.RESEND_API_KEY && env.RESEND_API_KEY !== 'PLACEHOLDER_RESEND_KEY'), note: (!env.RESEND_API_KEY || env.RESEND_API_KEY === 'PLACEHOLDER_RESEND_KEY') ? 'Key not configured' : '' },
-            { name: 'Twilio SMS',                  ok: !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN),                     note: !(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN) ? 'Not configured' : '' },
+            { name: 'D1 Database',                 ok: !!(env.DB),                                                               note: env.DB ? '' : 'Not bound' },
+            { name: 'R2 Media Storage',            ok: !!(env.MEDIA),                                                            note: env.MEDIA ? '' : 'Not bound' },
+            { name: 'Stripe Payments',             ok: !!(env.STRIPE_SECRET_KEY),                                                note: env.STRIPE_SECRET_KEY ? '' : 'Key not configured' },
+            { name: 'Resend Email',                ok: !!(env.RESEND_API_KEY && env.RESEND_API_KEY !== 'PLACEHOLDER_RESEND_KEY'), note: (!env.RESEND_API_KEY || env.RESEND_API_KEY === 'PLACEHOLDER_RESEND_KEY') ? 'Key not configured' : '' },
+            { name: 'Twilio SMS',                  ok: !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN),                      note: !(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN) ? 'Not configured' : '' },
           ]
           return services.map(s => `
           <div class="flex items-center gap-3 p-2.5 bg-charcoal-200 rounded-xl">
@@ -140,12 +324,68 @@ adminPanel.get('/', (c: any) => {
 })
 
 // ════════════════════════════════════════════════════════════════════════════
-// GET /admin/users
+// GET /admin/users — live D1 data
 // ════════════════════════════════════════════════════════════════════════════
-adminPanel.get('/users', (c) => {
+adminPanel.get('/users', async (c: any) => {
+  const db: D1Database | undefined = c.env?.DB
+  let users: any[] = []
+  let total = 0
+
+  if (db) {
+    try {
+      const rows = await db.prepare(`
+        SELECT id, full_name, email, role, status, created_at, id_verified,
+               avg_rating
+        FROM users
+        ORDER BY created_at DESC
+        LIMIT 100
+      `).all<any>()
+      users = rows.results || []
+      total = users.length
+    } catch(e: any) { console.error('[admin/users]', e.message) }
+  }
+
+  const tableRows = users.length === 0
+    ? `<tr><td colspan="8">${EmptyState('fa-users', 'No users registered yet', 'Users will appear here as they sign up on the platform.')}</td></tr>`
+    : users.map(u => {
+        const initials = (u.full_name || u.email || '?').substring(0, 2).toUpperCase()
+        const roleBadge = u.role === 'ADMIN'
+          ? 'bg-purple-500/20 text-purple-400'
+          : u.role === 'HOST'
+          ? 'bg-lime-500/20 text-lime-400'
+          : 'bg-indigo-500/20 text-indigo-400'
+        const statusBadge = u.status === 'active'
+          ? 'bg-green-500/20 text-green-400'
+          : u.status === 'suspended'
+          ? 'bg-red-500/20 text-red-400'
+          : 'bg-gray-500/20 text-gray-400'
+        return `
+          <tr class="border-b border-white/5 hover:bg-white/5 transition-colors">
+            <td class="px-4 py-3">
+              <div class="flex items-center gap-2.5">
+                <div class="w-8 h-8 gradient-bg rounded-full flex items-center justify-center text-xs font-bold text-white flex-shrink-0">${initials}</div>
+                <span class="text-white text-xs font-medium">${u.full_name || '—'}</span>
+              </div>
+            </td>
+            <td class="px-4 py-3 text-gray-400 text-xs">${u.email}</td>
+            <td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-semibold ${roleBadge}">${u.role || '—'}</span></td>
+            <td class="px-4 py-3 text-gray-500 text-xs">${fmtDate(u.created_at)}</td>
+            <td class="px-4 py-3 text-center">
+              ${u.id_verified
+                ? '<i class="fas fa-check-circle text-green-400 text-sm"></i>'
+                : '<i class="fas fa-times-circle text-gray-600 text-sm"></i>'}
+            </td>
+            <td class="px-4 py-3 text-gray-400 text-xs">${u.avg_rating ? Number(u.avg_rating).toFixed(1) : '–'}</td>
+            <td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-semibold ${statusBadge}">${u.status}</span></td>
+            <td class="px-4 py-3">
+              <a href="/admin/users/${u.id}" class="text-indigo-400 hover:text-indigo-300 text-xs font-medium transition-colors">View</a>
+            </td>
+          </tr>`
+      }).join('')
+
   const content = `
   <div class="flex items-center justify-between mb-6">
-    <p class="text-gray-400 text-sm">Manage all platform users</p>
+    <p class="text-gray-400 text-sm">Manage all platform users (${total} total)</p>
     <button class="btn-primary px-4 py-2 rounded-xl text-xs text-white font-semibold flex items-center gap-2">
       <i class="fas fa-download"></i> Export CSV
     </button>
@@ -155,15 +395,16 @@ adminPanel.get('/users', (c) => {
   <div class="flex flex-wrap gap-3 mb-5">
     <div class="relative flex-1 min-w-[200px]">
       <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-xs pointer-events-none"></i>
-      <input type="text" placeholder="Search by name, email, phone..." class="w-full bg-charcoal-100 border border-white/10 rounded-xl pl-9 pr-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500"/>
+      <input type="text" id="user-search" placeholder="Search by name or email..." onkeyup="filterUsers(this.value)"
+        class="w-full bg-charcoal-100 border border-white/10 rounded-xl pl-9 pr-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500"/>
     </div>
-    <select class="bg-charcoal-100 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-gray-400 focus:outline-none focus:border-indigo-500">
+    <select id="role-filter" onchange="filterUsers()" class="bg-charcoal-100 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-gray-400 focus:outline-none focus:border-indigo-500">
       <option value="">All Roles</option>
       <option>DRIVER</option>
       <option>HOST</option>
       <option>ADMIN</option>
     </select>
-    <select class="bg-charcoal-100 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-gray-400 focus:outline-none focus:border-indigo-500">
+    <select id="status-filter" onchange="filterUsers()" class="bg-charcoal-100 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-gray-400 focus:outline-none focus:border-indigo-500">
       <option value="">All Statuses</option>
       <option>active</option>
       <option>suspended</option>
@@ -182,47 +423,103 @@ adminPanel.get('/users', (c) => {
             `).join('')}
           </tr>
         </thead>
-        <tbody id="users-table">
-          <tr><td colspan="8">
-            ${EmptyState('fa-users', 'No users registered yet', 'Users will appear here as they sign up on the platform.')}
-          </td></tr>
-        </tbody>
+        <tbody id="users-table">${tableRows}</tbody>
       </table>
     </div>
-    <!-- Pagination placeholder -->
     <div class="flex items-center justify-between px-5 py-3 border-t border-white/5">
-      <p class="text-gray-600 text-xs">Showing 0 of 0 users</p>
+      <p class="text-gray-600 text-xs">Showing ${total} user${total !== 1 ? 's' : ''}</p>
       <div class="flex gap-2">
         <button disabled class="px-3 py-1.5 bg-charcoal-200 text-gray-600 rounded-lg text-xs">← Prev</button>
         <button disabled class="px-3 py-1.5 bg-charcoal-200 text-gray-600 rounded-lg text-xs">Next →</button>
       </div>
     </div>
   </div>
+
+  <script>
+    function filterUsers(val) {
+      const q = (document.getElementById('user-search')?.value || '').toLowerCase()
+      const role = document.getElementById('role-filter')?.value || ''
+      const status = document.getElementById('status-filter')?.value || ''
+      const rows = document.querySelectorAll('#users-table tr[class]')
+      rows.forEach(row => {
+        const text = row.textContent?.toLowerCase() || ''
+        const show = (!q || text.includes(q)) && (!role || text.includes(role.toLowerCase())) && (!status || text.includes(status))
+        row.style.display = show ? '' : 'none'
+      })
+    }
+  </script>
   `
   return c.html(AdminLayout('Users', content))
 })
 
 // ════════════════════════════════════════════════════════════════════════════
-// GET /admin/listings
+// GET /admin/listings — live D1 data
 // ════════════════════════════════════════════════════════════════════════════
-adminPanel.get('/listings', (c) => {
+adminPanel.get('/listings', async (c: any) => {
+  const db: D1Database | undefined = c.env?.DB
+  let listings: any[] = []
+  let counts = { all: 0, pending: 0, active: 0, suspended: 0 }
+
+  if (db) {
+    try {
+      const rows = await db.prepare(`
+        SELECT l.id, l.title, l.type, l.city, l.state, l.rate_hourly, l.status, l.created_at,
+               l.avg_rating, l.review_count, l.total_bookings,
+               u.full_name as host_name, u.email as host_email
+        FROM listings l LEFT JOIN users u ON l.host_id = u.id
+        ORDER BY l.created_at DESC LIMIT 100
+      `).all<any>()
+      listings = rows.results || []
+
+      counts.all = listings.length
+      counts.pending   = listings.filter(l => l.status === 'pending').length
+      counts.active    = listings.filter(l => l.status === 'active').length
+      counts.suspended = listings.filter(l => l.status === 'suspended').length
+    } catch(e: any) { console.error('[admin/listings]', e.message) }
+  }
+
+  const tableRows = listings.length === 0
+    ? `<tr><td colspan="7">${EmptyState('fa-parking', 'No listings submitted yet', 'New listing submissions will appear here for your review and approval.')}</td></tr>`
+    : listings.map(l => {
+        const statusBadge = l.status === 'active'
+          ? 'bg-green-500/20 text-green-400'
+          : l.status === 'pending'
+          ? 'bg-amber-500/20 text-amber-400'
+          : l.status === 'suspended'
+          ? 'bg-red-500/20 text-red-400'
+          : 'bg-gray-500/20 text-gray-400'
+        return `
+          <tr class="listing-row border-b border-white/5 hover:bg-white/5 transition-colors" data-status="${l.status}">
+            <td class="px-4 py-3">
+              <p class="text-white text-xs font-medium">${l.title}</p>
+              <p class="text-gray-500 text-xs">${l.city || ''}${l.state ? ', ' + l.state : ''}</p>
+            </td>
+            <td class="px-4 py-3 text-gray-400 text-xs">${l.host_name || l.host_email || '—'}</td>
+            <td class="px-4 py-3 text-gray-400 text-xs capitalize">${l.type || '—'}</td>
+            <td class="px-4 py-3 text-gray-400 text-xs">${l.rate_hourly ? '$' + Number(l.rate_hourly).toFixed(2) + '/hr' : '—'}</td>
+            <td class="px-4 py-3 text-gray-500 text-xs">${fmtDate(l.created_at)}</td>
+            <td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-semibold ${statusBadge}">${l.status}</span></td>
+            <td class="px-4 py-3">
+              <a href="/listing/${l.id}" target="_blank" class="text-indigo-400 hover:text-indigo-300 text-xs font-medium transition-colors mr-2">View</a>
+            </td>
+          </tr>`
+      }).join('')
+
   const content = `
   <div class="flex items-center justify-between mb-6">
     <p class="text-gray-400 text-sm">Review and moderate parking space submissions</p>
-    <button class="btn-primary px-4 py-2 rounded-xl text-xs text-white font-semibold flex items-center gap-2">
-      <i class="fas fa-download"></i> Export CSV
-    </button>
   </div>
 
   <!-- Tabs -->
   <div class="flex gap-2 mb-5">
     ${[
-      { label: 'All', count: 0 },
-      { label: 'Pending Review', count: 0 },
-      { label: 'Active', count: 0 },
-      { label: 'Suspended', count: 0 },
+      { label: 'All',            val: '',          count: counts.all },
+      { label: 'Pending Review', val: 'pending',   count: counts.pending },
+      { label: 'Active',         val: 'active',    count: counts.active },
+      { label: 'Suspended',      val: 'suspended', count: counts.suspended },
     ].map((tab, i) => `
-      <button class="px-4 py-2 rounded-xl text-xs font-semibold transition-all ${i === 0 ? 'bg-indigo-500 text-white' : 'bg-charcoal-200 text-gray-400 hover:text-white border border-white/5'}">
+      <button onclick="filterListings('${tab.val}')" data-filter="${tab.val}"
+        class="listing-tab px-4 py-2 rounded-xl text-xs font-semibold transition-all ${i === 0 ? 'bg-indigo-500 text-white' : 'bg-charcoal-200 text-gray-400 hover:text-white border border-white/5'}">
         ${tab.label} <span class="ml-1 opacity-60">(${tab.count})</span>
       </button>
     `).join('')}
@@ -239,52 +536,88 @@ adminPanel.get('/listings', (c) => {
             `).join('')}
           </tr>
         </thead>
-        <tbody>
-          <tr><td colspan="7">
-            ${EmptyState('fa-parking', 'No listings submitted yet', 'New listing submissions will appear here for your review and approval.')}
-          </td></tr>
-        </tbody>
+        <tbody id="listings-table">${tableRows}</tbody>
       </table>
     </div>
     <div class="flex items-center justify-between px-5 py-3 border-t border-white/5">
-      <p class="text-gray-600 text-xs">Showing 0 of 0 listings</p>
-      <div class="flex gap-2">
-        <button disabled class="px-3 py-1.5 bg-charcoal-200 text-gray-600 rounded-lg text-xs">← Prev</button>
-        <button disabled class="px-3 py-1.5 bg-charcoal-200 text-gray-600 rounded-lg text-xs">Next →</button>
-      </div>
+      <p id="listing-count" class="text-gray-600 text-xs">Showing ${counts.all} listing${counts.all !== 1 ? 's' : ''}</p>
     </div>
   </div>
+
+  <script>
+    function filterListings(status) {
+      document.querySelectorAll('.listing-tab').forEach(btn => {
+        const active = btn.getAttribute('data-filter') === status
+        btn.className = 'listing-tab px-4 py-2 rounded-xl text-xs font-semibold transition-all ' +
+          (active ? 'bg-indigo-500 text-white' : 'bg-charcoal-200 text-gray-400 hover:text-white border border-white/5')
+      })
+      const rows = document.querySelectorAll('.listing-row')
+      let shown = 0
+      rows.forEach(row => {
+        const show = !status || row.getAttribute('data-status') === status
+        row.style.display = show ? '' : 'none'
+        if (show) shown++
+      })
+      document.getElementById('listing-count').textContent = 'Showing ' + shown + ' listing' + (shown !== 1 ? 's' : '')
+    }
+  </script>
   `
   return c.html(AdminLayout('Listings', content))
 })
 
 // ════════════════════════════════════════════════════════════════════════════
-// GET /admin/bookings
+// GET /admin/bookings — live D1 data
 // ════════════════════════════════════════════════════════════════════════════
-adminPanel.get('/bookings', (c) => {
+adminPanel.get('/bookings', async (c: any) => {
+  const db: D1Database | undefined = c.env?.DB
+  let bookings: any[] = []
+  let total = 0
+
+  if (db) {
+    try {
+      const rows = await db.prepare(`
+        SELECT b.id, b.start_time, b.end_time, b.total_charged, b.platform_fee, b.status, b.created_at,
+               l.title as listing_title, l.city,
+               u.full_name as driver_name, u.email as driver_email
+        FROM bookings b
+        LEFT JOIN listings l ON b.listing_id = l.id
+        LEFT JOIN users u    ON b.driver_id  = u.id
+        ORDER BY b.created_at DESC LIMIT 100
+      `).all<any>()
+      bookings = rows.results || []
+      total = bookings.length
+    } catch(e: any) { console.error('[admin/bookings]', e.message) }
+  }
+
+  const tableRows = bookings.length === 0
+    ? `<tr><td colspan="9">${EmptyState('fa-calendar-check', 'No bookings yet', 'All platform bookings will be shown here with full detail.')}</td></tr>`
+    : bookings.map(b => {
+        const statusColor = b.status === 'confirmed' ? 'bg-green-500/20 text-green-400'
+          : b.status === 'completed'   ? 'bg-blue-500/20 text-blue-400'
+          : b.status === 'cancelled'   ? 'bg-red-500/20 text-red-400'
+          : b.status === 'active'      ? 'bg-lime-500/20 text-lime-400'
+          : b.status === 'pending'     ? 'bg-amber-500/20 text-amber-400'
+          : 'bg-gray-500/20 text-gray-400'
+        return `
+          <tr class="border-b border-white/5 hover:bg-white/5 transition-colors">
+            <td class="px-4 py-3 text-gray-400 text-xs font-mono">${b.id}</td>
+            <td class="px-4 py-3 text-gray-400 text-xs">${b.driver_name || b.driver_email || '—'}</td>
+            <td class="px-4 py-3">
+              <p class="text-white text-xs font-medium">${b.listing_title || '—'}</p>
+              <p class="text-gray-500 text-xs">${b.city || ''}</p>
+            </td>
+            <td class="px-4 py-3 text-gray-400 text-xs">${fmtDate(b.start_time)} ${fmtTime(b.start_time)}</td>
+            <td class="px-4 py-3 text-gray-400 text-xs">${fmtDate(b.end_time)} ${fmtTime(b.end_time)}</td>
+            <td class="px-4 py-3 text-lime-400 text-xs font-semibold">${fmtMoney(b.total_charged)}</td>
+            <td class="px-4 py-3 text-gray-500 text-xs">${b.platform_fee ? fmtMoney(b.platform_fee) : '—'}</td>
+            <td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-semibold ${statusColor}">${b.status}</span></td>
+            <td class="px-4 py-3 text-gray-500 text-xs">${fmtDate(b.created_at)}</td>
+          </tr>`
+      }).join('')
+
   const content = `
   <div class="flex items-center justify-between mb-6">
-    <p class="text-gray-400 text-sm">Full log of all platform bookings</p>
-    <button class="btn-primary px-4 py-2 rounded-xl text-xs text-white font-semibold flex items-center gap-2">
-      <i class="fas fa-download"></i> Export CSV
-    </button>
-  </div>
-
-  <!-- Filter bar -->
-  <div class="flex flex-wrap gap-3 mb-5">
-    <div class="relative flex-1 min-w-[200px]">
-      <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-xs pointer-events-none"></i>
-      <input type="text" placeholder="Search by booking ID, driver, space..." class="w-full bg-charcoal-100 border border-white/10 rounded-xl pl-9 pr-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500"/>
-    </div>
-    <input type="date" class="bg-charcoal-100 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-gray-400 focus:outline-none focus:border-indigo-500"/>
-    <select class="bg-charcoal-100 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-gray-400 focus:outline-none focus:border-indigo-500">
-      <option value="">All Statuses</option>
-      <option>active</option>
-      <option>confirmed</option>
-      <option>completed</option>
-      <option>cancelled</option>
-      <option>refunded</option>
-    </select>
+    <p class="text-gray-400 text-sm">Full log of all platform bookings (${total} total)</p>
   </div>
 
   <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
@@ -292,24 +625,16 @@ adminPanel.get('/bookings', (c) => {
       <table class="w-full text-sm">
         <thead class="bg-charcoal-200/60">
           <tr>
-            ${['Booking ID', 'Driver', 'Space', 'Start', 'End', 'Amount', 'Fee', 'Status', 'Actions'].map(h => `
+            ${['Booking ID', 'Driver', 'Space', 'Start', 'End', 'Amount', 'Fee', 'Status', 'Date'].map(h => `
               <th class="px-4 py-3 text-left text-xs text-gray-500 uppercase tracking-wider font-semibold whitespace-nowrap">${h}</th>
             `).join('')}
           </tr>
         </thead>
-        <tbody>
-          <tr><td colspan="9">
-            ${EmptyState('fa-calendar-check', 'No bookings yet', 'All platform bookings will be shown here with full detail.')}
-          </td></tr>
-        </tbody>
+        <tbody>${tableRows}</tbody>
       </table>
     </div>
     <div class="flex items-center justify-between px-5 py-3 border-t border-white/5">
-      <p class="text-gray-600 text-xs">Showing 0 of 0 bookings</p>
-      <div class="flex gap-2">
-        <button disabled class="px-3 py-1.5 bg-charcoal-200 text-gray-600 rounded-lg text-xs">← Prev</button>
-        <button disabled class="px-3 py-1.5 bg-charcoal-200 text-gray-600 rounded-lg text-xs">Next →</button>
-      </div>
+      <p class="text-gray-600 text-xs">Showing ${total} booking${total !== 1 ? 's' : ''}</p>
     </div>
   </div>
   `
@@ -319,30 +644,68 @@ adminPanel.get('/bookings', (c) => {
 // ════════════════════════════════════════════════════════════════════════════
 // GET /admin/payments
 // ════════════════════════════════════════════════════════════════════════════
-adminPanel.get('/payments', (c) => {
+adminPanel.get('/payments', async (c: any) => {
+  const db: D1Database | undefined = c.env?.DB
+  let payments: any[] = []
+  let totalVol = 0, totalFees = 0, totalPayouts = 0, totalRefunds = 0
+
+  if (db) {
+    try {
+      const kpis = await db.prepare(`
+        SELECT
+          COALESCE(SUM(CASE WHEN status='succeeded' THEN amount ELSE 0 END), 0) as total_vol,
+          COALESCE(SUM(CASE WHEN status='succeeded' THEN platform_fee ELSE 0 END), 0) as total_fees,
+          COALESCE(SUM(CASE WHEN status='succeeded' THEN host_payout ELSE 0 END), 0) as total_payouts,
+          COALESCE(SUM(CASE WHEN status='refunded'  THEN amount ELSE 0 END), 0) as total_refunds
+        FROM payments
+      `).first<any>()
+      totalVol     = Math.round((kpis?.total_vol     ?? 0) * 100) / 100
+      totalFees    = Math.round((kpis?.total_fees    ?? 0) * 100) / 100
+      totalPayouts = Math.round((kpis?.total_payouts ?? 0) * 100) / 100
+      totalRefunds = Math.round((kpis?.total_refunds ?? 0) * 100) / 100
+
+      const rows = await db.prepare(`
+        SELECT p.id, p.booking_id, p.amount, p.platform_fee, p.host_payout,
+               p.status, p.type, p.created_at,
+               u.email as driver_email
+        FROM payments p LEFT JOIN users u ON p.driver_id = u.id
+        ORDER BY p.created_at DESC LIMIT 100
+      `).all<any>()
+      payments = rows.results || []
+    } catch(e: any) { console.error('[admin/payments]', e.message) }
+  }
+
+  const tableRows = payments.length === 0
+    ? `<tr><td colspan="8">${EmptyState('fa-credit-card', 'No transactions yet', 'Payment records will appear here once Stripe is configured and bookings are made.')}</td></tr>`
+    : payments.map(p => {
+        const sc = p.status === 'succeeded' ? 'bg-green-500/20 text-green-400'
+          : p.status === 'refunded' ? 'bg-blue-500/20 text-blue-400'
+          : p.status === 'failed'   ? 'bg-red-500/20 text-red-400'
+          : 'bg-gray-500/20 text-gray-400'
+        return `
+          <tr class="border-b border-white/5 hover:bg-white/5 transition-colors">
+            <td class="px-4 py-3 text-gray-400 text-xs font-mono">${p.id}</td>
+            <td class="px-4 py-3 text-gray-400 text-xs font-mono">${p.booking_id || '—'}</td>
+            <td class="px-4 py-3 text-gray-400 text-xs">${p.driver_email || '—'}</td>
+            <td class="px-4 py-3 text-lime-400 text-xs font-semibold">${fmtMoney(p.amount)}</td>
+            <td class="px-4 py-3 text-gray-400 text-xs">${p.platform_fee ? fmtMoney(p.platform_fee) : '—'}</td>
+            <td class="px-4 py-3 text-gray-400 text-xs">${p.host_payout ? fmtMoney(p.host_payout) : '—'}</td>
+            <td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-semibold ${sc}">${p.status}</span></td>
+            <td class="px-4 py-3 text-gray-500 text-xs">${fmtDate(p.created_at)}</td>
+          </tr>`
+      }).join('')
+
   const content = `
   <div class="flex items-center justify-between mb-6">
     <p class="text-gray-400 text-sm">Payment transactions and payout management</p>
-    <button class="btn-primary px-4 py-2 rounded-xl text-xs text-white font-semibold flex items-center gap-2">
-      <i class="fas fa-download"></i> Export CSV
-    </button>
   </div>
 
   <!-- Payment KPIs -->
   <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-    ${StatCard('Total Volume', '$0.00', 'fa-dollar-sign', 'text-lime-500', 'bg-lime-500/10', 'All time')}
-    ${StatCard('Platform Revenue', '$0.00', 'fa-piggy-bank', 'text-indigo-400', 'bg-indigo-500/10', '15% of transactions')}
-    ${StatCard('Pending Payouts', '$0.00', 'fa-clock', 'text-amber-400', 'bg-amber-500/10', 'To hosts')}
-    ${StatCard('Total Refunds', '$0.00', 'fa-rotate-left', 'text-red-400', 'bg-red-500/10', 'All time')}
-  </div>
-
-  <!-- Stripe status notice -->
-  <div class="flex items-start gap-3 p-4 bg-amber-500/10 border border-amber-500/20 rounded-2xl mb-5">
-    <i class="fas fa-triangle-exclamation text-amber-400 flex-shrink-0 mt-0.5"></i>
-    <div>
-      <p class="text-amber-300 font-semibold text-sm">Stripe not configured</p>
-      <p class="text-amber-400/70 text-xs mt-0.5">Payment processing is inactive. Add your <code class="bg-black/20 px-1 rounded">STRIPE_SECRET_KEY</code> as a Cloudflare secret to enable transactions.</p>
-    </div>
+    ${StatCard('Total Volume', fmtMoney(totalVol), 'fa-dollar-sign', 'text-lime-500', 'bg-lime-500/10', 'All time')}
+    ${StatCard('Platform Revenue', fmtMoney(totalFees), 'fa-piggy-bank', 'text-indigo-400', 'bg-indigo-500/10', '15% of transactions')}
+    ${StatCard('Total Host Payouts', fmtMoney(totalPayouts), 'fa-clock', 'text-amber-400', 'bg-amber-500/10')}
+    ${StatCard('Total Refunds', fmtMoney(totalRefunds), 'fa-rotate-left', 'text-red-400', 'bg-red-500/10', 'All time')}
   </div>
 
   <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
@@ -355,11 +718,7 @@ adminPanel.get('/payments', (c) => {
             `).join('')}
           </tr>
         </thead>
-        <tbody>
-          <tr><td colspan="8">
-            ${EmptyState('fa-credit-card', 'No transactions yet', 'Payment records will appear here once Stripe is configured and bookings are made.')}
-          </td></tr>
-        </tbody>
+        <tbody>${tableRows}</tbody>
       </table>
     </div>
   </div>
@@ -568,7 +927,7 @@ adminPanel.get('/settings', (c: any) => {
               note: env.STRIPE_SECRET_KEY ? '' : 'STRIPE_SECRET_KEY not set'
             },
             {
-              name: 'SendGrid',
+              name: 'Resend Email',
               desc: 'Email notifications',
               icon: 'fa-envelope',
               connected: !!(env.RESEND_API_KEY && env.RESEND_API_KEY !== 'PLACEHOLDER_RESEND_KEY'),

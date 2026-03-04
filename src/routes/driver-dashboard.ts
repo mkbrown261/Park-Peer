@@ -1,12 +1,18 @@
 import { Hono } from 'hono'
 import { Layout } from '../components/layout'
+import { requireUserAuth } from '../middleware/security'
 
-type Bindings = { DB: D1Database }
+type Bindings = { DB: D1Database; USER_TOKEN_SECRET: string }
 
 export const driverDashboard = new Hono<{ Bindings: Bindings }>()
 
+// ── Protect ALL /dashboard/* routes — redirect unauthenticated users to login ──────
+driverDashboard.use('/*', requireUserAuth({ redirectOnFail: true }))
+
 driverDashboard.get('/', async (c) => {
   const db = c.env?.DB
+  const session = c.get('user') as any
+  const userId = session?.userId
 
   // ── Real D1 queries ────────────────────────────────────────────────────────
   let totalBookings = 0
@@ -16,68 +22,69 @@ driverDashboard.get('/', async (c) => {
   let historyList:  any[] = []
   let activeBooking: any  = null
 
-  if (db) {
+  if (db && userId) {
     try {
-      // Note: driver_id scoping requires auth middleware to pass user context.
-      // Until session-based auth is wired to SSR routes, we show aggregate counts
-      // across all bookings as a platform-level summary (no PII exposed).
+      // Stats scoped to this driver
       const stats = await db.prepare(`
         SELECT
           COUNT(*) as total_bookings,
           COALESCE(SUM(CASE WHEN status='completed' THEN total_charged ELSE 0 END), 0) as total_spent
         FROM bookings
-        WHERE status IN ('pending','confirmed','active','completed','cancelled')
+        WHERE driver_id = ?
+          AND status IN ('pending','confirmed','active','completed','cancelled')
         LIMIT 1
-      `).first<any>()
+      `).bind(userId).first<any>()
       totalBookings = stats?.total_bookings ?? 0
       totalSpent    = Math.round((stats?.total_spent ?? 0) * 100) / 100
 
-      // Active booking
+      // Active booking for this driver
       const active = await db.prepare(`
-        SELECT b.id, b.start_datetime, b.end_datetime, b.total_charged, b.status,
+        SELECT b.id, b.start_time, b.end_time, b.total_charged, b.status,
                l.title, l.address
         FROM bookings b
         JOIN listings l ON b.listing_id = l.id
-        WHERE b.status = 'active'
-        ORDER BY b.start_datetime ASC
+        WHERE b.driver_id = ? AND b.status = 'active'
+        ORDER BY b.start_time ASC
         LIMIT 1
-      `).first<any>()
+      `).bind(userId).first<any>()
       activeBooking = active || null
 
-      // Upcoming confirmed bookings
+      // Upcoming confirmed bookings for this driver
       const upcoming = await db.prepare(`
-        SELECT b.id, b.start_datetime, b.end_datetime, b.total_charged, b.status,
+        SELECT b.id, b.start_time, b.end_time, b.total_charged, b.status,
                l.title, l.address, l.type
         FROM bookings b
         JOIN listings l ON b.listing_id = l.id
-        WHERE b.status IN ('confirmed','pending')
-          AND b.start_datetime > datetime('now')
-        ORDER BY b.start_datetime ASC
+        WHERE b.driver_id = ?
+          AND b.status IN ('confirmed','pending')
+          AND b.start_time > datetime('now')
+        ORDER BY b.start_time ASC
         LIMIT 5
-      `).all<any>()
+      `).bind(userId).all<any>()
       upcomingList = upcoming.results || []
 
-      // Booking history (completed/cancelled)
+      // Booking history for this driver
       const history = await db.prepare(`
-        SELECT b.id, b.start_datetime, b.end_datetime, b.total_charged, b.status,
+        SELECT b.id, b.start_time, b.end_time, b.total_charged, b.status,
                l.title, l.address,
                r.rating
         FROM bookings b
         JOIN listings l ON b.listing_id = l.id
         LEFT JOIN reviews r ON r.booking_id = b.id
-        WHERE b.status IN ('completed','cancelled')
-        ORDER BY b.end_datetime DESC
+        WHERE b.driver_id = ?
+          AND b.status IN ('completed','cancelled')
+        ORDER BY b.end_time DESC
         LIMIT 8
-      `).all<any>()
+      `).bind(userId).all<any>()
       historyList = history.results || []
 
-      // Avg rating given as driver
+      // Avg rating given by this driver
       const ratingRow = await db.prepare(`
         SELECT AVG(r.rating) as avg_r
         FROM reviews r
         JOIN bookings b ON r.booking_id = b.id
-        WHERE b.status = 'completed'
-      `).first<any>()
+        WHERE b.driver_id = ? AND b.status = 'completed'
+      `).bind(userId).first<any>()
       avgRating = ratingRow?.avg_r ? Math.round(ratingRow.avg_r * 10) / 10 : 0
 
     } catch(e: any) { console.error('[driver-dashboard]', e.message) }
@@ -123,11 +130,11 @@ driverDashboard.get('/', async (c) => {
         <div class="grid grid-cols-3 gap-3 mb-5">
           <div class="bg-white/10 rounded-xl p-3 text-center">
             <p class="text-white/60 text-xs">Arrived</p>
-            <p class="font-bold text-white">${fmtTime(activeBooking.start_datetime)}</p>
+            <p class="font-bold text-white">${fmtTime(activeBooking.start_time)}</p>
           </div>
           <div class="bg-white/10 rounded-xl p-3 text-center">
             <p class="text-white/60 text-xs">Depart By</p>
-            <p class="font-bold text-white">${fmtTime(activeBooking.end_datetime)}</p>
+            <p class="font-bold text-white">${fmtTime(activeBooking.end_time)}</p>
           </div>
           <div class="bg-white/10 rounded-xl p-3 text-center">
             <p class="text-white/60 text-xs">Time Left</p>
@@ -164,7 +171,7 @@ driverDashboard.get('/', async (c) => {
           </div>
           <div class="flex-1 min-w-0">
             <p class="font-semibold text-white text-sm truncate">${b.title}</p>
-            <p class="text-gray-500 text-xs mt-0.5">${fmtDate(b.start_datetime)} · ${fmtTime(b.start_datetime)} – ${fmtTime(b.end_datetime)}</p>
+            <p class="text-gray-500 text-xs mt-0.5">${fmtDate(b.start_time)} · ${fmtTime(b.start_time)} – ${fmtTime(b.end_time)}</p>
           </div>
           <div class="text-right flex-shrink-0">
             <p class="font-bold text-white text-sm">$${Number(b.total_charged||0).toFixed(2)}</p>
@@ -189,7 +196,7 @@ driverDashboard.get('/', async (c) => {
             </div>
             <div class="flex-1 min-w-0">
               <p class="font-medium text-white text-sm truncate">${h.title}</p>
-              <p class="text-gray-500 text-xs mt-0.5">${fmtDate(h.start_datetime)}</p>
+              <p class="text-gray-500 text-xs mt-0.5">${fmtDate(h.start_time)}</p>
             </div>
             <div class="flex items-center gap-2">
               ${stars ? `<div class="flex gap-0.5">${stars}</div>` : (isCancelled ? '<span class="text-xs text-red-400">Cancelled</span>' : '')}
@@ -200,7 +207,7 @@ driverDashboard.get('/', async (c) => {
       }).join('')
 
   // ── Set depart time for countdown (active booking) ────────────────────────
-  const departStr = activeBooking?.end_datetime || ''
+  const departStr = activeBooking?.end_time || ''
 
   const content = `
   <div class="pt-16 min-h-screen">

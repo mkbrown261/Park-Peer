@@ -1,12 +1,18 @@
 import { Hono } from 'hono'
 import { Layout } from '../components/layout'
+import { requireUserAuth, verifyUserToken } from '../middleware/security'
 
-type Bindings = { DB: D1Database }
+type Bindings = { DB: D1Database; USER_TOKEN_SECRET: string }
 
 export const hostDashboard = new Hono<{ Bindings: Bindings }>()
 
+// ── Protect ALL /host/* routes — redirect unauthenticated users to login ──────
+hostDashboard.use('/*', requireUserAuth({ redirectOnFail: true }))
+
 hostDashboard.get('/', async (c) => {
   const db = c.env?.DB
+  const session = c.get('user') as any
+  const userId = session?.userId
 
   // ── Real D1 data ──────────────────────────────────────────────────────────
   let totalRevenue    = 0
@@ -20,36 +26,36 @@ hostDashboard.get('/', async (c) => {
   let nextPayout      = 0
   let payoutPending   = 0
 
-  if (db) {
+  if (db && userId) {
     try {
-      // Revenue from succeeded payments (host payout)
+      // Revenue from succeeded payments for this host
       const rev = await db.prepare(`
-        SELECT COALESCE(SUM(host_payout),0) as total FROM payments WHERE status='succeeded'
-      `).first<any>()
+        SELECT COALESCE(SUM(host_payout),0) as total FROM payments WHERE host_id=? AND status='succeeded'
+      `).bind(userId).first<any>()
       totalRevenue = Math.round((rev?.total ?? 0) * 100) / 100
 
-      // Active bookings count
+      // Active bookings for this host
       const ab = await db.prepare(`
-        SELECT COUNT(*) as n FROM bookings WHERE status IN ('confirmed','active')
-      `).first<any>()
+        SELECT COUNT(*) as n FROM bookings WHERE host_id=? AND status IN ('confirmed','active')
+      `).bind(userId).first<any>()
       activeBookings = ab?.n ?? 0
 
-      // Pending approval count
+      // Pending approval for this host
       const pb = await db.prepare(`
-        SELECT COUNT(*) as n FROM bookings WHERE status='pending'
-      `).first<any>()
+        SELECT COUNT(*) as n FROM bookings WHERE host_id=? AND status='pending'
+      `).bind(userId).first<any>()
       pendingBookings = pb?.n ?? 0
 
-      // Avg rating across all listings
+      // Avg rating across this host's listings
       const ar = await db.prepare(`
-        SELECT AVG(avg_rating) as avg_r FROM listings WHERE status='active' AND avg_rating > 0
-      `).first<any>()
+        SELECT AVG(avg_rating) as avg_r FROM listings WHERE host_id=? AND status='active' AND avg_rating > 0
+      `).bind(userId).first<any>()
       avgRating = ar?.avg_r ? Math.round(ar.avg_r * 100) / 100 : 0
 
-      // Active listing count
+      // Active listing count for this host
       const al = await db.prepare(`
-        SELECT COUNT(*) as n FROM listings WHERE status='active'
-      `).first<any>()
+        SELECT COUNT(*) as n FROM listings WHERE host_id=? AND status='active'
+      `).bind(userId).first<any>()
       activeListings = al?.n ?? 0
 
       // My listings with booking and revenue stats
@@ -60,28 +66,29 @@ hostDashboard.get('/', async (c) => {
         FROM listings l
         LEFT JOIN bookings b ON b.listing_id = l.id
         LEFT JOIN payments p ON p.booking_id = b.id AND p.status = 'succeeded'
+        WHERE l.host_id = ?
         GROUP BY l.id
         ORDER BY l.status='active' DESC, l.avg_rating DESC
         LIMIT 10
-      `).all<any>()
+      `).bind(userId).all<any>()
       myListings = listRows.results || []
 
-      // Pending booking requests with driver info
+      // Pending booking requests for this host's listings
       const pendRows = await db.prepare(`
-        SELECT b.id, b.start_datetime, b.end_datetime, b.total_charged, b.status,
-               b.vehicle_make, b.vehicle_model,
+        SELECT b.id, b.start_time, b.end_time, b.total_charged, b.status,
+               b.vehicle_description,
                l.title as space_title,
                u.full_name as driver_name, u.email as driver_email
         FROM bookings b
         JOIN listings l ON b.listing_id = l.id
         LEFT JOIN users u ON b.driver_id = u.id
-        WHERE b.status = 'pending'
+        WHERE b.host_id = ? AND b.status = 'pending'
         ORDER BY b.created_at ASC
         LIMIT 6
-      `).all<any>()
+      `).bind(userId).all<any>()
       pendingReqs = pendRows.results || []
 
-      // Recent reviews
+      // Recent reviews for this host's listings
       const revRows = await db.prepare(`
         SELECT r.rating, r.comment, r.created_at,
                u.full_name as reviewer_name,
@@ -89,18 +96,18 @@ hostDashboard.get('/', async (c) => {
         FROM reviews r
         JOIN listings l ON r.listing_id = l.id
         LEFT JOIN users u ON r.reviewer_id = u.id
-        WHERE r.status = 'published'
+        WHERE l.host_id = ? AND r.status = 'published'
         ORDER BY r.created_at DESC
         LIMIT 4
-      `).all<any>()
+      `).bind(userId).all<any>()
       recentReviews = revRows.results || []
 
-      // Next payout = sum of confirmed/active bookings not yet paid out
+      // Next payout = sum of confirmed/active bookings for this host not yet paid out
       const payoutRow = await db.prepare(`
         SELECT COALESCE(SUM(host_payout),0) as pending
         FROM bookings
-        WHERE status IN ('confirmed','active')
-      `).first<any>()
+        WHERE host_id = ? AND status IN ('confirmed','active')
+      `).bind(userId).first<any>()
       payoutPending = Math.round((payoutRow?.pending ?? 0) * 100) / 100
       const fee = Math.round(payoutPending * 0.15 * 100) / 100
       nextPayout = Math.round((payoutPending - fee) * 100) / 100
@@ -171,7 +178,7 @@ hostDashboard.get('/', async (c) => {
     : pendingReqs.map(r => {
         const driverInit = (r.driver_name || r.driver_email || '?')[0].toUpperCase()
         const driverLabel = r.driver_name || r.driver_email || 'Unknown Driver'
-        const vehicleLabel = [r.vehicle_make, r.vehicle_model].filter(Boolean).join(' ') || 'Vehicle not specified'
+        const vehicleLabel = r.vehicle_description || 'Vehicle not specified'
         return `
           <div class="p-4">
             <div class="flex items-start gap-3">
@@ -188,7 +195,7 @@ hostDashboard.get('/', async (c) => {
                 </p>
                 <p class="text-xs text-gray-500 mt-1">
                   <i class="fas fa-parking text-indigo-400 mr-1"></i>${r.space_title} ·
-                  ${fmtDate(r.start_datetime)} · ${fmtTime(r.start_datetime)} – ${fmtTime(r.end_datetime)}
+                  ${fmtDate(r.start_time)} · ${fmtTime(r.start_time)} – ${fmtTime(r.end_time)}
                 </p>
                 <div class="flex gap-2 mt-3">
                   <button onclick="acceptBooking(this,'${r.id}')" class="flex-1 py-2 bg-green-500/20 hover:bg-green-500/30 text-green-400 rounded-xl text-xs font-semibold transition-colors border border-green-500/20">
@@ -584,8 +591,8 @@ hostDashboard.get('/', async (c) => {
       if (!zip) { showListingError('ZIP code is required.'); return; }
       if (!rateH && !rateD && !rateM) { showListingError('Please set at least one rate (hourly, daily, or monthly).'); return; }
 
-      // Get CSRF token from sessionStorage (set at login)
-      const csrfToken = sessionStorage.getItem('pp_csrf') || '';
+      // Get CSRF token from the __pp_csrf cookie (set as non-HttpOnly after login/OAuth)
+      const csrfToken = document.cookie.split('; ').find(r => r.startsWith('__pp_csrf='))?.split('=')[1] || '';
 
       btn.disabled = true;
       btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Creating...';

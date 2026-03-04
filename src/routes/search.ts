@@ -471,6 +471,14 @@ searchPage.get('/', (c) => {
       document.getElementById('map-loading').style.display = 'none'
     })
 
+    // Safety: if map takes >10s to load, remove the loading spinner anyway
+    setTimeout(() => {
+      const loader = document.getElementById('map-loading')
+      if (loader && loader.style.display !== 'none') {
+        loader.style.display = 'none'
+      }
+    }, 10000)
+
     // Update spot count when map moves
     map.on('moveend', updateMapSpotCount)
   }
@@ -511,6 +519,7 @@ searchPage.get('/', (c) => {
 
     try {
       const res = await fetch('/api/listings?' + params.toString())
+      if (!res.ok) throw new Error('API returned ' + res.status)
       const data = await res.json()
 
       document.getElementById('loading-skeleton').style.display = 'none'
@@ -528,6 +537,8 @@ searchPage.get('/', (c) => {
     } catch (e) {
       console.error('Failed to load listings:', e)
       document.getElementById('loading-skeleton').style.display = 'none'
+      document.getElementById('count-num').textContent = '!'
+      document.getElementById('count-label').textContent = 'error loading'
       document.getElementById('no-results').classList.remove('hidden')
     }
   }
