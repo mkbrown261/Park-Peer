@@ -37,8 +37,14 @@ hostDashboard.get('/', async (c) => {
   let nextPayout      = 0
   let payoutPending   = 0
 
+  let hostName = ''
+
   if (db && userId) {
     try {
+      // Fetch host's display name
+      const nameRow = await db.prepare('SELECT full_name FROM users WHERE id = ?').bind(userId).first<{full_name: string}>()
+      hostName = nameRow?.full_name || ''
+
       // Revenue from succeeded payments for this host
       const rev = await db.prepare(`
         SELECT COALESCE(SUM(host_payout),0) as total FROM payments WHERE host_id=? AND status='succeeded'
@@ -407,6 +413,18 @@ hostDashboard.get('/', async (c) => {
               <li class="flex items-center gap-2"><i class="fas fa-check text-lime-500 text-xs"></i> Enable Instant Book for 2x more reservations</li>
               <li class="flex items-center gap-2"><i class="fas fa-check text-lime-500 text-xs"></i> Respond within 1hr to get Superhost status</li>
             </ul>
+          </div>
+
+          <!-- Danger Zone -->
+          <div class="bg-charcoal-100 border border-red-500/10 rounded-2xl p-4">
+            <h4 class="text-gray-400 font-semibold text-sm mb-2 flex items-center gap-2">
+              <i class="fas fa-triangle-exclamation text-red-500/60"></i> Danger Zone
+            </h4>
+            <p class="text-gray-500 text-xs mb-3">Permanently remove your account and all listings. This action cannot be undone.</p>
+            <button onclick="openDeleteAccount()"
+              class="w-full py-2.5 bg-transparent border border-red-500/20 hover:bg-red-500/10 text-red-400 hover:text-red-300 rounded-xl text-sm font-medium transition-colors">
+              <i class="fas fa-trash-alt mr-2 text-xs"></i>Delete Account
+            </button>
           </div>
         </div>
       </div>
@@ -1040,9 +1058,120 @@ hostDashboard.get('/', async (c) => {
         btn.innerHTML = '<i class="fas fa-undo mr-2"></i>Restore';
       }
     }
+
+    // ── Delete Account ────────────────────────────────────────────────────
+    function openDeleteAccount() {
+      document.getElementById('delete-account-modal').classList.remove('hidden');
+      document.getElementById('delete-account-error').classList.add('hidden');
+      const btn = document.getElementById('delete-account-btn');
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-trash-alt mr-2"></i>Yes, Delete My Account';
+    }
+
+    function closeDeleteAccountModal(e) {
+      if (!e || e.target === document.getElementById('delete-account-modal')) {
+        document.getElementById('delete-account-modal').classList.add('hidden');
+      }
+    }
+
+    async function confirmDeleteAccount() {
+      const btn = document.getElementById('delete-account-btn');
+      const errEl = document.getElementById('delete-account-error');
+      const errMsg = document.getElementById('delete-account-error-msg');
+      errEl.classList.add('hidden');
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Deleting…';
+
+      try {
+        const res = await fetch('/api/auth/account', {
+          method: 'DELETE',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': getCsrfToken(),
+          },
+          credentials: 'same-origin',
+        });
+        const data = await res.json().catch(() => ({}));
+
+        if (!res.ok) {
+          errMsg.textContent = data.error || 'Failed to delete account. Please try again.';
+          errEl.classList.remove('hidden');
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fas fa-trash-alt mr-2"></i>Yes, Delete My Account';
+          return;
+        }
+
+        btn.innerHTML = '<i class="fas fa-check mr-2"></i>Account Deleted';
+        document.getElementById('delete-account-body').innerHTML =
+          '<div class="text-center py-4"><i class="fas fa-check-circle text-green-400 text-3xl mb-3 block"></i>' +
+          '<p class="text-white font-bold mb-1">Account Deleted</p>' +
+          '<p class="text-gray-400 text-sm">Your account has been permanently removed. Redirecting…</p></div>';
+        setTimeout(() => { window.location.href = '/'; }, 2000);
+
+      } catch(err) {
+        errMsg.textContent = 'Network error. Please check your connection and try again.';
+        errEl.classList.remove('hidden');
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-trash-alt mr-2"></i>Yes, Delete My Account';
+      }
+    }
   </script>
+
+  <!-- Delete Account Confirmation Modal -->
+  <div id="delete-account-modal" class="hidden fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4" onclick="closeDeleteAccountModal(event)">
+    <div class="bg-charcoal-100 rounded-3xl w-full max-w-md border border-white/10 overflow-hidden" onclick="event.stopPropagation()">
+      <div class="flex items-center justify-between p-6 border-b border-white/10">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 bg-red-500/10 rounded-full flex items-center justify-center">
+            <i class="fas fa-trash-alt text-red-400"></i>
+          </div>
+          <div>
+            <h3 class="font-bold text-white">Delete Account</h3>
+            <p class="text-xs text-gray-400">This action is permanent</p>
+          </div>
+        </div>
+        <button onclick="document.getElementById('delete-account-modal').classList.add('hidden')"
+          class="w-8 h-8 bg-charcoal-200 rounded-full flex items-center justify-center text-gray-400 hover:text-white transition-colors">
+          <i class="fas fa-times text-sm"></i>
+        </button>
+      </div>
+      <div id="delete-account-body" class="p-6 space-y-4">
+        <div class="bg-red-500/10 border border-red-500/20 rounded-2xl p-4">
+          <p class="text-red-300 font-semibold text-sm mb-2">⚠️ Are you sure?</p>
+          <ul class="text-red-300/70 text-xs space-y-1.5 leading-relaxed">
+            <li class="flex items-start gap-2"><i class="fas fa-times text-red-400 mt-0.5 flex-shrink-0"></i>Your account will be permanently deleted</li>
+            <li class="flex items-start gap-2"><i class="fas fa-times text-red-400 mt-0.5 flex-shrink-0"></i>All your listings will be archived</li>
+            <li class="flex items-start gap-2"><i class="fas fa-times text-red-400 mt-0.5 flex-shrink-0"></i>You will be immediately signed out</li>
+            <li class="flex items-start gap-2"><i class="fas fa-times text-red-400 mt-0.5 flex-shrink-0"></i>This cannot be reversed</li>
+          </ul>
+        </div>
+        <div id="delete-account-error" class="hidden bg-amber-500/10 border border-amber-500/20 rounded-xl p-3">
+          <p id="delete-account-error-msg" class="text-amber-300 text-sm"></p>
+        </div>
+        <div class="flex gap-3">
+          <button onclick="document.getElementById('delete-account-modal').classList.add('hidden')"
+            class="flex-1 py-3 bg-charcoal-200 hover:bg-charcoal-300 text-gray-300 rounded-xl text-sm font-semibold transition-colors border border-white/10">
+            Cancel
+          </button>
+          <button id="delete-account-btn" onclick="confirmDeleteAccount()"
+            class="flex-1 py-3 bg-red-500/20 hover:bg-red-500/30 text-red-400 hover:text-red-300 rounded-xl text-sm font-bold transition-colors border border-red-500/20">
+            <i class="fas fa-trash-alt mr-2"></i>Yes, Delete My Account
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
   `
-  return c.html(Layout('Host Dashboard', content))
+  const navSession = { name: hostName || session?.name || '', role: session?.role || 'HOST', isAdmin: (session?.role || '').toUpperCase() === 'ADMIN' }
+  // Front-end route guard: if __pp_csrf cookie is absent the session has expired.
+  // This runs synchronously in <head> before any HTML renders — prevents UI flash.
+  const guardScript = `<script>
+    (function(){
+      var hasCsrf = document.cookie.split(';').some(function(c){ return c.trim().startsWith('__pp_csrf='); });
+      if (!hasCsrf) { window.location.replace('/auth/login?reason=auth'); }
+    })();
+  <\/script>`
+  return c.html(Layout('Host Dashboard', content, guardScript, navSession))
 })
 
 function generateHostCalendar() {

@@ -34,6 +34,7 @@ export interface UserSession {
   userId: number
   email: string
   role: string        // 'driver' | 'host' | 'both' | 'admin'
+  name?: string       // display name (optional, not in JWT — set from DB on dashboard pages)
   iat: number         // issued-at (UNIX seconds)
 }
 
@@ -202,8 +203,10 @@ export async function verifyUserToken(c: any, secret: string): Promise<UserSessi
 }
 
 export function clearUserToken(c: any): void {
-  setCookie(c, USER_COOKIE,    '', { httpOnly: true, secure: true, sameSite: 'Lax', path: '/',     maxAge: 0 })
-  setCookie(c, REFRESH_COOKIE, '', { httpOnly: true, secure: true, sameSite: 'Lax', path: '/auth', maxAge: 0 })
+  setCookie(c, USER_COOKIE,    '', { httpOnly: true,  secure: true, sameSite: 'Lax',    path: '/',     maxAge: 0 })
+  setCookie(c, REFRESH_COOKIE, '', { httpOnly: true,  secure: true, sameSite: 'Lax',    path: '/auth', maxAge: 0 })
+  // Clear CSRF cookie too — frontend route guards check for __pp_csrf to detect session state
+  setCookie(c, CSRF_COOKIE,    '', { httpOnly: false, secure: true, sameSite: 'Strict', path: '/',     maxAge: 0 })
 }
 
 // ─── 5. requireUserAuth middleware ───────────────────────────────────────────

@@ -1,6 +1,8 @@
 // Shared layout and component helpers
 
-export const Layout = (title: string, content: string, extraHead = '') => `<!DOCTYPE html>
+export type NavSession = { name?: string; role?: string; isAdmin?: boolean } | null
+
+export const Layout = (title: string, content: string, extraHead = '', session: NavSession = null) => `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
@@ -171,7 +173,7 @@ export const Layout = (title: string, content: string, extraHead = '') => `<!DOC
   </style>
 </head>
 <body class="bg-charcoal text-white min-h-screen">
-  ${Navbar()}
+  ${Navbar(session)}
   <main>
     ${content}
   </main>
@@ -207,6 +209,21 @@ export const Layout = (title: string, content: string, extraHead = '') => `<!DOC
       });
       document.addEventListener('click', () => userMenu.classList.add('hidden'));
     }
+
+    // Sign Out — POST to /api/auth/logout (clears HttpOnly cookie), then redirect
+    // This is the ONLY correct way to log out: a simple href to /auth/login does
+    // NOT clear the HttpOnly __pp_user cookie, leaving the session alive.
+    window.signOut = async function(e) {
+      if (e) e.preventDefault();
+      try {
+        await fetch('/api/auth/logout', {
+          method: 'POST',
+          credentials: 'same-origin',
+        });
+      } catch (_) {}
+      // Hard navigate away — clears all in-memory state
+      window.location.href = '/auth/login';
+    };
   </script>
 
   <!-- ═══════════════════════════════════════════════════════════════════
@@ -728,7 +745,12 @@ export const Layout = (title: string, content: string, extraHead = '') => `<!DOC
 </body>
 </html>`
 
-export const Navbar = () => `
+export const Navbar = (session: NavSession = null) => {
+const isAdmin = session?.isAdmin || (session?.role || '').toUpperCase() === 'ADMIN'
+const isHost  = ['HOST','BOTH','ADMIN'].includes((session?.role || '').toUpperCase())
+const isDriver = ['DRIVER','BOTH','ADMIN'].includes((session?.role || '').toUpperCase())
+const userName = session?.name ? session.name.split(' ')[0] : 'My Account'
+return `
 <nav class="fixed top-0 left-0 right-0 z-50 glass border-b border-white/10">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="flex items-center justify-between h-16">
@@ -815,33 +837,35 @@ export const Navbar = () => `
         <!-- User Menu -->
         <div class="relative">
           <button id="user-menu-btn" class="flex items-center gap-2 bg-charcoal-100 border border-white/10 rounded-full pl-3 pr-2 py-1.5 hover:border-indigo-500/50 transition-all group">
-            <span class="text-sm font-medium text-gray-300 group-hover:text-white hide-mobile">My Account</span>
+            <span class="text-sm font-medium text-gray-300 group-hover:text-white hide-mobile">${session ? userName : 'Sign In'}</span>
             <div class="w-7 h-7 gradient-bg rounded-full flex items-center justify-center">
               <i class="fas fa-user text-xs text-white"></i>
             </div>
           </button>
           <div id="user-menu-dropdown" class="hidden absolute right-0 top-12 w-56 glass rounded-2xl border border-white/10 shadow-2xl overflow-hidden">
             <div class="p-4 border-b border-white/10">
-              <p class="font-semibold text-white text-sm">ParkPeer Account</p>
-              <p class="text-xs text-gray-400">Sign in to continue</p>
+              <p class="font-semibold text-white text-sm">${session ? (session.name || 'ParkPeer Account') : 'ParkPeer'}</p>
+              <p class="text-xs text-gray-400">${session ? ('Role: ' + (session.role || 'Member')) : 'Sign in to continue'}</p>
             </div>
             <div class="p-2">
-              <a href="/dashboard" class="flex items-center gap-3 px-3 py-2.5 hover:bg-white/5 rounded-xl text-sm text-gray-300 hover:text-white transition-colors">
+              ${(isDriver || !session) ? `<a href="/dashboard" class="flex items-center gap-3 px-3 py-2.5 hover:bg-white/5 rounded-xl text-sm text-gray-300 hover:text-white transition-colors">
                 <i class="fas fa-gauge-high w-4 text-center text-indigo-400"></i> Driver Dashboard
-              </a>
-              <a href="/host" class="flex items-center gap-3 px-3 py-2.5 hover:bg-white/5 rounded-xl text-sm text-gray-300 hover:text-white transition-colors">
+              </a>` : ''}
+              ${(isHost || !session) ? `<a href="/host" class="flex items-center gap-3 px-3 py-2.5 hover:bg-white/5 rounded-xl text-sm text-gray-300 hover:text-white transition-colors">
                 <i class="fas fa-home w-4 text-center text-indigo-400"></i> Host Dashboard
-              </a>
+              </a>` : ''}
               <a href="/search" class="flex items-center gap-3 px-3 py-2.5 hover:bg-white/5 rounded-xl text-sm text-gray-300 hover:text-white transition-colors">
                 <i class="fas fa-search w-4 text-center text-indigo-400"></i> Find Parking
               </a>
-              <a href="/admin" class="flex items-center gap-3 px-3 py-2.5 hover:bg-white/5 rounded-xl text-sm text-gray-300 hover:text-white transition-colors">
+              ${isAdmin ? `<a href="/admin" class="flex items-center gap-3 px-3 py-2.5 hover:bg-white/5 rounded-xl text-sm text-gray-300 hover:text-white transition-colors">
                 <i class="fas fa-shield-halved w-4 text-center text-indigo-400"></i> Admin Panel
-              </a>
+              </a>` : ''}
               <div class="border-t border-white/10 my-2"></div>
-              <a href="/auth/login" class="flex items-center gap-3 px-3 py-2.5 hover:bg-red-500/10 rounded-xl text-sm text-red-400 hover:text-red-300 transition-colors">
+              ${session ? `<button onclick="signOut(event)" class="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-red-500/10 rounded-xl text-sm text-red-400 hover:text-red-300 transition-colors text-left">
                 <i class="fas fa-right-from-bracket w-4 text-center"></i> Sign Out
-              </a>
+              </button>` : `<a href="/auth/login" class="flex items-center gap-3 px-3 py-2.5 hover:bg-white/5 rounded-xl text-sm text-gray-300 hover:text-white transition-colors">
+                <i class="fas fa-right-to-bracket w-4 text-center text-indigo-400"></i> Sign In
+              </a>`}
             </div>
           </div>
         </div>
@@ -865,20 +889,25 @@ export const Navbar = () => `
         <a href="/search" class="px-3 py-2.5 text-sm text-gray-300 hover:text-white hover:bg-white/5 rounded-xl transition-colors">
           <i class="fas fa-search mr-2 text-indigo-400"></i> Find Parking
         </a>
-        <a href="/host" class="px-3 py-2.5 text-sm text-gray-300 hover:text-white hover:bg-white/5 rounded-xl transition-colors">
-          <i class="fas fa-home mr-2 text-indigo-400"></i> List Your Space
-        </a>
-        <a href="/dashboard" class="px-3 py-2.5 text-sm text-gray-300 hover:text-white hover:bg-white/5 rounded-xl transition-colors">
-          <i class="fas fa-gauge-high mr-2 text-indigo-400"></i> Dashboard
-        </a>
-        <a href="/auth/login" class="px-3 py-2.5 text-sm text-gray-300 hover:text-white hover:bg-white/5 rounded-xl transition-colors">
-          <i class="fas fa-right-from-bracket mr-2 text-indigo-400"></i> Sign Out
-        </a>
+        ${(isHost || !session) ? `<a href="/host" class="px-3 py-2.5 text-sm text-gray-300 hover:text-white hover:bg-white/5 rounded-xl transition-colors">
+          <i class="fas fa-home mr-2 text-indigo-400"></i> ${session ? 'Host Dashboard' : 'List Your Space'}
+        </a>` : ''}
+        ${(isDriver || !session) ? `<a href="/dashboard" class="px-3 py-2.5 text-sm text-gray-300 hover:text-white hover:bg-white/5 rounded-xl transition-colors">
+          <i class="fas fa-gauge-high mr-2 text-indigo-400"></i> Driver Dashboard
+        </a>` : ''}
+        ${isAdmin ? `<a href="/admin" class="px-3 py-2.5 text-sm text-gray-300 hover:text-white hover:bg-white/5 rounded-xl transition-colors">
+          <i class="fas fa-shield-halved mr-2 text-indigo-400"></i> Admin Panel
+        </a>` : ''}
+        ${session ? `<button onclick="signOut(event)" class="w-full text-left px-3 py-2.5 text-sm text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-xl transition-colors">
+          <i class="fas fa-right-from-bracket mr-2"></i> Sign Out
+        </button>` : `<a href="/auth/login" class="px-3 py-2.5 text-sm text-gray-300 hover:text-white hover:bg-white/5 rounded-xl transition-colors">
+          <i class="fas fa-right-to-bracket mr-2 text-indigo-400"></i> Sign In
+        </a>`}
       </div>
     </div>
   </div>
 </nav>
-`
+`}
 
 export const Footer = () => `
 <footer class="bg-charcoal-100 border-t border-white/5 mt-20">

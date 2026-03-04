@@ -218,7 +218,13 @@ authPages.get('/login', (c) => {
     }
   </script>
   `
-  return c.html(Layout('Sign In', content))
+  return c.html(Layout('Sign In', content, `<script>
+    // Auto-redirect already-authenticated users to their dashboard
+    (function(){
+      var hasCsrf = document.cookie.split(';').some(function(c){ return c.trim().startsWith('__pp_csrf='); });
+      if (hasCsrf) { window.location.replace('/dashboard'); }
+    })();
+  <\/script>`))
 })
 
 authPages.get('/signup', (c) => {

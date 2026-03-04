@@ -215,7 +215,91 @@ apiRoutes.post('/auth/logout', (c) => {
   return c.json({ success: true, message: 'Logged out successfully.' })
 })
 
-// POST /api/auth/refresh — exchange refresh cookie for new access token
+// ════════════════════════════════════════════════════════════════════════════
+// DELETE /api/auth/account — Permanently delete the authenticated user's account
+//
+// Rules:
+//  • Requires valid JWT session (requireUserAuth)
+//  • Blocked if the user has any booking with status IN ('pending','confirmed','active')
+//    — applies to both drivers (as driver_id) and hosts (bookings on their listings)
+//  • On success:
+//    1. Removes all the user's listings (status = 'archived' or soft-delete safe)
+//    2. Hard-deletes the user row (FK cascades handle related rows per schema)
+//    3. Clears session cookies (immediate logout)
+//  • Returns 200 on success, 409 if active bookings exist, 401 if unauthenticated
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.delete('/auth/account', requireUserAuth(), async (c) => {
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+
+  const session  = c.get('user') as any
+  const userId   = session?.userId
+  const userRole = (session?.role || '').toUpperCase()
+
+  if (!userId) return c.json({ error: 'Authentication required' }, 401)
+
+  try {
+    // ── 1. Check for active/upcoming bookings as a DRIVER ─────────────────
+    const driverActive = await db.prepare(`
+      SELECT COUNT(*) as n FROM bookings
+      WHERE driver_id = ? AND status IN ('pending','confirmed','active')
+    `).bind(userId).first<{ n: number }>()
+
+    if (driverActive && driverActive.n > 0) {
+      return c.json({
+        error: 'You have active or upcoming bookings. Please wait until all reservations are completed before deleting your account.',
+        active_bookings: driverActive.n,
+        type: 'driver_active_bookings'
+      }, 409)
+    }
+
+    // ── 2. Check for active/upcoming bookings ON HOST's listings ──────────
+    if (userRole === 'HOST' || userRole === 'BOTH' || userRole === 'ADMIN') {
+      const hostActive = await db.prepare(`
+        SELECT COUNT(*) as n FROM bookings b
+        JOIN listings l ON b.listing_id = l.id
+        WHERE l.host_id = ? AND b.status IN ('pending','confirmed','active')
+      `).bind(userId).first<{ n: number }>()
+
+      if (hostActive && hostActive.n > 0) {
+        return c.json({
+          error: 'Your listings have active or upcoming bookings. Please wait until all driver reservations are completed before deleting your account.',
+          active_bookings: hostActive.n,
+          type: 'host_active_bookings'
+        }, 409)
+      }
+    }
+
+    // ── 3. Archive all host listings before deleting user ─────────────────
+    // (Prevents orphaned listings from appearing in search)
+    await db.prepare(`
+      UPDATE listings SET status = 'archived', updated_at = datetime('now')
+      WHERE host_id = ? AND status IN ('active','pending','suspended')
+    `).bind(userId).run()
+
+    // ── 4. Hard-delete the user account ───────────────────────────────────
+    // The DB schema uses FK references; cascades are handled at the
+    // application layer here to be explicit and safe across D1.
+    // Completed bookings and reviews are preserved for data integrity /
+    // dispute history — they just lose the FK join to the user row.
+    await db.prepare('DELETE FROM users WHERE id = ?').bind(userId).run()
+
+    console.log(`[DELETE /auth/account] User ${userId} (${session.email}) deleted their account`)
+
+    // ── 5. Invalidate session immediately ─────────────────────────────────
+    clearUserToken(c)
+
+    return c.json({
+      success: true,
+      message: 'Your account has been permanently deleted.',
+      redirect: '/'
+    })
+
+  } catch (e: any) {
+    console.error('[DELETE /auth/account] Error:', e?.message)
+    return c.json({ error: 'Failed to delete account. Please try again or contact support.' }, 500)
+  }
+})
 apiRoutes.post('/auth/refresh', async (c) => {
   const db     = c.env?.DB
   const secret = c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod'
