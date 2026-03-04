@@ -91,7 +91,7 @@ PARKPEER KNOWLEDGE BASE:
 - ParkPeer is a peer-to-peer parking marketplace
 - Hosts list driveways, garages, lots, and covered spaces
 - Drivers search by location, book, and pay securely
-- Available in Chicago, Miami, New York, Los Angeles, Atlanta, and growing
+- Available wherever hosts list their spaces — the platform is growing city by city
 - Platform fee: 15% taken from the booking subtotal (host keeps 85%)
 
 **For Drivers — How It Works:**
@@ -104,7 +104,7 @@ PARKPEER KNOWLEDGE BASE:
 7. Navigate to the spot and park
 
 **Pricing for Drivers:**
-- Hourly rates typically $5–$15/hr depending on location and type
+- Hourly rates vary by location and space type — check the listing for exact pricing
 - Daily rates available for all-day parking
 - Monthly rates for commuters needing regular spots
 - A 15% service fee is added at checkout
@@ -121,7 +121,7 @@ PARKPEER KNOWLEDGE BASE:
 
 **Host Earnings:**
 - Hosts earn 85% of the booking price (ParkPeer keeps 15%)
-- Average earnings: Driveway $150–$400/mo, Garage $300–$800/mo, Airport spot $500–$1,200/mo
+- Earnings depend on your location, space type, and how often it's booked
 - Payouts are processed weekly to your bank account via Stripe
 - Track earnings in real-time on your Host Dashboard at /host
 

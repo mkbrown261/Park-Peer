@@ -675,29 +675,84 @@ apiRoutes.post('/webhooks/stripe', async (c) => {
 
   console.log(`[Webhook] Event: ${event.type}`)
 
+  const db = env.DB
+
   switch (event.type) {
     case 'payment_intent.succeeded': {
       const pi = event.data.object
       console.log(`[Webhook] Payment succeeded: ${pi.id} $${pi.amount / 100}`)
-      // TODO: update booking status in D1
+      // Update booking + payment status in D1 using the Stripe payment_intent_id
+      if (db) {
+        try {
+          await db.prepare(
+            `UPDATE bookings SET status = 'confirmed' WHERE stripe_payment_intent_id = ?`
+          ).bind(pi.id).run()
+          await db.prepare(
+            `UPDATE payments SET status = 'succeeded' WHERE stripe_payment_intent_id = ?`
+          ).bind(pi.id).run()
+        } catch (e: any) {
+          console.error('[Webhook] D1 update error (payment_intent.succeeded):', e.message)
+        }
+      }
       break
     }
     case 'payment_intent.payment_failed': {
       const pi = event.data.object
       console.log(`[Webhook] Payment failed: ${pi.id}`)
-      // TODO: notify driver of payment failure
+      if (db) {
+        try {
+          // Set booking back to 'pending' (payment_failed is not a valid status value)
+          await db.prepare(
+            `UPDATE bookings SET status = 'cancelled', cancel_reason = 'Payment failed' WHERE stripe_payment_intent_id = ? AND status = 'pending'`
+          ).bind(pi.id).run()
+          await db.prepare(
+            `UPDATE payments SET status = 'failed' WHERE stripe_payment_intent_id = ?`
+          ).bind(pi.id).run()
+        } catch (e: any) {
+          console.error('[Webhook] D1 update error (payment_intent.payment_failed):', e.message)
+        }
+      }
       break
     }
     case 'charge.refunded': {
       const charge = event.data.object
       console.log(`[Webhook] Refund issued: ${charge.id}`)
-      // TODO: update booking status in D1
+      if (db) {
+        try {
+          // Find the booking via the payment_intent that owns this charge
+          const piId = charge.payment_intent
+          if (piId) {
+            await db.prepare(
+              `UPDATE bookings SET status = 'refunded' WHERE stripe_payment_intent_id = ?`
+            ).bind(piId).run()
+            await db.prepare(
+              `UPDATE payments SET status = 'refunded' WHERE stripe_payment_intent_id = ?`
+            ).bind(piId).run()
+          }
+        } catch (e: any) {
+          console.error('[Webhook] D1 update error (charge.refunded):', e.message)
+        }
+      }
       break
     }
     case 'charge.dispute.created': {
       const dispute = event.data.object
       console.log(`[Webhook] Dispute opened: ${dispute.id}`)
-      // TODO: create dispute record in D1, alert admin
+      if (db) {
+        try {
+          // Mark the booking as disputed using the payment_intent ID.
+          // Full dispute record creation (with booking_id & user IDs) is
+          // handled by admin via the dashboard where booking context is available.
+          const piId = dispute.payment_intent
+          if (piId) {
+            await db.prepare(
+              `UPDATE bookings SET status = 'disputed' WHERE stripe_payment_intent_id = ?`
+            ).bind(piId).run()
+          }
+        } catch (e: any) {
+          console.error('[Webhook] D1 update error (charge.dispute.created):', e.message)
+        }
+      }
       break
     }
     default:
@@ -1564,7 +1619,7 @@ SCOPE — ONLY answer questions about:
 2. Listing a parking space as a host (how to list, pricing tips, availability settings)
 3. Payments & pricing (how billing works, platform fee of ~15%, payout timeline)
 4. Cancellation policy (drivers: free cancel ≥1 hr before; hosts: free cancel ≥24 hr before)
-5. Host earnings (65 % of booking revenue after platform fee, weekly payouts via Stripe)
+5. Host earnings (85% of booking revenue — ParkPeer keeps 15%, weekly payouts via Stripe)
 6. Account & onboarding for both drivers and hosts
 7. Safety & trust features (verified profiles, secure payments via Stripe, host protection)
 8. General platform FAQs
