@@ -1,7 +1,11 @@
 -- Migration 0008: Add 'deleted' to users.status allowed values
 -- SQLite does not support ALTER TABLE to modify CHECK constraints.
--- We must recreate the table with the updated constraint.
+-- We use PRAGMA foreign_keys = OFF to prevent cascade-delete of child rows
+-- while we rename the old table, rename new table into its place.
 -- ─────────────────────────────────────────────────────────────────────────────
+
+-- CRITICAL: Disable FK enforcement so DROP TABLE users does NOT cascade
+PRAGMA foreign_keys = OFF;
 
 -- Step 1: Create a new table with the updated CHECK constraint
 CREATE TABLE IF NOT EXISTS users_new (
@@ -40,14 +44,17 @@ CREATE TABLE IF NOT EXISTS users_new (
 -- Step 2: Copy all data from old table to new table
 INSERT INTO users_new SELECT * FROM users;
 
--- Step 3: Drop old table
+-- Step 3: Drop old table (FK off so no cascade)
 DROP TABLE users;
 
 -- Step 4: Rename new table to users
 ALTER TABLE users_new RENAME TO users;
 
--- Step 5: Recreate indexes that may have been lost
+-- Step 5: Recreate indexes
 CREATE INDEX IF NOT EXISTS idx_users_email     ON users(email);
 CREATE INDEX IF NOT EXISTS idx_users_role      ON users(role);
 CREATE INDEX IF NOT EXISTS idx_users_status    ON users(status);
 CREATE INDEX IF NOT EXISTS idx_users_created   ON users(created_at);
+
+-- Step 6: Re-enable FK enforcement
+PRAGMA foreign_keys = ON;
