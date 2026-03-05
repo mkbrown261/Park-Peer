@@ -460,10 +460,22 @@ adminApiRoutes.post('/users/:id/delete', async (c: any) => {
 
   let body: any = {}
   try { body = await c.req.json() } catch {}
-  const reason = (body.reason ?? '').toString().trim()
-  const force  = body.force === true
+  const reason   = (body.reason ?? '').toString().trim()
+  const force    = body.force === true
+  const password = (body.password ?? '').toString()
 
   if (!reason) return c.json({ error: 'A deletion reason is required' }, 400)
+
+  // Verify admin password inline (so UI only needs one request)
+  if (password) {
+    const expectedPassword = c.env?.ADMIN_PASSWORD || '999000kK!'
+    const expectedUsername = c.env?.ADMIN_USERNAME || 'adminpanama'
+    if (admin.username === expectedUsername || admin.id === 0) {
+      if (password !== expectedPassword) {
+        return c.json({ error: 'Incorrect admin password', code: 'wrong_password' }, 403)
+      }
+    }
+  }
 
   try {
     // ── 1. Load target user ────────────────────────────────────────────────

@@ -1246,7 +1246,7 @@ adminPanel.get('/user-control', async (c: any) => {
         </label>
         <input type="password" id="del-password" placeholder="Enter your admin password to confirm"
           class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-red-500"/>
-        <p id="del-pw-error" class="hidden text-red-400 text-xs mt-1.5 flex items-center gap-1">
+        <p id="del-pw-error" class="hidden text-red-400 text-xs mt-1.5 items-center gap-1">
           <i class="fas fa-xmark-circle text-xs"></i> <span id="del-pw-error-text">Incorrect password</span>
         </p>
       </div>
@@ -1512,72 +1512,71 @@ adminPanel.get('/user-control', async (c: any) => {
 
       if (!reason || !password) return
 
-      const btn = document.getElementById('del-confirm-btn')
-      btn.disabled = true
-      document.getElementById('del-btn-text').textContent = 'Verifying password...'
-      document.getElementById('del-pw-error').classList.add('hidden')
+      const btn     = document.getElementById('del-confirm-btn')
+      const btnText = document.getElementById('del-btn-text')
+      const pwErr   = document.getElementById('del-pw-error')
+      const pwErrTx = document.getElementById('del-pw-error-text')
 
-      // Step 1: Verify admin password
+      btn.disabled = true
+      btnText.textContent = 'Deleting...'
+      pwErr.classList.add('hidden')
+
       try {
-        const vr = await fetch('/api/admin/verify-password', {
+        const res = await fetch('/api/admin/users/' + currentDeleteUserId + '/delete', {
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ password })
+          body: JSON.stringify({ reason, force, password })
         })
-        if (vr.status === 401) { window.location.href = '/admin/login?reason=auth'; return }
-        const vd = await vr.json()
-        if (!vd.verified) {
-          document.getElementById('del-pw-error-text').textContent = vd.error || 'Incorrect password'
-          document.getElementById('del-pw-error').classList.remove('hidden')
-          btn.disabled = false
-          document.getElementById('del-btn-text').textContent = 'Delete Account'
+
+        let data
+        try { data = await res.json() } catch(e) {
+          throw new Error('Server returned non-JSON (status ' + res.status + '). You may need to log in again.')
+        }
+
+        if (res.status === 401) {
+          window.location.href = '/admin/login?reason=auth'
           return
         }
-      } catch(e) {
-        showToast('error', 'Verification Error', 'Could not verify password: ' + e.message)
-        btn.disabled = false
-        document.getElementById('del-btn-text').textContent = 'Delete Account'
-        return
-      }
 
-      // Step 2: Execute deletion
-      document.getElementById('del-btn-text').textContent = 'Deleting...'
-      try {
-        const dr = await fetch('/api/admin/users/' + currentDeleteUserId + '/delete', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ reason, force })
-        })
-        if (dr.status === 401) { window.location.href = '/admin/login?reason=auth'; return }
-        const dd = await dr.json()
-
-        if (dd.success) {
-          closeDeleteModal()
-          const msg = dd.balance_refunded > 0
-            ? 'User deleted. $' + dd.balance_refunded.toFixed(2) + ' refunded (' + dd.refund_status + ').'
-            : 'User deleted. No balance to refund.'
-          showToast('success', 'Account Deleted', msg)
-          setTimeout(ucLoad, 600)
-        } else if (dd.error === 'Deletion blocked') {
-          // Show blockers in modal
-          pendingBlockers = dd.blockers
-          document.getElementById('del-blockers').classList.remove('hidden')
-          const list = document.getElementById('del-blockers-list')
-          list.innerHTML = dd.reasons.map(r => '<li>' + r + '</li>').join('')
+        if (res.status === 403 && data.code === 'wrong_password') {
+          pwErrTx.textContent = 'Incorrect admin password'
+          pwErr.classList.remove('hidden')
           btn.disabled = false
-          document.getElementById('del-btn-text').textContent = 'Delete Account'
-          checkDeleteReady()
-        } else {
-          showToast('error', 'Deletion Failed', dd.error || 'Unknown error')
-          btn.disabled = false
-          document.getElementById('del-btn-text').textContent = 'Delete Account'
+          btnText.textContent = 'Delete Account'
+          document.getElementById('del-password').value = ''
+          document.getElementById('del-password').focus()
+          return
         }
+
+        if (!res.ok) {
+          // Show error inside modal so it's never missed
+          pwErrTx.textContent = data.error || ('Unexpected error (HTTP ' + res.status + ')')
+          pwErr.classList.remove('hidden')
+          btn.disabled = false
+          btnText.textContent = 'Delete Account'
+          return
+        }
+
+        if (data.success) {
+          closeDeleteModal()
+          showToast('success', 'Account Deleted',
+            data.balance_refunded > 0
+              ? 'User deleted. $' + data.balance_refunded.toFixed(2) + ' refunded.'
+              : 'User deleted successfully.')
+          setTimeout(ucLoad, 600)
+        } else {
+          pwErrTx.textContent = data.error || 'Deletion failed — unknown error'
+          pwErr.classList.remove('hidden')
+          btn.disabled = false
+          btnText.textContent = 'Delete Account'
+        }
+
       } catch(e) {
-        showToast('error', 'Network Error', e.message)
+        pwErrTx.textContent = 'Error: ' + e.message
+        pwErr.classList.remove('hidden')
         btn.disabled = false
-        document.getElementById('del-btn-text').textContent = 'Delete Account'
+        btnText.textContent = 'Delete Account'
       }
     }
 
