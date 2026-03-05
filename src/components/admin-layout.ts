@@ -163,6 +163,29 @@ export const AdminLayout = (title: string, content: string) => `<!DOCTYPE html>
             <span class="text-green-400 text-xs font-medium">Live</span>
           </div>
           <span class="text-gray-600 text-xs hidden md:block" id="admin-clock"></span>
+
+          <!-- Notification Bell -->
+          <div class="relative" id="admin-notif-container">
+            <button id="admin-notif-btn" class="relative w-8 h-8 bg-charcoal-200 hover:bg-white/10 rounded-xl flex items-center justify-center text-gray-400 hover:text-white transition-colors" aria-label="Notifications">
+              <i class="fas fa-bell text-xs"></i>
+              <span id="admin-notif-badge" class="hidden absolute -top-1 -right-1 min-w-[16px] h-[16px] bg-red-500 text-white text-[9px] font-bold rounded-full flex items-center justify-center px-0.5 leading-none"></span>
+            </button>
+            <div id="admin-notif-dropdown" class="hidden absolute right-0 top-10 w-80 bg-charcoal-100 border border-white/10 rounded-2xl shadow-2xl overflow-hidden z-50">
+              <div class="p-3 border-b border-white/5 flex items-center justify-between">
+                <h3 class="font-semibold text-white text-sm">Admin Notifications</h3>
+                <button id="admin-notif-mark-all" class="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">Mark all read</button>
+              </div>
+              <div id="admin-notif-list" class="max-h-80 overflow-y-auto">
+                <div class="p-4 text-center text-gray-500 text-sm">
+                  <i class="fas fa-spinner fa-spin mr-2"></i>Loading…
+                </div>
+              </div>
+              <div class="p-2.5 border-t border-white/5 text-center">
+                <a href="/admin/audit-log" class="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">View audit log</a>
+              </div>
+            </div>
+          </div>
+
           <a href="/admin/logout" title="Sign out" class="w-8 h-8 bg-charcoal-200 hover:bg-red-500/10 rounded-xl flex items-center justify-center text-gray-500 hover:text-red-400 transition-colors">
             <i class="fas fa-right-from-bracket text-xs"></i>
           </a>
@@ -183,6 +206,145 @@ export const AdminLayout = (title: string, content: string) => `<!DOCTYPE html>
       if (el) el.textContent = new Date().toLocaleString('en-US', { month:'short', day:'numeric', year:'numeric', hour:'2-digit', minute:'2-digit' })
     }
     tick(); setInterval(tick, 30000)
+
+    // ── Admin Notification Bell ──────────────────────────────────────────────
+    const adminNotifBtn      = document.getElementById('admin-notif-btn')
+    const adminNotifDropdown = document.getElementById('admin-notif-dropdown')
+    const adminNotifBadge    = document.getElementById('admin-notif-badge')
+    const adminNotifList     = document.getElementById('admin-notif-list')
+    const adminMarkAllBtn    = document.getElementById('admin-notif-mark-all')
+    let adminNotifLoaded     = false
+
+    const notifIconMap = {
+      booking_request:   ['fas fa-car',          'rgba(91,46,255,.15)',  '#a78bfa'],
+      booking_confirmed: ['fas fa-check-circle',  'rgba(34,197,94,.15)', '#4ade80'],
+      booking_cancelled: ['fas fa-times-circle',  'rgba(239,68,68,.15)', '#f87171'],
+      payout_processed:  ['fas fa-dollar-sign',   'rgba(34,197,94,.15)', '#4ade80'],
+      review_received:   ['fas fa-star',          'rgba(245,158,11,.15)','#fbbf24'],
+      new_registration:  ['fas fa-user-plus',     'rgba(91,46,255,.15)', '#a78bfa'],
+      new_listing:       ['fas fa-parking',       'rgba(91,46,255,.15)', '#a78bfa'],
+      dispute_opened:    ['fas fa-balance-scale', 'rgba(239,68,68,.15)', '#f87171'],
+      refund_processed:  ['fas fa-undo',          'rgba(245,158,11,.15)','#fbbf24'],
+      security_alert:    ['fas fa-shield-alt',    'rgba(239,68,68,.15)', '#f87171'],
+      system:            ['fas fa-bell',          'rgba(107,114,128,.15)','#9ca3af'],
+    }
+
+    function adminNotifLink(n) {
+      if (!n.related_entity) return '/admin'
+      const { type } = n.related_entity
+      if (type === 'booking')  return '/admin/bookings'
+      if (type === 'listing')  return '/admin/listings'
+      if (type === 'user')     return '/admin/user-control'
+      if (type === 'dispute')  return '/admin/disputes'
+      return '/admin'
+    }
+
+    function timeAgo(d) {
+      const s = Math.floor((Date.now() - new Date(d).getTime()) / 1000)
+      if (s < 60)  return 'just now'
+      if (s < 3600) return Math.floor(s/60)   + 'm ago'
+      if (s < 86400) return Math.floor(s/3600) + 'h ago'
+      return Math.floor(s/86400) + 'd ago'
+    }
+
+    async function loadAdminNotifs() {
+      if (!adminNotifList) return
+      try {
+        const res  = await fetch('/api/notifications?limit=15')
+        if (!res.ok) { adminNotifList.innerHTML = '<div class="p-4 text-center text-gray-500 text-sm">Unable to load</div>'; return }
+        const data = await res.json()
+
+        if (adminNotifBadge) {
+          if (data.unread_count > 0) {
+            adminNotifBadge.textContent = data.unread_count > 99 ? '99+' : String(data.unread_count)
+            adminNotifBadge.classList.remove('hidden')
+          } else {
+            adminNotifBadge.classList.add('hidden')
+          }
+        }
+
+        const items = data.notifications || []
+        if (items.length === 0) {
+          adminNotifList.innerHTML = '<div class="p-6 text-center text-gray-500 text-sm"><i class="fas fa-bell-slash mb-2 block text-xl"></i>No notifications</div>'
+          return
+        }
+
+        adminNotifList.innerHTML = items.map(n => {
+          const [icon, bg, color] = notifIconMap[n.type] || ['fas fa-bell','rgba(107,114,128,.15)','#9ca3af']
+          const link    = adminNotifLink(n)
+          const unread  = n.read_status === 0
+          return \`<div class="admin-notif-item px-4 py-3 hover:bg-white/5 cursor-pointer border-b border-white/5 \${unread ? 'bg-white/3' : ''}" data-id="\${n.id}" data-link="\${link}">
+            <div class="flex gap-3 items-start">
+              <div class="w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0" style="background:\${bg}">
+                <i class="\${icon} text-xs" style="color:\${color}"></i>
+              </div>
+              <div class="flex-1 min-w-0">
+                <p class="text-xs \${unread ? 'text-white font-semibold' : 'text-gray-300'} truncate">\${n.title}</p>
+                <p class="text-xs text-gray-500 mt-0.5 line-clamp-2">\${n.message}</p>
+                <span class="text-[10px] \${unread ? 'text-indigo-400' : 'text-gray-600'} mt-0.5 block">\${timeAgo(n.created_at)}</span>
+              </div>
+              \${unread ? '<div class="w-1.5 h-1.5 bg-indigo-500 rounded-full mt-1.5 flex-shrink-0"></div>' : ''}
+            </div>
+          </div>\`
+        }).join('')
+
+        adminNotifList.querySelectorAll('.admin-notif-item').forEach(el => {
+          el.addEventListener('click', async () => {
+            const id   = el.getAttribute('data-id')
+            const link = el.getAttribute('data-link')
+            await fetch('/api/notifications/read', {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id: Number(id) }),
+            }).catch(() => {})
+            if (link) window.location.href = link
+          })
+        })
+      } catch {
+        if (adminNotifList) adminNotifList.innerHTML = '<div class="p-4 text-center text-gray-500 text-sm">Could not load</div>'
+      }
+    }
+
+    if (adminNotifBtn && adminNotifDropdown) {
+      adminNotifBtn.addEventListener('click', e => {
+        e.stopPropagation()
+        adminNotifDropdown.classList.toggle('hidden')
+        if (!adminNotifLoaded) { adminNotifLoaded = true; loadAdminNotifs() }
+      })
+      document.addEventListener('click', () => adminNotifDropdown.classList.add('hidden'))
+    }
+
+    if (adminMarkAllBtn) {
+      adminMarkAllBtn.addEventListener('click', async e => {
+        e.stopPropagation()
+        await fetch('/api/notifications/read', { method:'PATCH', headers:{'Content-Type':'application/json'}, body:'{}' }).catch(()=>{})
+        if (adminNotifBadge) { adminNotifBadge.classList.add('hidden'); adminNotifBadge.textContent = '' }
+        adminNotifList && adminNotifList.querySelectorAll('.admin-notif-item').forEach(el => {
+          el.classList.remove('bg-white/3')
+          const dot = el.querySelector('.bg-indigo-500.rounded-full')
+          if (dot) dot.remove()
+        })
+      })
+    }
+
+    // Poll badge every 60s
+    async function pollAdminBadge() {
+      try {
+        const res  = await fetch('/api/notifications?limit=1')
+        if (!res.ok) return
+        const data = await res.json()
+        if (adminNotifBadge) {
+          if (data.unread_count > 0) {
+            adminNotifBadge.textContent = data.unread_count > 99 ? '99+' : String(data.unread_count)
+            adminNotifBadge.classList.remove('hidden')
+          } else {
+            adminNotifBadge.classList.add('hidden')
+          }
+        }
+      } catch {}
+    }
+    pollAdminBadge()
+    setInterval(pollAdminBadge, 60000)
   </script>
 </body>
 </html>`
