@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { getCookie } from 'hono/cookie'
 import { AdminLayout } from '../components/admin-layout'
 import { adminAuthMiddleware } from './admin-auth'
 
@@ -1052,8 +1053,7 @@ adminPanel.get('/user-control', async (c: any) => {
 
   // Extract the session token from cookie to embed directly in page
   // This way adminFetch works even if sessionStorage is empty (e.g. direct nav)
-  const { getCookie: getC } = await import('hono/cookie')
-  const embeddedToken = getC(c, '__pp_admin') || ''
+  const embeddedToken = getCookie(c, '__pp_admin') || ''
 
   if (db) {
     try {
@@ -1753,8 +1753,7 @@ adminPanel.get('/user-control', async (c: any) => {
 // GET /admin/audit-log  — Paginated audit log viewer
 // ════════════════════════════════════════════════════════════════════════════
 adminPanel.get('/audit-log', async (c: any) => {
-  const { getCookie: getC } = await import('hono/cookie')
-  const embeddedToken = getC(c, '__pp_admin') || ''
+  const embeddedToken = getCookie(c, '__pp_admin') || ''
   const content = `
   <div class="flex items-center justify-between mb-6">
     <p class="text-gray-400 text-sm">Immutable record of all admin actions. Every deletion, refund, and override is logged here.</p>
