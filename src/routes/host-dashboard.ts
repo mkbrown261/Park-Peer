@@ -727,32 +727,85 @@ hostDashboard.get('/', async (c) => {
           </div>
         </div>
 
-        <!-- Address (full) -->
+        <!-- Address Autocomplete — Mapbox-powered verified address entry -->
         <div>
-          <label class="text-sm text-gray-400 font-medium block mb-2">Street Address <span class="text-red-400">*</span></label>
-          <input type="text" id="listing-address" maxlength="200"
-            placeholder="e.g. 123 Main St"
-            class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
+          <label class="text-sm text-gray-400 font-medium block mb-2">
+            Property Address <span class="text-red-400">*</span>
+          </label>
+
+          <!-- Search input -->
+          <div class="relative">
+            <div class="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none">
+              <i id="addr-icon" class="fas fa-search text-gray-500 text-sm transition-colors"></i>
+            </div>
+            <input
+              type="text"
+              id="listing-address-input"
+              maxlength="300"
+              placeholder="Start typing your address…"
+              autocomplete="off"
+              class="w-full bg-charcoal-200 border border-white/10 rounded-xl pl-9 pr-28 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 transition-colors"
+              oninput="onAddressInput(this)"
+              onkeydown="onAddressKeydown(event)"
+            />
+            <div id="addr-badge" class="hidden absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-xs font-semibold"></div>
+          </div>
+
+          <!-- Autocomplete dropdown -->
+          <div id="addr-dropdown" class="hidden relative">
+            <ul id="addr-suggestions"
+              class="absolute top-1 left-0 right-0 bg-[#1a1a1a] border border-white/10 rounded-xl shadow-2xl overflow-hidden max-h-60 overflow-y-auto z-50">
+            </ul>
+          </div>
+
+          <!-- Verified address panel -->
+          <div id="addr-verified-panel" class="hidden mt-3 p-3 bg-green-500/10 border border-green-500/20 rounded-xl">
+            <div class="flex items-start justify-between gap-2">
+              <div class="flex items-center gap-2 min-w-0">
+                <i class="fas fa-circle-check text-green-400 flex-shrink-0 text-sm"></i>
+                <div class="min-w-0">
+                  <p id="addr-verified-text" class="text-green-300 text-xs font-semibold leading-snug"></p>
+                  <p class="text-gray-500 text-xs mt-0.5">Address verified · coordinates confirmed</p>
+                </div>
+              </div>
+              <button type="button" onclick="resetAddressVerification()"
+                class="flex-shrink-0 text-gray-500 hover:text-yellow-400 text-xs transition-colors flex items-center gap-1 whitespace-nowrap">
+                <i class="fas fa-pen text-xs"></i> Change
+              </button>
+            </div>
+          </div>
+
+          <!-- Error state -->
+          <div id="addr-error-panel" class="hidden mt-2 flex items-center gap-1.5">
+            <i class="fas fa-triangle-exclamation text-red-400 text-xs"></i>
+            <p id="addr-error-text" class="text-red-400 text-xs"></p>
+          </div>
+
+          <!-- Hidden fields populated on autocomplete selection -->
+          <input type="hidden" id="listing-address"       />
+          <input type="hidden" id="listing-city"           />
+          <input type="hidden" id="listing-state"          />
+          <input type="hidden" id="listing-zip"            />
+          <input type="hidden" id="listing-lat"            />
+          <input type="hidden" id="listing-lng"            />
+          <input type="hidden" id="listing-place-id"       />
+          <input type="hidden" id="listing-addr-verified" value="0" />
         </div>
-        <div class="grid grid-cols-3 gap-3">
-          <div>
-            <label class="text-sm text-gray-400 font-medium block mb-2">City <span class="text-red-400">*</span></label>
-            <input type="text" id="listing-city" maxlength="100"
-              placeholder="e.g. Austin"
-              class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
+
+        <!-- Mini Map Preview (revealed after address verified) -->
+        <div id="listing-map-preview" class="hidden">
+          <label class="text-sm text-gray-400 font-medium block mb-2">
+            <i class="fas fa-map-location-dot text-indigo-400 mr-1"></i>Location Preview
+          </label>
+          <div id="listing-map" class="w-full h-44 rounded-xl overflow-hidden border border-white/10 bg-charcoal-200 relative">
+            <div class="absolute inset-0 flex items-center justify-center">
+              <i class="fas fa-map text-gray-600 text-3xl"></i>
+            </div>
           </div>
-          <div>
-            <label class="text-sm text-gray-400 font-medium block mb-2">State <span class="text-red-400">*</span></label>
-            <input type="text" id="listing-state" maxlength="50"
-              placeholder="e.g. TX"
-              class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
-          </div>
-          <div>
-            <label class="text-sm text-gray-400 font-medium block mb-2">ZIP <span class="text-red-400">*</span></label>
-            <input type="text" id="listing-zip" maxlength="20"
-              placeholder="e.g. 78701"
-              class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
-          </div>
+          <p class="text-gray-500 text-xs mt-1.5 flex items-center gap-1">
+            <i class="fas fa-eye-slash text-xs"></i>
+            Exact address hidden from drivers until booking confirmed.
+          </p>
         </div>
 
         <!-- Rates -->
@@ -836,6 +889,8 @@ hostDashboard.get('/', async (c) => {
       document.getElementById('add-listing-modal').classList.add('hidden');
       document.getElementById('listing-error').classList.add('hidden');
       document.getElementById('listing-success').classList.add('hidden');
+      // Reset address autocomplete state when modal is closed
+      if (typeof resetAddressVerification === 'function') resetAddressVerification();
     }
 
     function selectType(btn, value) {
@@ -864,24 +919,34 @@ hostDashboard.get('/', async (c) => {
       succEl.classList.add('hidden');
 
       // Collect values
-      const title   = document.getElementById('listing-title')?.value?.trim() || '';
-      const type    = document.getElementById('listing-type')?.value || 'driveway';
-      const address = document.getElementById('listing-address')?.value?.trim() || '';
-      const city    = document.getElementById('listing-city')?.value?.trim() || '';
-      const state   = document.getElementById('listing-state')?.value?.trim() || '';
-      const zip     = document.getElementById('listing-zip')?.value?.trim() || '';
-      const rateH   = document.getElementById('listing-rate-hourly')?.value || '';
-      const rateD   = document.getElementById('listing-rate-daily')?.value || '';
-      const rateM   = document.getElementById('listing-rate-monthly')?.value || '';
-      const desc    = document.getElementById('listing-description')?.value?.trim() || '';
+      const title    = document.getElementById('listing-title')?.value?.trim() || '';
+      const type     = document.getElementById('listing-type')?.value || 'driveway';
+      const address  = document.getElementById('listing-address')?.value?.trim() || '';
+      const city     = document.getElementById('listing-city')?.value?.trim() || '';
+      const state    = document.getElementById('listing-state')?.value?.trim() || '';
+      const zip      = document.getElementById('listing-zip')?.value?.trim() || '';
+      const lat      = parseFloat(document.getElementById('listing-lat')?.value || '') || null;
+      const lng      = parseFloat(document.getElementById('listing-lng')?.value || '') || null;
+      const placeId  = document.getElementById('listing-place-id')?.value?.trim() || '';
+      const addrVerif= document.getElementById('listing-addr-verified')?.value || '0';
+      const rateH    = document.getElementById('listing-rate-hourly')?.value || '';
+      const rateD    = document.getElementById('listing-rate-daily')?.value || '';
+      const rateM    = document.getElementById('listing-rate-monthly')?.value || '';
+      const desc     = document.getElementById('listing-description')?.value?.trim() || '';
       const amenities = Array.from(document.querySelectorAll('.amenity-check:checked')).map(cb => cb.value);
 
       // Validate required fields
       if (!title) { showListingError('Space title is required.'); return; }
-      if (!address) { showListingError('Address is required.'); return; }
-      if (!city) { showListingError('City is required.'); return; }
-      if (!state) { showListingError('State is required.'); return; }
-      if (!zip) { showListingError('ZIP code is required.'); return; }
+      if (addrVerif !== '1' || !lat || !lng) {
+        showListingError('Please select a verified address from the autocomplete suggestions.');
+        const inp = document.getElementById('listing-address-input');
+        if (inp) inp.focus();
+        return;
+      }
+      if (!address) { showListingError('Street address is required.'); return; }
+      if (!city)    { showListingError('City is required.'); return; }
+      if (!state)   { showListingError('State is required.'); return; }
+      if (!zip)     { showListingError('ZIP code is required.'); return; }
       if (!rateH && !rateD && !rateM) { showListingError('Please set at least one rate (hourly, daily, or monthly).'); return; }
 
       // ── Agreement gate: if host hasn't accepted, close listing modal and open agreement modal
@@ -915,6 +980,10 @@ hostDashboard.get('/', async (c) => {
             description: desc,
             amenities,
             instant_book: instantEnabled,
+            lat:          lat,
+            lng:          lng,
+            place_id:     placeId,
+            address_verified: true,
           }),
         });
 
@@ -1314,6 +1383,330 @@ hostDashboard.get('/', async (c) => {
         btn.innerHTML = '<i class="fas fa-trash-alt mr-2"></i>Yes, Delete My Account';
       }
     }
+
+    // ── Address Autocomplete (Mapbox) ─────────────────────────────────────
+    (function initAddressAutocomplete() {
+      // State machine: idle | searching | selected | error
+      let addrState   = 'idle';
+      let debounceTimer = null;
+      let suggestions = [];
+      let activeIdx   = -1;
+      let listingMap  = null;
+      let listingMarker = null;
+
+      // ── DOM refs ──────────────────────────────────────────────────────
+      const inputEl      = () => document.getElementById('listing-address-input');
+      const dropdownEl   = () => document.getElementById('addr-dropdown');
+      const suggestList  = () => document.getElementById('addr-suggestions');
+      const badgeEl      = () => document.getElementById('addr-badge');
+      const iconEl       = () => document.getElementById('addr-icon');
+      const verifiedPanel= () => document.getElementById('addr-verified-panel');
+      const verifiedText = () => document.getElementById('addr-verified-text');
+      const errorPanel   = () => document.getElementById('addr-error-panel');
+      const errorText    = () => document.getElementById('addr-error-text');
+      const mapPreview   = () => document.getElementById('listing-map-preview');
+      const mapEl        = () => document.getElementById('listing-map');
+      const hiddenAddr   = () => document.getElementById('listing-address');
+      const hiddenCity   = () => document.getElementById('listing-city');
+      const hiddenState  = () => document.getElementById('listing-state');
+      const hiddenZip    = () => document.getElementById('listing-zip');
+      const hiddenLat    = () => document.getElementById('listing-lat');
+      const hiddenLng    = () => document.getElementById('listing-lng');
+      const hiddenPlace  = () => document.getElementById('listing-place-id');
+      const hiddenVerif  = () => document.getElementById('listing-addr-verified');
+
+      // ── Helpers ────────────────────────────────────────────────────────
+      function setBadge(text, color) {
+        const b = badgeEl();
+        if (!text) { b.classList.add('hidden'); return; }
+        b.textContent = text;
+        b.className   = 'absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-xs font-semibold ' + color;
+        b.classList.remove('hidden');
+      }
+      function setIcon(cls) {
+        const i = iconEl();
+        i.className = 'fas ' + cls + ' text-sm transition-colors';
+      }
+      function showError(msg) {
+        const ep = errorPanel(), et = errorText();
+        if (!ep || !et) return;
+        et.textContent = msg;
+        ep.classList.remove('hidden');
+      }
+      function clearError() {
+        const ep = errorPanel();
+        if (ep) ep.classList.add('hidden');
+      }
+      function clearDropdown() {
+        const dl = dropdownEl(), sl = suggestList();
+        if (dl) dl.classList.add('hidden');
+        if (sl) sl.innerHTML = '';
+        suggestions = [];
+        activeIdx   = -1;
+      }
+      function clearHiddenFields() {
+        [hiddenAddr, hiddenCity, hiddenState, hiddenZip, hiddenLat, hiddenLng, hiddenPlace].forEach(fn => {
+          const el = fn(); if (el) el.value = '';
+        });
+        const hv = hiddenVerif(); if (hv) hv.value = '0';
+      }
+      function setVerifiedPanel(formatted) {
+        const vp = verifiedPanel(), vt = verifiedText();
+        if (!vp || !vt) return;
+        vt.textContent = formatted;
+        vp.classList.remove('hidden');
+      }
+      function hideVerifiedPanel() {
+        const vp = verifiedPanel(); if (vp) vp.classList.add('hidden');
+      }
+      function showMapPreview(lat, lng) {
+        const mp = mapPreview();
+        if (!mp) return;
+        mp.classList.remove('hidden');
+        // Lazy-load Mapbox GL JS if not already loaded
+        if (window.mapboxgl) {
+          renderMiniMap(lat, lng);
+        } else {
+          const s = document.createElement('script');
+          s.src = 'https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js';
+          s.onload = () => renderMiniMap(lat, lng);
+          document.head.appendChild(s);
+          if (!document.querySelector('link[href*="mapbox-gl"]')) {
+            const l = document.createElement('link');
+            l.rel  = 'stylesheet';
+            l.href = 'https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css';
+            document.head.appendChild(l);
+          }
+        }
+      }
+      function renderMiniMap(lat, lng) {
+        if (listingMap) {
+          listingMap.setCenter([lng, lat]);
+          if (listingMarker) listingMarker.setLngLat([lng, lat]);
+          return;
+        }
+        // Fetch token then render
+        fetch('/api/map/config', { credentials: 'same-origin' })
+          .then(r => r.json())
+          .then(d => {
+            if (!d.mapbox_token) return;
+            window.mapboxgl.accessToken = d.mapbox_token;
+            listingMap = new window.mapboxgl.Map({
+              container: 'listing-map',
+              style: 'mapbox://styles/mapbox/dark-v11',
+              center: [lng, lat],
+              zoom: 15,
+              interactive: false,
+            });
+            listingMarker = new window.mapboxgl.Marker({ color: '#6366f1' })
+              .setLngLat([lng, lat])
+              .addTo(listingMap);
+          })
+          .catch(() => {});
+      }
+      function hideMapPreview() {
+        const mp = mapPreview();
+        if (mp) mp.classList.add('hidden');
+        if (listingMap) { listingMap.remove(); listingMap = null; listingMarker = null; }
+      }
+
+      // ── Global functions called from HTML ──────────────────────────────
+      window.onAddressInput = function(el) {
+        clearError();
+        hideVerifiedPanel();
+        clearHiddenFields();
+        setBadge('', '');
+        setIcon('fa-search text-gray-500');
+        addrState = 'idle';
+
+        const q = el.value.trim();
+        if (q.length < 3) { clearDropdown(); return; }
+
+        clearDropdown();
+        setIcon('fa-spinner fa-spin text-indigo-400');
+        setBadge('Searching…', 'text-gray-400');
+
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => fetchSuggestions(q), 320);
+      };
+
+      window.onAddressKeydown = function(e) {
+        const sl = suggestList();
+        if (!sl) return;
+        const items = sl.querySelectorAll('li');
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          activeIdx = Math.min(activeIdx + 1, items.length - 1);
+          updateActiveItem(items);
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          activeIdx = Math.max(activeIdx - 1, 0);
+          updateActiveItem(items);
+        } else if (e.key === 'Enter') {
+          e.preventDefault();
+          if (activeIdx >= 0 && suggestions[activeIdx]) selectSuggestion(suggestions[activeIdx]);
+          else if (suggestions.length === 1) selectSuggestion(suggestions[0]);
+        } else if (e.key === 'Escape') {
+          clearDropdown();
+        }
+      };
+
+      function updateActiveItem(items) {
+        items.forEach((li, i) => {
+          li.classList.toggle('bg-indigo-500/20', i === activeIdx);
+        });
+        if (items[activeIdx]) items[activeIdx].scrollIntoView({ block: 'nearest' });
+      }
+
+      window.selectAddressSuggestion = function(idx) { selectSuggestion(suggestions[idx]); };
+
+      window.resetAddressVerification = function() {
+        const inp = inputEl();
+        if (inp) { inp.value = ''; inp.focus(); }
+        clearDropdown();
+        clearHiddenFields();
+        clearError();
+        hideVerifiedPanel();
+        hideMapPreview();
+        setBadge('', '');
+        setIcon('fa-search text-gray-500');
+        addrState = 'idle';
+      };
+
+      // ── Fetch suggestions from server-side proxy ───────────────────────
+      async function fetchSuggestions(q) {
+        try {
+          const res  = await fetch('/api/geocode/autocomplete?q=' + encodeURIComponent(q) + '&types=address', {
+            credentials: 'same-origin'
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || !data.features) {
+            setIcon('fa-search text-gray-500');
+            setBadge('', '');
+            if (data.error) showError(data.error);
+            if (data.po_box_rejected) showError('P.O. Boxes are not permitted. Please enter a street address.');
+            return;
+          }
+          setIcon('fa-search text-gray-500');
+          setBadge('', '');
+          renderSuggestions(data.features);
+        } catch {
+          setIcon('fa-search text-gray-500');
+          setBadge('', '');
+          showError('Address lookup unavailable. Please try again.');
+        }
+      }
+
+      function renderSuggestions(list) {
+        suggestions = list;
+        activeIdx   = -1;
+        const sl    = suggestList();
+        const dl    = dropdownEl();
+        if (!sl || !dl) return;
+        sl.innerHTML = '';
+
+        if (!list.length) {
+          sl.innerHTML = '<li class="px-4 py-3 text-gray-500 text-sm italic">No matching addresses found</li>';
+          dl.classList.remove('hidden');
+          return;
+        }
+
+        list.forEach((s, i) => {
+          const li = document.createElement('li');
+          li.className = 'px-4 py-3 cursor-pointer hover:bg-indigo-500/20 transition-colors border-b border-white/5 last:border-0';
+          li.innerHTML =
+            '<div class="flex items-start gap-3">' +
+            '  <i class="fas fa-map-marker-alt text-indigo-400 mt-0.5 flex-shrink-0 text-sm"></i>' +
+            '  <div class="min-w-0">' +
+            '    <p class="text-white text-sm font-medium truncate">' + escHtml(s.text || s.place_name) + '</p>' +
+            '    <p class="text-gray-500 text-xs truncate mt-0.5">' + escHtml(s.place_name) + '</p>' +
+            '  </div>' +
+            '</div>';
+          li.onclick = () => selectSuggestion(s);
+          sl.appendChild(li);
+        });
+        dl.classList.remove('hidden');
+      }
+
+      async function selectSuggestion(s) {
+        clearDropdown();
+        setIcon('fa-spinner fa-spin text-indigo-400');
+        setBadge('Verifying…', 'text-gray-400');
+        clearError();
+
+        try {
+          // Resolve full geocode details via server proxy
+          const res  = await fetch('/api/geocode/autocomplete?q=' + encodeURIComponent(s.place_name) + '&types=address&limit=1', {
+            credentials: 'same-origin'
+          });
+          const data = await res.json().catch(() => ({}));
+          const item = (data.features || [])[0] || s;
+
+          // Extract components
+          const lat      = item.lat       || s.lat;
+          const lng      = item.lng       || s.lng;
+          const address  = item.address   || s.address   || '';
+          const city     = item.city      || s.city      || '';
+          const state    = item.state     || s.state     || '';
+          const zip      = item.zip       || s.zip       || '';
+          const placeId  = item.place_id  || s.place_id  || s.id || '';
+          const formatted= item.place_name|| s.place_name|| address;
+
+          if (!lat || !lng) {
+            setIcon('fa-triangle-exclamation text-red-400');
+            setBadge('✗ No coords', 'text-red-400');
+            showError('Could not determine coordinates. Please select a different address.');
+            addrState = 'error';
+            return;
+          }
+          if (!address || address.length < 3) {
+            setIcon('fa-triangle-exclamation text-red-400');
+            setBadge('✗ Invalid', 'text-red-400');
+            showError('Could not parse address. Please choose another suggestion.');
+            addrState = 'error';
+            return;
+          }
+
+          // Populate hidden fields
+          const inp = inputEl();
+          if (inp) inp.value = formatted;
+          hiddenAddr().value  = address;
+          hiddenCity().value  = city;
+          hiddenState().value = state;
+          hiddenZip().value   = zip;
+          hiddenLat().value   = lat;
+          hiddenLng().value   = lng;
+          hiddenPlace().value = placeId;
+          hiddenVerif().value = '1';
+
+          // UI feedback
+          setIcon('fa-circle-check text-green-400');
+          setBadge('✓ Verified', 'text-green-400');
+          setVerifiedPanel(formatted);
+          showMapPreview(lat, lng);
+          addrState = 'selected';
+
+        } catch {
+          setIcon('fa-triangle-exclamation text-red-400');
+          setBadge('✗ Error', 'text-red-400');
+          showError('Address verification failed. Please try again.');
+          addrState = 'error';
+        }
+      }
+
+      function escHtml(str) {
+        return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+      }
+
+      // Close dropdown on outside click
+      document.addEventListener('click', function(e) {
+        const dl = dropdownEl();
+        const inp = inputEl();
+        if (dl && inp && !dl.contains(e.target) && e.target !== inp) {
+          clearDropdown();
+        }
+      });
+    })();
 
     // Auto-open agreement modal if host hasn't accepted current version
     (function checkAgreement() {

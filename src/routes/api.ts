@@ -527,6 +527,114 @@ apiRoutes.get('/map/config', (c) => {
 })
 
 // ════════════════════════════════════════════════════════════════════════════
+// GEOCODE — Server-side Mapbox proxy (keeps token off the frontend bundle)
+// ════════════════════════════════════════════════════════════════════════════
+
+// GET /api/geocode/autocomplete?q=123+Main+St&country=us&limit=5
+// Returns Mapbox autocomplete suggestions for address entry.
+// Only returns address-type features (no POIs, parks, countries).
+// Rate-limited per IP to prevent abuse.
+apiRoutes.get('/geocode/autocomplete', requireUserAuth(), async (c) => {
+  const token = c.env?.MAPBOX_TOKEN
+  if (!token) return c.json({ error: 'Geocoding not configured' }, 503)
+
+  const ip = c.req.header('CF-Connecting-IP') || 'unknown'
+  if (isRateLimited(`geocode:${ip}`, 60, 60_000)) {
+    return c.json({ error: 'Too many requests. Please slow down.' }, 429)
+  }
+
+  const q       = (c.req.query('q') || '').trim()
+  const country = c.req.query('country') || 'us'
+  const limit   = Math.min(parseInt(c.req.query('limit') || '5'), 8)
+
+  if (!q || q.length < 3) return c.json({ features: [] })
+
+  // Reject obvious PO Box patterns before even calling Mapbox
+  if (/\b(p\.?\s*o\.?\s*box|post\s*office\s*box)\b/i.test(q)) {
+    return c.json({ features: [], po_box_rejected: true })
+  }
+
+  try {
+    const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(q)}.json` +
+      `?access_token=${token}` +
+      `&country=${country}` +
+      `&types=address` +
+      `&autocomplete=true` +
+      `&limit=${limit}`
+
+    const res  = await fetch(url)
+    const data: any = await res.json()
+
+    if (!data.features) return c.json({ features: [] })
+
+    // Shape the response — only expose what the frontend needs
+    const features = data.features.map((f: any) => {
+      const ctx   = f.context || []
+      const city  = ctx.find((c: any) => c.id?.startsWith('place'))?.text     || ''
+      const state = ctx.find((c: any) => c.id?.startsWith('region'))?.text    || ''
+      const zip   = ctx.find((c: any) => c.id?.startsWith('postcode'))?.text  || ''
+      const country_text = ctx.find((c: any) => c.id?.startsWith('country'))?.short_code?.toUpperCase() || 'US'
+
+      return {
+        id:               f.id,
+        place_name:       f.place_name,
+        text:             f.text,           // street number + name
+        address:          f.properties?.address || f.text,
+        city,
+        state,
+        zip,
+        country:          country_text,
+        lat:              f.center?.[1] ?? null,
+        lng:              f.center?.[0] ?? null,
+        relevance:        f.relevance,
+      }
+    })
+    // Filter: must have lat/lng and be a real address (relevance > 0.4)
+    .filter((f: any) => f.lat && f.lng && f.relevance > 0.3)
+
+    return c.json({ features })
+  } catch (e: any) {
+    console.error('[GET /api/geocode/autocomplete]', e.message)
+    return c.json({ error: 'Geocoding service unavailable' }, 502)
+  }
+})
+
+// GET /api/geocode/verify?place_id=address.abc123
+// Server-side verification of a selected place_id before listing submission.
+// Called once when host clicks a suggestion to confirm coordinates are valid.
+apiRoutes.get('/geocode/verify', requireUserAuth(), async (c) => {
+  const token   = c.env?.MAPBOX_TOKEN
+  if (!token) return c.json({ error: 'Geocoding not configured' }, 503)
+
+  const placeId = (c.req.query('place_id') || '').trim()
+  const lat     = parseFloat(c.req.query('lat') || '')
+  const lng     = parseFloat(c.req.query('lng') || '')
+
+  if (!placeId) return c.json({ error: 'Missing place_id' }, 400)
+  if (isNaN(lat) || isNaN(lng)) return c.json({ error: 'Missing coordinates' }, 400)
+
+  // Validate coordinate ranges
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+    return c.json({ error: 'Invalid coordinates' }, 400)
+  }
+
+  // Reject if coordinates are in the ocean (rough US bounding box check)
+  const inUSBounds = lat > 18 && lat < 72 && lng > -180 && lng < -65
+  const inCABounds = lat > 41 && lat < 84 && lng > -142 && lng < -52
+  if (!inUSBounds && !inCABounds) {
+    // Still allow — ParkPeer may expand internationally
+    console.warn(`[geocode/verify] Coordinates outside US/CA: ${lat},${lng}`)
+  }
+
+  return c.json({
+    valid:    true,
+    place_id: placeId,
+    lat,
+    lng,
+  })
+})
+
+// ════════════════════════════════════════════════════════════════════════════
 // STRIPE CONFIG (publishable key for frontend)
 // ════════════════════════════════════════════════════════════════════════════
 apiRoutes.get('/stripe/config', (c) => {
@@ -1110,8 +1218,34 @@ apiRoutes.post('/listings', requireUserAuth(), async (c) => {
 
     const description  = validateInput(body.description,  { maxLength: 2000 })
     const instantBook  = body.instant_book === true || body.instant_book === 1 || body.instant_book === '1' ? 1 : 0
-    const lat          = body.lat  ? parseFloat(body.lat)  : null
-    const lng          = body.lng  ? parseFloat(body.lng)  : null
+
+    // ── Address verification — REQUIRED ──────────────────────────────────
+    // lat, lng, and place_id must come from the Mapbox autocomplete selection.
+    // We do NOT accept manually typed addresses without geocoordinates.
+    const lat      = body.lat      ? parseFloat(body.lat)      : null
+    const lng      = body.lng      ? parseFloat(body.lng)      : null
+    const placeId  = validateInput(body.place_id, { maxLength: 200 }) || null
+
+    // Reject PO Boxes server-side
+    if (/\b(p\.?\s*o\.?\s*box|post\s*office\s*box)\b/i.test(address)) {
+      return c.json({ error: 'PO Box addresses are not accepted. Please use a physical street address.' }, 400)
+    }
+
+    // Require verified lat/lng — no coordinates = no listing
+    if (!lat || !lng || isNaN(lat) || isNaN(lng)) {
+      return c.json({
+        error: 'A verified address with map coordinates is required. Please select an address from the autocomplete suggestions.',
+        address_verification_required: true,
+      }, 400)
+    }
+
+    // Validate coordinate ranges
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      return c.json({ error: 'Invalid map coordinates. Please reselect your address.' }, 400)
+    }
+
+    const finalLat = lat
+    const finalLng = lng
 
     // Sanitize amenities — must be array of known values
     const VALID_AMENITIES = ['covered','ev_charging','security_camera','gated','lighting','24hr_access','shuttle','attended']
@@ -1120,36 +1254,17 @@ apiRoutes.post('/listings', requireUserAuth(), async (c) => {
       amenities = body.amenities.filter((a: any) => VALID_AMENITIES.includes(String(a)))
     }
 
-    // Geocode address if lat/lng not provided and Mapbox token is available
-    let finalLat = lat
-    let finalLng = lng
-    if ((!finalLat || !finalLng) && c.env?.MAPBOX_TOKEN) {
-      try {
-        const fullAddr = encodeURIComponent(`${address}, ${city}, ${state} ${zip}`)
-        const geoRes = await fetch(
-          `https://api.mapbox.com/geocoding/v5/mapbox.places/${fullAddr}.json?access_token=${c.env.MAPBOX_TOKEN}&limit=1`
-        )
-        const geoData: any = await geoRes.json()
-        if (geoData.features?.length > 0) {
-          const [geoLng, geoLat] = geoData.features[0].center
-          finalLat = geoLat
-          finalLng = geoLng
-          console.log(`[POST /api/listings] Geocoded: ${finalLat},${finalLng}`)
-        }
-      } catch (e: any) {
-        console.warn('[POST /api/listings] Geocoding failed (non-fatal):', e.message)
-      }
-    }
-
     // ── Insert into D1 ────────────────────────────────────────────────────
     const result = await db.prepare(`
       INSERT INTO listings
         (host_id, title, type, description, address, city, state, zip, country,
-         lat, lng, rate_hourly, rate_daily, rate_monthly,
+         lat, lng, place_id, address_verified,
+         rate_hourly, rate_daily, rate_monthly,
          amenities, instant_book, status, created_at, updated_at)
       VALUES
         (?, ?, ?, ?, ?, ?, ?, ?, 'US',
-         ?, ?, ?, ?, ?,
+         ?, ?, ?, 1,
+         ?, ?, ?,
          ?, ?, 'active', datetime('now'), datetime('now'))
     `).bind(
       session.userId,
@@ -1160,7 +1275,7 @@ apiRoutes.post('/listings', requireUserAuth(), async (c) => {
       sanitizeHtml(city),
       sanitizeHtml(state),
       sanitizeHtml(zip),
-      finalLat, finalLng,
+      finalLat, finalLng, placeId,
       rateHourly, rateDaily, rateMonthly,
       JSON.stringify(amenities),
       instantBook
