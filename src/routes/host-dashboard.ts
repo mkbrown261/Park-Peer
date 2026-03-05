@@ -685,7 +685,7 @@ hostDashboard.get('/', async (c) => {
 
   <!-- Add Listing Modal -->
   <div id="add-listing-modal" class="hidden fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
-    <div class="bg-charcoal-100 rounded-3xl w-full max-w-2xl border border-white/10 overflow-hidden max-h-[90vh] overflow-y-auto">
+    <div id="add-listing-modal-inner" class="bg-charcoal-100 rounded-3xl w-full max-w-2xl border border-white/10 overflow-hidden max-h-[90vh] overflow-y-auto">
       <div class="flex items-center justify-between p-6 border-b border-white/10 sticky top-0 bg-charcoal-100 z-10">
         <h3 class="text-xl font-bold text-white">Create New Listing</h3>
         <button onclick="hideAddListing()" class="w-8 h-8 bg-charcoal-200 rounded-full flex items-center justify-center text-gray-400 hover:text-white">
@@ -693,7 +693,7 @@ hostDashboard.get('/', async (c) => {
         </button>
       </div>
 
-      <!-- Error/Success banners -->
+      <!-- Error/Success banners (kept at top for legacy scroll targets) -->
       <div id="listing-error" class="hidden mx-6 mt-4 p-3 bg-red-500/10 border border-red-500/20 rounded-xl flex items-center gap-2">
         <i class="fas fa-exclamation-circle text-red-400 text-sm"></i>
         <p id="listing-error-msg" class="text-red-400 text-sm">Please fill in all required fields.</p>
@@ -870,6 +870,12 @@ hostDashboard.get('/', async (c) => {
         </div>
       </div>
 
+      <!-- Bottom error banner — always visible above submit button -->
+      <div id="listing-error-bottom" class="hidden mx-4 mb-2 p-3 bg-red-500/10 border border-red-500/20 rounded-xl flex items-center gap-2">
+        <i class="fas fa-exclamation-circle text-red-400 text-sm flex-shrink-0"></i>
+        <p id="listing-error-msg-bottom" class="text-red-400 text-sm"></p>
+      </div>
+
       <div class="p-4 border-t border-white/10 flex gap-3 sticky bottom-0 bg-charcoal-100">
         <button type="button" onclick="hideAddListing()"
           class="flex-1 py-3 bg-charcoal-200 text-gray-400 rounded-xl font-semibold text-sm hover:text-white transition-colors">
@@ -888,6 +894,7 @@ hostDashboard.get('/', async (c) => {
     function hideAddListing() {
       document.getElementById('add-listing-modal').classList.add('hidden');
       document.getElementById('listing-error').classList.add('hidden');
+      document.getElementById('listing-error-bottom').classList.add('hidden');
       document.getElementById('listing-success').classList.add('hidden');
       // Reset address autocomplete state when modal is closed
       if (typeof resetAddressVerification === 'function') resetAddressVerification();
@@ -917,6 +924,7 @@ hostDashboard.get('/', async (c) => {
       const btn    = document.getElementById('listing-submit-btn');
       errEl.classList.add('hidden');
       succEl.classList.add('hidden');
+      document.getElementById('listing-error-bottom')?.classList.add('hidden');
 
       // Collect values
       const title    = document.getElementById('listing-title')?.value?.trim() || '';
@@ -1041,9 +1049,14 @@ hostDashboard.get('/', async (c) => {
     function showListingError(msg) {
       const errEl  = document.getElementById('listing-error');
       const errMsg = document.getElementById('listing-error-msg');
-      errMsg.textContent = msg;
-      errEl.classList.remove('hidden');
-      errEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      const errEl2  = document.getElementById('listing-error-bottom');
+      const errMsg2 = document.getElementById('listing-error-msg-bottom');
+      if (errEl && errMsg) { errMsg.textContent = msg; errEl.classList.remove('hidden'); }
+      // Also show error at the bottom near the submit button — always visible
+      if (errEl2 && errMsg2) { errMsg2.textContent = msg; errEl2.classList.remove('hidden'); }
+      // Scroll the modal container (not the page) to the bottom error
+      const modal = document.getElementById('add-listing-modal-inner');
+      if (modal) { setTimeout(() => modal.scrollTo({ top: modal.scrollHeight, behavior: 'smooth' }), 50); }
     }
 
     function acceptBooking(btn, id) {
