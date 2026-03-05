@@ -407,7 +407,7 @@ adminAuth.post('/login', async (c) => {
     httpOnly: true,
     secure: true,
     sameSite: 'Strict',
-    path: '/admin',
+    path: '/',
     maxAge: SESSION_DURATION_HOURS * 3600
   })
 
@@ -416,6 +416,6 @@ adminAuth.post('/login', async (c) => {
 
 // ── GET /admin/logout ─────────────────────────────────────────────────────────
 adminAuth.get('/logout', (c) => {
-  deleteCookie(c, SESSION_COOKIE, { path: '/admin' })
+  deleteCookie(c, SESSION_COOKIE, { path: '/' })
   return c.redirect('/admin/login')
 })
