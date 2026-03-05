@@ -1133,7 +1133,8 @@ hostDashboard.get('/', async (c) => {
     }
 
     function closeAgreementModal(e) {
-      if (e && e.target !== document.getElementById('agreement-modal')) return;
+      // When called with an event (backdrop click), only close if the backdrop itself was clicked
+      if (e && e.type === 'click' && e.target !== document.getElementById('agreement-modal')) return;
       document.getElementById('agreement-modal').classList.add('hidden');
       document.body.style.overflow = '';
     }
@@ -1182,7 +1183,7 @@ hostDashboard.get('/', async (c) => {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
           credentials: 'same-origin',
-          body: JSON.stringify({ document_type: 'host_agreement', version: '${currentAgreementVersion}', source: 'host_dashboard' }),
+          body: JSON.stringify({ document_type: 'host_agreement', version: '1.0', source: 'host_dashboard' }),
         });
         if (res.ok) {
           document.getElementById('agreement-modal').classList.add('hidden');
