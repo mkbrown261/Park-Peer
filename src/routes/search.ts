@@ -93,14 +93,21 @@ searchPage.get('/', async (c) => {
             <span id="count-label">spots nearby</span>
           </span>
         </p>
-        <select id="sort-select" onchange="sortListings(this.value)"
-          class="bg-transparent text-gray-400 text-xs focus:outline-none cursor-pointer hover:text-white transition-colors">
-          <option value="rating">Best Match</option>
-          <option value="price_asc">Price: Low to High</option>
-          <option value="price_desc">Price: High to Low</option>
-          <option value="reviews">Most Reviewed</option>
-          <option value="reliability">Most Reliable</option>
-        </select>
+        <div class="flex items-center gap-2">
+          <!-- Mobile map toggle — hidden on desktop -->
+          <button onclick="toggleMobileMap()" id="mobile-map-btn"
+            class="lg:hidden flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 hover:bg-indigo-500/30 transition-colors">
+            <i class="fas fa-map text-xs"></i> Map
+          </button>
+          <select id="sort-select" onchange="sortListings(this.value)"
+            class="bg-transparent text-gray-400 text-xs focus:outline-none cursor-pointer hover:text-white transition-colors">
+            <option value="rating">Best Match</option>
+            <option value="price_asc">Price: Low to High</option>
+            <option value="price_desc">Price: High to Low</option>
+            <option value="reviews">Most Reviewed</option>
+            <option value="reliability">Most Reliable</option>
+          </select>
+        </div>
       </div>
 
       <!-- Listing Results (dynamically populated) -->
@@ -449,118 +456,128 @@ searchPage.get('/', async (c) => {
     satellite: 'mapbox://styles/mapbox/satellite-streets-v12'
   }
 
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // INIT
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // mapReady: resolves once Mapbox fires 'load' (or immediately for fallback)
+  let _mapReadyResolve = null
+  const mapReadyPromise = new Promise(res => { _mapReadyResolve = res })
+  let pendingListings = null  // listings queued before map was ready
+
+  function hideMapLoader() {
+    const el = document.getElementById('map-loading')
+    if (el) el.style.display = 'none'
+  }
+  function resolveMapReady() {
+    if (_mapReadyResolve) { _mapReadyResolve(); _mapReadyResolve = null }
+  }
+
   document.addEventListener('DOMContentLoaded', async () => {
-    // Set today's date
     const today = new Date().toISOString().split('T')[0]
     document.getElementById('filter-date').value = today
     document.getElementById('filter-date').min = today
 
-    // Parse initial query from URL (?q=wilmington or ?city=wilmington)
     const urlQ = new URLSearchParams(window.location.search)
     const qVal = urlQ.get('q') || urlQ.get('city') || ''
     if (qVal) document.getElementById('search-input').value = qVal
 
-    // Fetch Mapbox token from server then init map
+    // Fetch Mapbox token then start map (non-blocking relative to listing fetch)
     try {
       const cfg = await fetch('/api/map/config').then(r => r.json())
       MAPBOX_TOKEN = cfg.mapbox_token || ''
-    } catch(e) {}
+    } catch(e) { console.warn('[map] config fetch failed:', e) }
     initMap()
 
-    // ALWAYS load all listings immediately — never block on geolocation.
-    // If a text query is present, geocode + load. Otherwise load everything
-    // now, then silently refine with geolocation once it resolves.
+    // Load listings immediately — renderMapPins queues pins until map is ready
     if (qVal) {
       await geocodeAndLoad(qVal)
     } else {
-      // Load all listings right away so the map is never empty
       await loadListings()
-
-      // Optionally refine with user's real location in the background
       if (navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(
           pos => {
             mapCenter = { lat: pos.coords.latitude, lng: pos.coords.longitude }
             if (map) map.flyTo({ center: [mapCenter.lng, mapCenter.lat], zoom: 12 })
-            loadListings()  // re-load centered on user
+            loadListings()
           },
-          () => {}  // silently ignore — listings already shown
+          () => {}
         )
       }
     }
   })
 
   function showPromptLocation() {
-    // No longer used to block listing display — kept for compatibility
     document.getElementById('prompt-location')?.classList.add('hidden')
   }
 
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // MAP INIT
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   function initMap() {
     if (typeof mapboxgl === 'undefined' || !MAPBOX_TOKEN) {
-      // Graceful fallback: show styled static map visual with real pins
       const loadingEl = document.getElementById('map-loading')
-      loadingEl.innerHTML = \`
-        <div class="absolute inset-0 overflow-hidden" id="fallback-map"
-          style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 30%, #0f3460 60%, #1a1a2e 100%);">
-          <svg class="absolute inset-0 w-full h-full opacity-10" xmlns="http://www.w3.org/2000/svg">
-            <defs>
-              <pattern id="grid" width="80" height="80" patternUnits="userSpaceOnUse">
-                <path d="M 80 0 L 0 0 0 80" fill="none" stroke="#5B2EFF" stroke-width="1"/>
-              </pattern>
-              <pattern id="roads" width="240" height="240" patternUnits="userSpaceOnUse">
-                <rect width="240" height="25" fill="#2a2a3a" opacity="0.9"/>
-                <rect y="80" width="240" height="25" fill="#2a2a3a" opacity="0.9"/>
-                <rect y="160" width="240" height="25" fill="#2a2a3a" opacity="0.9"/>
-                <rect x="0" width="25" height="240" fill="#2a2a3a" opacity="0.9"/>
-                <rect x="80" width="25" height="240" fill="#2a2a3a" opacity="0.9"/>
-                <rect x="160" width="25" height="240" fill="#2a2a3a" opacity="0.9"/>
-              </pattern>
-            </defs>
-            <rect width="100%" height="100%" fill="url(#roads)"/>
-            <rect width="100%" height="100%" fill="url(#grid)"/>
-          </svg>
-          <div id="fallback-pins" class="absolute inset-0"></div>
-          <div class="absolute bottom-4 left-4 glass rounded-xl px-3 py-2 text-xs text-gray-400">
-            <i class="fas fa-info-circle text-indigo-400 mr-1"></i>
-            Add MAPBOX_TOKEN to enable interactive map
-          </div>
-        </div>
-      \`
+      if (loadingEl) {
+        loadingEl.style.display = 'block'
+        loadingEl.innerHTML =
+          '<div class="absolute inset-0 overflow-hidden" id="fallback-map" ' +
+          'style="background:linear-gradient(135deg,#1a1a2e 0%,#16213e 30%,#0f3460 60%,#1a1a2e 100%)">' +
+            '<svg class="absolute inset-0 w-full h-full opacity-10" xmlns="http://www.w3.org/2000/svg">' +
+              '<defs>' +
+                '<pattern id="grid" width="80" height="80" patternUnits="userSpaceOnUse">' +
+                  '<path d="M 80 0 L 0 0 0 80" fill="none" stroke="#5B2EFF" stroke-width="1"/>' +
+                '</pattern>' +
+                '<pattern id="roads" width="240" height="240" patternUnits="userSpaceOnUse">' +
+                  '<rect width="240" height="25" fill="#2a2a3a" opacity="0.9"/>' +
+                  '<rect y="80" width="240" height="25" fill="#2a2a3a" opacity="0.9"/>' +
+                  '<rect y="160" width="240" height="25" fill="#2a2a3a" opacity="0.9"/>' +
+                  '<rect x="0" width="25" height="240" fill="#2a2a3a" opacity="0.9"/>' +
+                  '<rect x="80" width="25" height="240" fill="#2a2a3a" opacity="0.9"/>' +
+                  '<rect x="160" width="25" height="240" fill="#2a2a3a" opacity="0.9"/>' +
+                '</pattern>' +
+              '</defs>' +
+              '<rect width="100%" height="100%" fill="url(#roads)"/>' +
+              '<rect width="100%" height="100%" fill="url(#grid)"/>' +
+            '</svg>' +
+            '<div id="fallback-pins" class="absolute inset-0"></div>' +
+            '<div class="absolute bottom-4 left-4 glass rounded-xl px-3 py-2 text-xs text-gray-400">' +
+              '<i class="fas fa-map-marked-alt text-indigo-400 mr-1"></i> Map preview mode' +
+            '</div>' +
+          '</div>'
+      }
+      resolveMapReady()
       return
     }
 
     mapboxgl.accessToken = MAPBOX_TOKEN
-
-    map = new mapboxgl.Map({
-      container: 'map',
-      style: MAP_STYLES.dark,
-      center: [mapCenter.lng || -98.5795, mapCenter.lat || 39.8283],  // US center if no location yet
-      zoom: mapCenter.lat ? 12 : 4,
-      attributionControl: false
-    })
+    try {
+      map = new mapboxgl.Map({
+        container: 'map',
+        style: MAP_STYLES.dark,
+        center: [mapCenter.lng || -98.5795, mapCenter.lat || 39.8283],
+        zoom: mapCenter.lat ? 12 : 4,
+        attributionControl: false,
+        failIfMajorPerformanceCaveat: false
+      })
+    } catch(e) {
+      console.error('[map] Mapbox init failed:', e)
+      map = null; hideMapLoader(); resolveMapReady(); return
+    }
 
     map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'bottom-right')
     map.addControl(new mapboxgl.AttributionControl({ compact: true }), 'bottom-left')
 
     map.on('load', () => {
-      document.getElementById('map-loading').style.display = 'none'
+      hideMapLoader()
+      resolveMapReady()
+      // Replay any pins queued before tiles finished loading
+      if (pendingListings !== null) {
+        const toRender = pendingListings; pendingListings = null
+        _renderPinsNow(toRender)
+      }
     })
 
-    // Safety: if map takes >10s to load, remove the loading spinner anyway
-    setTimeout(() => {
-      const loader = document.getElementById('map-loading')
-      if (loader && loader.style.display !== 'none') {
-        loader.style.display = 'none'
-      }
-    }, 10000)
+    map.on('error', (e) => {
+      console.error('[map] error:', e && e.error ? e.error.message : e)
+      hideMapLoader(); resolveMapReady()
+    })
 
-    // Update spot count when map moves
+    // Hard safety: clear loader after 8 seconds no matter what
+    setTimeout(() => { hideMapLoader(); resolveMapReady() }, 8000)
+
     map.on('moveend', updateMapSpotCount)
   }
 
@@ -758,15 +775,27 @@ searchPage.get('/', async (c) => {
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   // RENDER MAP PINS
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // renderMapPins: public entry — queues if map not ready, renders immediately if ready
   function renderMapPins(listings) {
     clearMarkers()
 
-    // No real Mapbox map? Use fallback visual pins
-    if (!map || typeof mapboxgl === 'undefined' || !MAPBOX_TOKEN) {
+    // No Mapbox token or object — use the fallback visual map
+    if (!MAPBOX_TOKEN || typeof mapboxgl === 'undefined') {
       renderFallbackPins(listings)
       return
     }
 
+    // Map object exists but tiles not loaded yet — queue and wait
+    if (!map || !map.loaded()) {
+      pendingListings = listings
+      return
+    }
+
+    _renderPinsNow(listings)
+  }
+
+  // _renderPinsNow: places Mapbox markers directly — only call when map.loaded()
+  function _renderPinsNow(listings) {
     listings.forEach(l => {
       if (!l.lat || !l.lng) return
 
@@ -775,26 +804,25 @@ searchPage.get('/', async (c) => {
       el.dataset.id = l.id
       el.textContent = '$' + (l.price_hourly || 0).toFixed(0)
 
-      const marker = new mapboxgl.Marker({ element: el, anchor: 'bottom' })
-        .setLngLat([l.lng, l.lat])
-        .addTo(map)
-
-      el.addEventListener('click', (e) => {
-        e.stopPropagation()
-        showPinPopup(l, marker)
-      })
-
-      activeMarkers.push({ marker, id: l.id, el })
+      try {
+        const marker = new mapboxgl.Marker({ element: el, anchor: 'bottom' })
+          .setLngLat([l.lng, l.lat])
+          .addTo(map)
+        el.addEventListener('click', (e) => { e.stopPropagation(); showPinPopup(l, marker) })
+        activeMarkers.push({ marker, id: l.id, el })
+      } catch(e) {
+        console.error('[map] failed to add pin for listing', l.id, e)
+      }
     })
 
-    // Fit map to all visible pins
-    if (listings.length > 0 && map) {
-      const validListings = listings.filter(l => l.lat && l.lng)
-      if (validListings.length > 0) {
+    // Auto-fit map to show all pins
+    const valid = listings.filter(l => l.lat && l.lng)
+    if (valid.length > 0 && map) {
+      try {
         const bounds = new mapboxgl.LngLatBounds()
-        validListings.forEach(l => bounds.extend([l.lng, l.lat]))
+        valid.forEach(l => bounds.extend([l.lng, l.lat]))
         map.fitBounds(bounds, { padding: { top: 60, bottom: 60, left: 20, right: 60 }, maxZoom: 14, duration: 800 })
-      }
+      } catch(e) { console.warn('[map] fitBounds failed:', e) }
     }
   }
 
@@ -970,6 +998,26 @@ searchPage.get('/', async (c) => {
     }
   }
 
+  let mobileMapVisible = false
+  function toggleMobileMap() {
+    mobileMapVisible = !mobileMapVisible
+    const panel = document.getElementById('map-panel')
+    const btn   = document.getElementById('mobile-map-btn')
+    if (mobileMapVisible) {
+      panel.classList.remove('hidden')
+      panel.classList.add('flex')
+      panel.style.cssText = 'position:fixed;inset:0;z-index:50;display:flex!important'
+      if (btn) btn.innerHTML = '<i class="fas fa-list text-xs"></i> List'
+      // Trigger map resize so tiles fill the new size
+      if (map) setTimeout(() => map.resize(), 100)
+    } else {
+      panel.style.cssText = ''
+      panel.classList.add('hidden')
+      panel.classList.remove('flex')
+      if (btn) btn.innerHTML = '<i class="fas fa-map text-xs"></i> Map'
+    }
+  }
+
   function setTypeFilter(type, btn) {
     currentType = type
     document.querySelectorAll('.filter-pill').forEach(b => {
@@ -1005,7 +1053,8 @@ searchPage.get('/', async (c) => {
   function setMapStyle(style) {
     if (!map) return
     map.setStyle(MAP_STYLES[style] || MAP_STYLES.dark)
-    map.once('style.load', () => renderMapPins(allListings))
+    // After style reload, re-add all pins directly (map.loaded() is true after style.load)
+    map.once('style.load', () => { clearMarkers(); _renderPinsNow(allListings) })
     document.querySelectorAll('[id^=btn-]').forEach(b => b.classList.remove('active-map-btn'))
     document.getElementById('btn-' + style)?.classList.add('active-map-btn')
   }
