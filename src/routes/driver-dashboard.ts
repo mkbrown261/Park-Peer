@@ -720,3 +720,153 @@ driverDashboard.get('/', async (c) => {
   <\/script>`
   return c.html(Layout('Driver Dashboard', content, guardScript, navSession))
 })
+
+// ── GET /dashboard/notifications ─────────────────────────────────────────────
+driverDashboard.get('/notifications', async (c) => {
+  const session = c.get('user') as any
+  const driverName = session?.name || session?.full_name || session?.email?.split('@')[0] || 'Driver'
+  const content = `
+  <div class="max-w-2xl mx-auto py-8 px-4">
+    <div class="flex items-center gap-3 mb-6">
+      <a href="/dashboard" class="text-gray-400 hover:text-white transition-colors">
+        <i class="fas fa-arrow-left text-lg"></i>
+      </a>
+      <h1 class="text-2xl font-bold text-white">Notification Preferences</h1>
+    </div>
+
+    <div id="prefs-status" class="hidden mb-4 p-3 rounded-xl text-sm font-medium"></div>
+
+    <div class="glass rounded-2xl border border-white/10 p-6 space-y-6">
+      <!-- Booking Notifications -->
+      <div>
+        <h3 class="font-semibold text-white mb-3 flex items-center gap-2">
+          <i class="fas fa-car text-indigo-400"></i> Booking Notifications
+        </h3>
+        <div class="space-y-3 ml-6">
+          <label class="flex items-center justify-between cursor-pointer">
+            <span class="text-gray-300 text-sm">In-app notifications</span>
+            <input type="checkbox" id="booking_inapp" class="notif-toggle w-4 h-4 accent-indigo-500">
+          </label>
+          <label class="flex items-center justify-between cursor-pointer">
+            <span class="text-gray-300 text-sm">Email notifications</span>
+            <input type="checkbox" id="booking_email" class="notif-toggle w-4 h-4 accent-indigo-500">
+          </label>
+          <label class="flex items-center justify-between cursor-pointer">
+            <span class="text-gray-300 text-sm">SMS notifications</span>
+            <input type="checkbox" id="booking_sms" class="notif-toggle w-4 h-4 accent-indigo-500">
+          </label>
+        </div>
+      </div>
+
+      <div class="border-t border-white/10"></div>
+
+      <!-- Payout Notifications -->
+      <div>
+        <h3 class="font-semibold text-white mb-3 flex items-center gap-2">
+          <i class="fas fa-dollar-sign text-green-400"></i> Payout Notifications
+        </h3>
+        <div class="space-y-3 ml-6">
+          <label class="flex items-center justify-between cursor-pointer">
+            <span class="text-gray-300 text-sm">In-app notifications</span>
+            <input type="checkbox" id="payout_inapp" class="notif-toggle w-4 h-4 accent-indigo-500">
+          </label>
+          <label class="flex items-center justify-between cursor-pointer">
+            <span class="text-gray-300 text-sm">Email notifications</span>
+            <input type="checkbox" id="payout_email" class="notif-toggle w-4 h-4 accent-indigo-500">
+          </label>
+          <label class="flex items-center justify-between cursor-pointer">
+            <span class="text-gray-300 text-sm">SMS notifications</span>
+            <input type="checkbox" id="payout_sms" class="notif-toggle w-4 h-4 accent-indigo-500">
+          </label>
+        </div>
+      </div>
+
+      <div class="border-t border-white/10"></div>
+
+      <!-- Review Notifications -->
+      <div>
+        <h3 class="font-semibold text-white mb-3 flex items-center gap-2">
+          <i class="fas fa-star text-amber-400"></i> Review Notifications
+        </h3>
+        <div class="space-y-3 ml-6">
+          <label class="flex items-center justify-between cursor-pointer">
+            <span class="text-gray-300 text-sm">In-app notifications</span>
+            <input type="checkbox" id="review_inapp" class="notif-toggle w-4 h-4 accent-indigo-500">
+          </label>
+          <label class="flex items-center justify-between cursor-pointer">
+            <span class="text-gray-300 text-sm">Email notifications</span>
+            <input type="checkbox" id="review_email" class="notif-toggle w-4 h-4 accent-indigo-500">
+          </label>
+          <label class="flex items-center justify-between cursor-pointer">
+            <span class="text-gray-300 text-sm">SMS notifications</span>
+            <input type="checkbox" id="review_sms" class="notif-toggle w-4 h-4 accent-indigo-500">
+          </label>
+        </div>
+      </div>
+
+      <div class="border-t border-white/10"></div>
+
+      <!-- System Notifications -->
+      <div>
+        <h3 class="font-semibold text-white mb-3 flex items-center gap-2">
+          <i class="fas fa-shield-alt text-blue-400"></i> System &amp; Security Alerts
+        </h3>
+        <div class="space-y-3 ml-6">
+          <label class="flex items-center justify-between cursor-pointer">
+            <span class="text-gray-300 text-sm">In-app notifications</span>
+            <input type="checkbox" id="system_inapp" class="notif-toggle w-4 h-4 accent-indigo-500">
+          </label>
+          <label class="flex items-center justify-between cursor-pointer">
+            <span class="text-gray-300 text-sm">Email notifications</span>
+            <input type="checkbox" id="system_email" class="notif-toggle w-4 h-4 accent-indigo-500">
+          </label>
+          <label class="flex items-center justify-between cursor-pointer">
+            <span class="text-gray-300 text-sm">SMS notifications</span>
+            <input type="checkbox" id="system_sms" class="notif-toggle w-4 h-4 accent-indigo-500">
+          </label>
+        </div>
+      </div>
+
+      <button id="save-prefs-btn" class="w-full py-3 gradient-bg text-white font-semibold rounded-xl hover:opacity-90 transition-opacity mt-2">
+        <i class="fas fa-save mr-2"></i>Save Preferences
+      </button>
+    </div>
+
+    <script>
+    (async () => {
+      const fields = ['booking_inapp','booking_email','booking_sms','payout_inapp','payout_email','payout_sms','review_inapp','review_email','review_sms','system_inapp','system_email','system_sms'];
+      // Load prefs
+      try {
+        const res = await fetch('/api/notifications/prefs');
+        if (res.ok) {
+          const { prefs } = await res.json();
+          fields.forEach(f => { const el = document.getElementById(f); if (el) el.checked = prefs[f] === 1; });
+        }
+      } catch {}
+
+      // Save prefs
+      document.getElementById('save-prefs-btn').addEventListener('click', async () => {
+        const body = {};
+        fields.forEach(f => { const el = document.getElementById(f); body[f] = el && el.checked ? 1 : 0; });
+        try {
+          const res = await fetch('/api/notifications/prefs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          const status = document.getElementById('prefs-status');
+          if (res.ok) {
+            status.textContent = '✓ Preferences saved!';
+            status.className = 'mb-4 p-3 rounded-xl text-sm font-medium bg-green-500/20 text-green-300 border border-green-500/20';
+          } else {
+            status.textContent = 'Failed to save. Please try again.';
+            status.className = 'mb-4 p-3 rounded-xl text-sm font-medium bg-red-500/20 text-red-300 border border-red-500/20';
+          }
+          status.classList.remove('hidden');
+          setTimeout(() => status.classList.add('hidden'), 3000);
+        } catch {}
+      });
+    })();
+    </script>
+  </div>
+  `
+  const navSession = { name: driverName, role: session?.role || 'DRIVER', isAdmin: (session?.role || '').toUpperCase() === 'ADMIN' }
+  const guardScript = `<script>(function(){ var hasCsrf = document.cookie.split(';').some(function(c){ return c.trim().startsWith('__pp_csrf='); }); if (!hasCsrf) { window.location.replace('/auth/login?reason=auth'); } })();<\\/script>`
+  return c.html(Layout('Notification Preferences', content, guardScript, navSession))
+})

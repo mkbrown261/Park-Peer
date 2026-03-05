@@ -344,3 +344,58 @@ export async function sendListingRemovedEmail(env: Env, data: {
     textContent: `Your listing "${data.listingTitle}" at ${data.listingAddress} has been ${data.action}. Visit https://parkpeer.pages.dev/host to manage your listings.`
   })
 }
+
+// ── 7. Payout Processed → Host ────────────────────────────────────────────────
+export async function sendPayoutEmail(env: Env, data: {
+  toEmail:    string
+  toName:     string
+  amount:     number
+  bookingId?: number
+}): Promise<boolean> {
+  const html = emailWrapper(`
+    <h2 style="color:#121212;font-size:22px;font-weight:800;margin:0 0 8px;">💰 Payout Processed!</h2>
+    <p style="color:#6b7280;font-size:15px;margin:0 0 28px;">Great news — your earnings have been transferred.</p>
+    <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;padding:24px;margin-bottom:24px;text-align:center;">
+      <p style="color:#166534;font-size:14px;margin:0 0 8px;">Amount Transferred</p>
+      <p style="color:#16a34a;font-size:36px;font-weight:900;margin:0;">$${data.amount.toFixed(2)}</p>
+      ${data.bookingId ? `<p style="color:#6b7280;font-size:13px;margin:8px 0 0;">Booking #PP-${String(data.bookingId).padStart(6,'0')}</p>` : ''}
+    </div>
+    <p style="color:#6b7280;font-size:14px;margin:0 0 24px;">Funds typically arrive within 1–2 business days depending on your bank.</p>
+    <a href="https://parkpeer.pages.dev/host" style="display:inline-block;background:linear-gradient(135deg,#5B2EFF,#4a20f0);color:#fff;font-weight:700;font-size:14px;padding:14px 28px;border-radius:10px;text-decoration:none;">View Earnings →</a>
+  `)
+  return sendEmail(env, {
+    to: data.toEmail, toName: data.toName,
+    subject: `💰 Payout of $${data.amount.toFixed(2)} Processed — ParkPeer`,
+    htmlContent: html,
+    textContent: `Your payout of $${data.amount.toFixed(2)} has been processed. Funds arrive in 1-2 business days.`
+  })
+}
+
+// ── 8. Review Received → Host ─────────────────────────────────────────────────
+export async function sendReviewReceivedEmail(env: Env, data: {
+  toEmail:      string
+  toName:       string
+  reviewerName: string
+  rating:       number
+  comment:      string
+  listingTitle: string
+  listingId:    number
+}): Promise<boolean> {
+  const stars = '⭐'.repeat(Math.min(5, data.rating))
+  const html = emailWrapper(`
+    <h2 style="color:#121212;font-size:22px;font-weight:800;margin:0 0 8px;">${data.rating === 5 ? '🌟 You got a 5-star review!' : '⭐ New Review Received'}</h2>
+    <p style="color:#6b7280;font-size:15px;margin:0 0 28px;">${data.reviewerName} left a review for <strong>${data.listingTitle}</strong>.</p>
+    <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:12px;padding:24px;margin-bottom:24px;">
+      <p style="font-size:24px;margin:0 0 12px;">${stars}</p>
+      <p style="color:#374151;font-size:15px;font-style:italic;margin:0;">"${data.comment}"</p>
+      <p style="color:#9ca3af;font-size:13px;margin:12px 0 0;">— ${data.reviewerName}</p>
+    </div>
+    <a href="https://parkpeer.pages.dev/listing?id=${data.listingId}" style="display:inline-block;background:linear-gradient(135deg,#5B2EFF,#4a20f0);color:#fff;font-weight:700;font-size:14px;padding:14px 28px;border-radius:10px;text-decoration:none;">View Listing →</a>
+  `)
+  return sendEmail(env, {
+    to: data.toEmail, toName: data.toName,
+    subject: `${stars} New ${data.rating}-star review for "${data.listingTitle}"`,
+    htmlContent: html,
+    textContent: `${data.reviewerName} gave you ${data.rating} stars for "${data.listingTitle}": "${data.comment}"`
+  })
+}

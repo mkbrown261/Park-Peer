@@ -56,6 +56,16 @@ import {
   HOST_TIERS,
 } from '../services/tiers'
 import { CURRENT_VERSIONS, recordAcceptance, requireAgreement } from './agreements'
+import {
+  notifyBookingRequest,
+  notifyBookingConfirmed,
+  notifyBookingCancelled,
+  notifyPayoutProcessed,
+  notifyReviewReceived,
+  notifyNewRegistration,
+  notifyNewListing,
+  notifyRefundProcessed,
+} from '../services/notifications'
 
 type Bindings = {
   DB: D1Database
@@ -147,6 +157,11 @@ apiRoutes.post('/auth/register', async (c) => {
 
     // Send welcome email (non-blocking)
     sendWelcomeEmail(c.env as any, { toEmail: email, toName: full_name, role: role }).catch(() => {})
+
+    // Admin in-app notification: new registration
+    notifyNewRegistration(c.env as any, {
+      userId, userName: full_name, userEmail: email, role: roleForJwt,
+    }).catch(() => {})
 
     return c.json({
       success:  true,
@@ -867,6 +882,35 @@ apiRoutes.post('/payments/confirm', async (c) => {
       }) : Promise.resolve(true)
     ])
 
+    // ── In-app notification: booking confirmed ───────────────────────────
+    if (dbConfirm && body.driver_id) {
+      ;(async () => {
+        try {
+          const driver = await dbConfirm.prepare('SELECT full_name, email, phone FROM users WHERE id = ?')
+            .bind(body.driver_id).first<any>()
+          const hostRow = await dbConfirm.prepare('SELECT id, full_name, email, phone FROM listings l JOIN users u ON l.host_id = u.id WHERE l.id = ? LIMIT 1')
+            .bind(listing_id).first<any>()
+          await notifyBookingConfirmed(env as any, {
+            driverId: Number(body.driver_id),
+            driverName: driver?.full_name || driver_name || 'Driver',
+            driverEmail: driver?.email || body.driver_email || '',
+            driverPhone: driver?.phone || body.driver_phone || null,
+            hostId: hostRow?.id || 0,
+            hostName: hostRow?.full_name || 'Host',
+            hostEmail: hostRow?.email || '',
+            hostPhone: hostRow?.phone || null,
+            bookingId: Number(bookingId),
+            listingTitle,
+            listingAddress,
+            startTime: startFormatted,
+            endTime: endFormatted,
+            totalCharged: amountPaid,
+            hostPayout: hostPayout,
+          })
+        } catch (ne: any) { console.error('[notify booking confirmed]', ne.message) }
+      })()
+    }
+
     return c.json({
       success: true,
       booking_id: `PP-${bookingId}`,
@@ -924,6 +968,16 @@ apiRoutes.post('/payments/refund', async (c) => {
           cancelledBy: 'user'
         }) : Promise.resolve(true)
       ])
+    }
+
+    // ── In-app notification: refund/cancellation ─────────────────────────
+    if (body.requester_user_id) {
+      notifyRefundProcessed(env as any, {
+        userId: Number(body.requester_user_id),
+        userRole: body.requester_role || 'driver',
+        amount: refundAmount,
+        bookingId: booking_id || 0,
+      }).catch(() => {})
     }
 
     return c.json({
@@ -1367,6 +1421,15 @@ apiRoutes.post('/listings', requireUserAuth(), async (c) => {
     const newId = result.meta?.last_row_id ?? null
     console.log(`[POST /api/listings] Created listing id=${newId} for user=${session.userId}`)
 
+    // Admin in-app notification: new listing
+    if (newId) {
+      notifyNewListing(c.env as any, {
+        hostName: session.full_name || session.email || 'A host',
+        listingId: Number(newId),
+        listingTitle: sanitizeHtml(title),
+      }).catch(() => {})
+    }
+
     return c.json({
       success: true,
       listing_id: newId,
@@ -1807,6 +1870,38 @@ apiRoutes.post('/bookings', requireUserAuth(), async (c) => {
 
       const dbBookingId = insertResult.meta?.last_row_id ?? 0
       const bookingRef  = 'PP-' + new Date().getFullYear() + '-' + String(dbBookingId).padStart(4, '0')
+
+      // ── Fire booking request notification (async, non-blocking) ─────────
+      ;(async () => {
+        try {
+          const driver = await db.prepare('SELECT full_name, email, phone FROM users WHERE id = ?')
+            .bind(driver_id).first<any>()
+          const host = await db.prepare('SELECT id, full_name, email, phone FROM users WHERE id = ?')
+            .bind(listing.host_id).first<any>()
+          const listingRow = await db.prepare('SELECT title, address, city FROM listings WHERE id = ?')
+            .bind(listing_id).first<any>()
+          const listingTitle = listingRow?.title || 'Parking Space'
+          const listingAddress = [listingRow?.address, listingRow?.city].filter(Boolean).join(', ')
+          if (host) {
+            await notifyBookingRequest(c.env as any, {
+              driverId: driver_id as number,
+              driverName: driver?.full_name || 'A driver',
+              driverEmail: driver?.email || '',
+              driverPhone: driver?.phone || null,
+              hostId: listing.host_id,
+              hostName: host.full_name || 'Host',
+              hostEmail: host.email || '',
+              hostPhone: host.phone || null,
+              bookingId: Number(dbBookingId),
+              listingTitle,
+              listingAddress,
+              startTime: start_datetime,
+              endTime: end_datetime,
+              totalCharged: total,
+            })
+          }
+        } catch (ne: any) { console.error('[notify booking request]', ne.message) }
+      })()
 
       return c.json({
         id: bookingRef, db_id: dbBookingId, listing_id,
@@ -3502,5 +3597,153 @@ apiRoutes.get('/top-hosts', async (c) => {
     return c.json({ success: true, hosts })
   } catch (e: any) {
     return c.json({ error: 'Failed to fetch top hosts', detail: e.message }, 500)
+  }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// NOTIFICATION ENDPOINTS
+// ════════════════════════════════════════════════════════════════════════════
+
+// GET /api/notifications  — list notifications for the logged-in user
+apiRoutes.get('/notifications', requireUserAuth(), async (c) => {
+  const db      = c.env?.DB
+  const session = c.get('user') as any
+  const userId  = session?.userId
+  if (!db || !userId) return c.json({ error: 'Unauthorized' }, 401)
+
+  const limit  = Math.min(parseInt(c.req.query('limit')  || '30'), 100)
+  const offset = parseInt(c.req.query('offset') || '0')
+
+  try {
+    const rows = await db.prepare(`
+      SELECT id, type, title, message, related_entity, read_status, created_at
+      FROM notifications
+      WHERE user_id = ? AND delivery_inapp = 1
+      ORDER BY created_at DESC
+      LIMIT ? OFFSET ?
+    `).bind(userId, limit, offset).all<any>()
+
+    const unread = await db.prepare(
+      'SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND read_status = 0 AND delivery_inapp = 1'
+    ).bind(userId).first<{ n: number }>()
+
+    const total = await db.prepare(
+      'SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND delivery_inapp = 1'
+    ).bind(userId).first<{ n: number }>()
+
+    return c.json({
+      notifications: (rows.results || []).map((r: any) => ({
+        ...r,
+        related_entity: r.related_entity ? JSON.parse(r.related_entity) : null,
+      })),
+      unread_count: unread?.n ?? 0,
+      total: total?.n ?? 0,
+    })
+  } catch (e: any) {
+    return c.json({ error: 'Failed to fetch notifications', detail: e.message }, 500)
+  }
+})
+
+// PATCH /api/notifications/read  — mark all (or specific) as read
+apiRoutes.patch('/notifications/read', requireUserAuth(), async (c) => {
+  const db      = c.env?.DB
+  const session = c.get('user') as any
+  const userId  = session?.userId
+  if (!db || !userId) return c.json({ error: 'Unauthorized' }, 401)
+
+  let body: any = {}
+  try { body = await c.req.json() } catch {}
+
+  try {
+    if (body.id) {
+      await db.prepare(
+        'UPDATE notifications SET read_status = 1 WHERE id = ? AND user_id = ?'
+      ).bind(body.id, userId).run()
+    } else {
+      await db.prepare(
+        'UPDATE notifications SET read_status = 1 WHERE user_id = ? AND read_status = 0'
+      ).bind(userId).run()
+    }
+    return c.json({ success: true })
+  } catch (e: any) {
+    return c.json({ error: 'Failed to update notifications', detail: e.message }, 500)
+  }
+})
+
+// GET /api/notifications/prefs  — get notification preferences
+apiRoutes.get('/notifications/prefs', requireUserAuth(), async (c) => {
+  const db      = c.env?.DB
+  const session = c.get('user') as any
+  const userId  = session?.userId
+  if (!db || !userId) return c.json({ error: 'Unauthorized' }, 401)
+
+  try {
+    let prefs = await db.prepare(
+      'SELECT * FROM notification_prefs WHERE user_id = ?'
+    ).bind(userId).first<any>()
+
+    if (!prefs) {
+      // Return defaults without inserting — will be inserted on first PUT
+      prefs = {
+        user_id: userId,
+        booking_inapp: 1, booking_email: 1, booking_sms: 1,
+        payout_inapp:  1, payout_email:  1, payout_sms:  1,
+        review_inapp:  1, review_email:  1, review_sms:  0,
+        system_inapp:  1, system_email:  1, system_sms:  0,
+      }
+    }
+    return c.json({ prefs })
+  } catch (e: any) {
+    return c.json({ error: 'Failed to fetch preferences', detail: e.message }, 500)
+  }
+})
+
+// PUT /api/notifications/prefs  — save notification preferences
+apiRoutes.put('/notifications/prefs', requireUserAuth(), async (c) => {
+  const db      = c.env?.DB
+  const session = c.get('user') as any
+  const userId  = session?.userId
+  if (!db || !userId) return c.json({ error: 'Unauthorized' }, 401)
+
+  let body: any = {}
+  try { body = await c.req.json() } catch {
+    return c.json({ error: 'Invalid JSON' }, 400)
+  }
+
+  const b = (v: any) => (v === true || v === 1) ? 1 : 0
+
+  try {
+    await db.prepare(`
+      INSERT INTO notification_prefs
+        (user_id, booking_inapp, booking_email, booking_sms,
+         payout_inapp, payout_email, payout_sms,
+         review_inapp, review_email, review_sms,
+         system_inapp, system_email, system_sms, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(user_id) DO UPDATE SET
+        booking_inapp = excluded.booking_inapp,
+        booking_email = excluded.booking_email,
+        booking_sms   = excluded.booking_sms,
+        payout_inapp  = excluded.payout_inapp,
+        payout_email  = excluded.payout_email,
+        payout_sms    = excluded.payout_sms,
+        review_inapp  = excluded.review_inapp,
+        review_email  = excluded.review_email,
+        review_sms    = excluded.review_sms,
+        system_inapp  = excluded.system_inapp,
+        system_email  = excluded.system_email,
+        system_sms    = excluded.system_sms,
+        updated_at    = datetime('now')
+    `).bind(
+      userId,
+      b(body.booking_inapp), b(body.booking_email), b(body.booking_sms),
+      b(body.payout_inapp),  b(body.payout_email),  b(body.payout_sms),
+      b(body.review_inapp),  b(body.review_email),  b(body.review_sms),
+      b(body.system_inapp),  b(body.system_email),  b(body.system_sms),
+    ).run()
+
+    return c.json({ success: true })
+  } catch (e: any) {
+    return c.json({ error: 'Failed to save preferences', detail: e.message }, 500)
   }
 })

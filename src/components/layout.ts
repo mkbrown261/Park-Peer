@@ -189,15 +189,159 @@ export const Layout = (title: string, content: string, extraHead = '', session: 
     }
 
     // Notification bell
-    const notifBtn = document.getElementById('notif-btn');
+    const notifBtn      = document.getElementById('notif-btn');
     const notifDropdown = document.getElementById('notif-dropdown');
+    const notifBadge    = document.getElementById('notif-badge');
+    const notifList     = document.getElementById('notif-list');
+    const markAllBtn    = document.getElementById('notif-mark-all');
+
+    let notifLoaded = false;
+
+    function notifIcon(type) {
+      const map = {
+        booking_request:   ['fas fa-car',        'gradient-bg',         'text-white'],
+        booking_confirmed: ['fas fa-check-circle','bg-green-500/20',     'text-green-400'],
+        booking_cancelled: ['fas fa-times-circle','bg-red-500/20',       'text-red-400'],
+        booking_reminder:  ['fas fa-clock',       'bg-blue-500/20',      'text-blue-400'],
+        payout_processed:  ['fas fa-dollar-sign', 'bg-green-500/20',     'text-green-400'],
+        review_received:   ['fas fa-star',        'bg-amber-500/20',     'text-amber-400'],
+        new_registration:  ['fas fa-user-plus',   'bg-indigo-500/20',    'text-indigo-400'],
+        new_listing:       ['fas fa-parking',     'bg-indigo-500/20',    'text-indigo-400'],
+        dispute_opened:    ['fas fa-balance-scale','bg-red-500/20',      'text-red-400'],
+        refund_processed:  ['fas fa-undo',        'bg-amber-500/20',     'text-amber-400'],
+        security_alert:    ['fas fa-shield-alt',  'bg-red-500/20',       'text-red-400'],
+        system:            ['fas fa-bell',         'bg-gray-500/20',     'text-gray-400'],
+      };
+      return map[type] || ['fas fa-bell', 'bg-gray-500/20', 'text-gray-400'];
+    }
+
+    function notifLink(n) {
+      if (!n.related_entity) return null;
+      const { type, id } = n.related_entity;
+      if (type === 'booking') return '/dashboard';
+      if (type === 'listing') return '/listing/' + id;
+      if (type === 'user')    return '/dashboard';
+      if (type === 'dispute') return '/dashboard';
+      return '/dashboard';
+    }
+
+    function timeAgo(dateStr) {
+      const diff = Date.now() - new Date(dateStr).getTime();
+      const s = Math.floor(diff / 1000);
+      if (s < 60) return 'just now';
+      const m = Math.floor(s / 60);
+      if (m < 60) return m + ' min ago';
+      const h = Math.floor(m / 60);
+      if (h < 24) return h + 'h ago';
+      const d = Math.floor(h / 24);
+      return d + 'd ago';
+    }
+
+    async function loadNotifications() {
+      if (!notifList) return;
+      try {
+        const res = await fetch('/api/notifications?limit=10');
+        if (!res.ok) { notifList.innerHTML = '<div class="p-4 text-center text-gray-500 text-sm">Sign in to see notifications</div>'; return; }
+        const data = await res.json();
+        const items = data.notifications || [];
+
+        // Update badge
+        if (notifBadge) {
+          if (data.unread_count > 0) {
+            notifBadge.textContent = data.unread_count > 99 ? '99+' : String(data.unread_count);
+            notifBadge.classList.remove('hidden');
+          } else {
+            notifBadge.classList.add('hidden');
+          }
+        }
+
+        if (items.length === 0) {
+          notifList.innerHTML = '<div class="p-6 text-center text-gray-500 text-sm"><i class="fas fa-bell-slash mb-2 block text-2xl"></i>No notifications yet</div>';
+          return;
+        }
+
+        notifList.innerHTML = items.map(n => {
+          const [iconClass, bgClass, colorClass] = notifIcon(n.type);
+          const link = notifLink(n);
+          const unread = n.read_status === 0;
+          return \`<div class="notif-item p-4 hover:bg-white/5 cursor-pointer border-b border-white/5 \${unread ? 'bg-white/3' : ''}" data-id="\${n.id}" data-link="\${link || ''}">
+            <div class="flex gap-3">
+              <div class="w-10 h-10 \${bgClass} rounded-full flex items-center justify-center flex-shrink-0">
+                <i class="\${iconClass} \${colorClass} text-sm"></i>
+              </div>
+              <div class="flex-1 min-w-0">
+                <p class="text-sm \${unread ? 'text-white font-semibold' : 'text-gray-300'} truncate">\${n.title}</p>
+                <p class="text-xs text-gray-400 mt-0.5 line-clamp-2">\${n.message}</p>
+                <span class="text-xs \${unread ? 'text-indigo-400' : 'text-gray-500'} mt-1 block">\${timeAgo(n.created_at)}</span>
+              </div>
+              \${unread ? '<div class="w-2 h-2 bg-indigo-500 rounded-full mt-2 flex-shrink-0"></div>' : ''}
+            </div>
+          </div>\`;
+        }).join('');
+
+        // Click handler: mark read + navigate
+        notifList.querySelectorAll('.notif-item').forEach(el => {
+          el.addEventListener('click', async () => {
+            const id   = el.getAttribute('data-id');
+            const link = el.getAttribute('data-link');
+            await fetch('/api/notifications/read', {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id: Number(id) }),
+            }).catch(() => {});
+            if (link) window.location.href = link;
+          });
+        });
+
+      } catch (err) {
+        if (notifList) notifList.innerHTML = '<div class="p-4 text-center text-gray-500 text-sm">Could not load notifications</div>';
+      }
+    }
+
     if (notifBtn && notifDropdown) {
       notifBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         notifDropdown.classList.toggle('hidden');
+        if (!notifLoaded) { notifLoaded = true; loadNotifications(); }
       });
       document.addEventListener('click', () => notifDropdown.classList.add('hidden'));
     }
+
+    if (markAllBtn) {
+      markAllBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await fetch('/api/notifications/read', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(() => {});
+        if (notifBadge) { notifBadge.classList.add('hidden'); notifBadge.textContent = ''; }
+        notifList && notifList.querySelectorAll('.notif-item').forEach(el => {
+          el.classList.remove('bg-white/3');
+          const dot = el.querySelector('.bg-indigo-500.rounded-full');
+          if (dot) dot.remove();
+          const title = el.querySelector('p.text-white');
+          if (title) { title.classList.remove('text-white', 'font-semibold'); title.classList.add('text-gray-300'); }
+          const ts = el.querySelector('span.text-indigo-400');
+          if (ts) { ts.classList.remove('text-indigo-400'); ts.classList.add('text-gray-500'); }
+        });
+      });
+    }
+
+    // Poll badge count every 60s (only when user is on page)
+    async function pollBadge() {
+      try {
+        const res = await fetch('/api/notifications?limit=1');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (notifBadge) {
+          if (data.unread_count > 0) {
+            notifBadge.textContent = data.unread_count > 99 ? '99+' : String(data.unread_count);
+            notifBadge.classList.remove('hidden');
+          } else {
+            notifBadge.classList.add('hidden');
+          }
+        }
+      } catch {}
+    }
+    pollBadge(); // initial count on page load
+    setInterval(pollBadge, 60000);
 
     // User menu
     const userBtn = document.getElementById('user-menu-btn');
@@ -785,51 +929,22 @@ return `
         
         <!-- Notification Bell -->
         <div class="relative" id="notif-container">
-          <button id="notif-btn" class="relative p-2 text-gray-400 hover:text-white transition-colors">
+          <button id="notif-btn" class="relative p-2 text-gray-400 hover:text-white transition-colors" aria-label="Notifications">
             <i class="fas fa-bell text-lg"></i>
-            <span class="absolute top-1 right-1 w-2 h-2 bg-lime-500 rounded-full pulse-dot"></span>
+            <span id="notif-badge" class="hidden absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] bg-red-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center px-1 leading-none"></span>
           </button>
-          <div id="notif-dropdown" class="hidden absolute right-0 top-12 w-80 glass rounded-2xl border border-white/10 shadow-2xl overflow-hidden">
-            <div class="p-4 border-b border-white/10">
+          <div id="notif-dropdown" class="hidden absolute right-0 top-12 w-80 glass rounded-2xl border border-white/10 shadow-2xl overflow-hidden z-50">
+            <div class="p-4 border-b border-white/10 flex items-center justify-between">
               <h3 class="font-semibold text-white">Notifications</h3>
+              <button id="notif-mark-all" class="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">Mark all read</button>
             </div>
-            <div class="max-h-80 overflow-y-auto">
-              <div class="p-4 hover:bg-white/5 cursor-pointer border-b border-white/5">
-                <div class="flex gap-3">
-                  <div class="w-10 h-10 gradient-bg rounded-full flex items-center justify-center flex-shrink-0">
-                    <i class="fas fa-car text-white text-sm"></i>
-                  </div>
-                  <div>
-                    <p class="text-sm text-white font-medium">New booking request!</p>
-                    <p class="text-xs text-gray-400 mt-1">A driver wants to book your space</p>
-                    <span class="text-xs text-indigo-400 mt-1 block">2 min ago</span>
-                  </div>
-                </div>
+            <div id="notif-list" class="max-h-80 overflow-y-auto">
+              <div class="p-4 text-center text-gray-500 text-sm">
+                <i class="fas fa-spinner fa-spin mr-2"></i>Loading…
               </div>
-              <div class="p-4 hover:bg-white/5 cursor-pointer border-b border-white/5">
-                <div class="flex gap-3">
-                  <div class="w-10 h-10 bg-green-500/20 rounded-full flex items-center justify-center flex-shrink-0">
-                    <i class="fas fa-dollar-sign text-green-400 text-sm"></i>
-                  </div>
-                  <div>
-                    <p class="text-sm text-white font-medium">Payout processed</p>
-                    <p class="text-xs text-gray-400 mt-1">$45.50 has been sent to your account</p>
-                    <span class="text-xs text-gray-500 mt-1 block">1 hour ago</span>
-                  </div>
-                </div>
-              </div>
-              <div class="p-4 hover:bg-white/5 cursor-pointer">
-                <div class="flex gap-3">
-                  <div class="w-10 h-10 bg-amber-500/20 rounded-full flex items-center justify-center flex-shrink-0">
-                    <i class="fas fa-star text-amber-400 text-sm"></i>
-                  </div>
-                  <div>
-                    <p class="text-sm text-white font-medium">New 5-star review!</p>
-                    <p class="text-xs text-gray-400 mt-1">"Perfect spot, easy access, will book again!"</p>
-                    <span class="text-xs text-gray-500 mt-1 block">3 hours ago</span>
-                  </div>
-                </div>
-              </div>
+            </div>
+            <div class="p-3 border-t border-white/10 text-center">
+              <a href="/dashboard" class="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">View all notifications</a>
             </div>
           </div>
         </div>
