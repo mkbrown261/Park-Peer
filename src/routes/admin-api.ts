@@ -955,3 +955,69 @@ adminApiRoutes.get('/stats', async (c: any) => {
     return c.json({ error: 'Failed to fetch stats', detail: e.message }, 500)
   }
 })
+
+// ════════════════════════════════════════════════════════════════════════════
+// ADMIN NOTIFICATION ENDPOINTS  (auth: __pp_admin cookie / Bearer token)
+// ════════════════════════════════════════════════════════════════════════════
+
+// GET /api/admin/notifications
+adminApiRoutes.get('/notifications', async (c: any) => {
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'DB unavailable' }, 503)
+
+  const limit  = Math.min(parseInt(c.req.query('limit')  || '30'), 100)
+  const offset = parseInt(c.req.query('offset') || '0')
+
+  try {
+    const rows = await db.prepare(`
+      SELECT id, type, title, message, related_entity, read_status, created_at
+      FROM   notifications
+      WHERE  user_role = 'admin' AND delivery_inapp = 1
+      ORDER  BY created_at DESC
+      LIMIT  ? OFFSET ?
+    `).bind(limit, offset).all<any>()
+
+    const unread = await db.prepare(
+      `SELECT COUNT(*) AS n FROM notifications WHERE user_role = 'admin' AND read_status = 0 AND delivery_inapp = 1`
+    ).first<{ n: number }>()
+
+    const total = await db.prepare(
+      `SELECT COUNT(*) AS n FROM notifications WHERE user_role = 'admin' AND delivery_inapp = 1`
+    ).first<{ n: number }>()
+
+    return c.json({
+      notifications: (rows.results || []).map((r: any) => ({
+        ...r,
+        related_entity: r.related_entity ? (() => { try { return JSON.parse(r.related_entity) } catch { return null } })() : null,
+      })),
+      unread_count: unread?.n ?? 0,
+      total:        total?.n  ?? 0,
+    })
+  } catch (e: any) {
+    return c.json({ error: 'Failed to fetch notifications', detail: e.message }, 500)
+  }
+})
+
+// PATCH /api/admin/notifications/read  — mark one (body:{id}) or all as read
+adminApiRoutes.patch('/notifications/read', async (c: any) => {
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'DB unavailable' }, 503)
+
+  let body: any = {}
+  try { body = await c.req.json() } catch {}
+
+  try {
+    if (body.id) {
+      await db.prepare(
+        `UPDATE notifications SET read_status = 1 WHERE id = ? AND user_role = 'admin'`
+      ).bind(body.id).run()
+    } else {
+      await db.prepare(
+        `UPDATE notifications SET read_status = 1 WHERE user_role = 'admin' AND read_status = 0`
+      ).run()
+    }
+    return c.json({ success: true })
+  } catch (e: any) {
+    return c.json({ error: 'Failed to update', detail: e.message }, 500)
+  }
+})

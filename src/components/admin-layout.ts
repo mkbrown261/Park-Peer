@@ -250,8 +250,8 @@ export const AdminLayout = (title: string, content: string) => `<!DOCTYPE html>
     async function loadAdminNotifs() {
       if (!adminNotifList) return
       try {
-        const res  = await fetch('/api/notifications?limit=15')
-        if (!res.ok) { adminNotifList.innerHTML = '<div class="p-4 text-center text-gray-500 text-sm">Unable to load</div>'; return }
+        const res  = await fetch('/api/admin/notifications?limit=15')
+        if (!res.ok) { adminNotifList.innerHTML = '<div class="p-4 text-center text-gray-500 text-sm">Unable to load (' + res.status + ')</div>'; return }
         const data = await res.json()
 
         if (adminNotifBadge) {
@@ -292,7 +292,7 @@ export const AdminLayout = (title: string, content: string) => `<!DOCTYPE html>
           el.addEventListener('click', async () => {
             const id   = el.getAttribute('data-id')
             const link = el.getAttribute('data-link')
-            await fetch('/api/notifications/read', {
+            await fetch('/api/admin/notifications/read', {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ id: Number(id) }),
@@ -317,7 +317,7 @@ export const AdminLayout = (title: string, content: string) => `<!DOCTYPE html>
     if (adminMarkAllBtn) {
       adminMarkAllBtn.addEventListener('click', async e => {
         e.stopPropagation()
-        await fetch('/api/notifications/read', { method:'PATCH', headers:{'Content-Type':'application/json'}, body:'{}' }).catch(()=>{})
+        await fetch('/api/admin/notifications/read', { method:'PATCH', headers:{'Content-Type':'application/json'}, body:'{}' }).catch(()=>{})
         if (adminNotifBadge) { adminNotifBadge.classList.add('hidden'); adminNotifBadge.textContent = '' }
         adminNotifList && adminNotifList.querySelectorAll('.admin-notif-item').forEach(el => {
           el.classList.remove('bg-white/3')
@@ -330,7 +330,7 @@ export const AdminLayout = (title: string, content: string) => `<!DOCTYPE html>
     // Poll badge every 60s
     async function pollAdminBadge() {
       try {
-        const res  = await fetch('/api/notifications?limit=1')
+        const res  = await fetch('/api/admin/notifications?limit=1')
         if (!res.ok) return
         const data = await res.json()
         if (adminNotifBadge) {
