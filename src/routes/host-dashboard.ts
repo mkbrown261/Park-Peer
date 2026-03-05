@@ -3,6 +3,7 @@ import { Layout } from '../components/layout'
 import { requireUserAuth, verifyUserToken } from '../middleware/security'
 import { recalculateTier, getTierDef, getNextTierGaps } from '../services/tiers'
 import { renderTierCard } from '../components/tier-card'
+import { CURRENT_VERSIONS } from './agreements'
 
 type Bindings = { DB: D1Database; USER_TOKEN_SECRET: string }
 
@@ -41,12 +42,18 @@ hostDashboard.get('/', async (c) => {
 
   let hostName = ''
   let tierCardHTML = ''
+  // Agreement state
+  let hostAgreementVersion: string | null = null
+  let agreementReacceptRequired = false
+  const currentAgreementVersion = CURRENT_VERSIONS.host_agreement
 
   if (db && userId) {
     try {
       // Fetch host's display name
-      const nameRow = await db.prepare('SELECT full_name FROM users WHERE id = ?').bind(userId).first<{full_name: string}>()
+      const nameRow = await db.prepare('SELECT full_name, host_agreement_version, agreement_reaccept_required FROM users WHERE id = ?').bind(userId).first<{full_name: string; host_agreement_version: string | null; agreement_reaccept_required: number}>()
       hostName = nameRow?.full_name || ''
+      hostAgreementVersion = nameRow?.host_agreement_version || null
+      agreementReacceptRequired = !!(nameRow?.agreement_reaccept_required)
 
       // ── Tier data ─────────────────────────────────────────────────────────
       try {
@@ -477,6 +484,30 @@ hostDashboard.get('/', async (c) => {
             </ul>
           </div>
 
+          <!-- Host Agreement Status Card -->
+          <div class="bg-charcoal-100 border ${hostAgreementVersion === currentAgreementVersion ? 'border-green-500/20' : 'border-yellow-500/30 ring-1 ring-yellow-500/20'} rounded-2xl p-4">
+            <h4 class="text-gray-300 font-semibold text-sm mb-2 flex items-center gap-2">
+              <i class="fas fa-file-signature ${hostAgreementVersion === currentAgreementVersion ? 'text-green-400' : 'text-yellow-400'}"></i>
+              Host Agreement
+              ${hostAgreementVersion === currentAgreementVersion
+                ? `<span class="ml-auto text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded-full">v${currentAgreementVersion} Accepted</span>`
+                : `<span class="ml-auto text-xs bg-yellow-500/20 text-yellow-400 px-2 py-0.5 rounded-full animate-pulse">Action Required</span>`
+              }
+            </h4>
+            ${hostAgreementVersion === currentAgreementVersion
+              ? `<p class="text-gray-500 text-xs mb-3">You've accepted the current Host Agreement. Required before creating listings.</p>
+                 <a href="/legal/host-agreement" target="_blank"
+                   class="text-indigo-400 text-xs hover:text-indigo-300 transition-colors flex items-center gap-1">
+                   <i class="fas fa-external-link-alt text-xs"></i> View Full Agreement
+                 </a>`
+              : `<p class="text-yellow-300/80 text-xs mb-3">You must accept the current Host Agreement (v${currentAgreementVersion}) to create or manage listings.</p>
+                 <button onclick="openAgreementModal()"
+                   class="w-full py-2.5 bg-yellow-500/20 border border-yellow-500/40 hover:bg-yellow-500/30 text-yellow-300 rounded-xl text-sm font-semibold transition-colors">
+                   <i class="fas fa-signature mr-2 text-xs"></i>Review & Accept Agreement
+                 </button>`
+            }
+          </div>
+
           <!-- Danger Zone -->
           <div class="bg-charcoal-100 border border-red-500/10 rounded-2xl p-4">
             <h4 class="text-gray-400 font-semibold text-sm mb-2 flex items-center gap-2">
@@ -853,6 +884,15 @@ hostDashboard.get('/', async (c) => {
       if (!zip) { showListingError('ZIP code is required.'); return; }
       if (!rateH && !rateD && !rateM) { showListingError('Please set at least one rate (hourly, daily, or monthly).'); return; }
 
+      // ── Agreement gate: if host hasn't accepted, close listing modal and open agreement modal
+      const agreedVersion = ${JSON.stringify(hostAgreementVersion)};
+      const requiredVersion = ${JSON.stringify(currentAgreementVersion)};
+      if (agreedVersion !== requiredVersion) {
+        hideAddListing();
+        setTimeout(() => openAgreementModal(), 100);
+        return;
+      }
+
       // Get CSRF token from the __pp_csrf cookie (set as non-HttpOnly after login/OAuth)
       const csrfToken = document.cookie.split('; ').find(r => r.startsWith('__pp_csrf='))?.split('=')[1] || '';
 
@@ -889,8 +929,14 @@ hostDashboard.get('/', async (c) => {
         }
 
         if (res.status === 403) {
-          // CSRF mismatch or wrong role
+          // CSRF mismatch, wrong role, or agreement not accepted
           const msg = data.error || 'Access denied.';
+          if (data.agreement_required) {
+            // Close listing modal, open agreement modal
+            hideAddListing();
+            setTimeout(() => openAgreementModal(), 100);
+            return;
+          }
           if (msg.toLowerCase().includes('csrf')) {
             showListingError('Security token expired. Please refresh the page and try again.');
           } else {
@@ -1001,9 +1047,100 @@ hostDashboard.get('/', async (c) => {
       if (e.target === document.getElementById('manage-listing-modal')) hideManageModal();
     }
 
+    // ── Host Agreement Modal ─────────────────────────────────────────────────
+    let _agreementScrolled = false;
+
+    function openAgreementModal() {
+      _agreementScrolled = false;
+      document.getElementById('agreement-modal').classList.remove('hidden');
+      document.body.style.overflow = 'hidden';
+      const sa = document.getElementById('agreement-scroll-area');
+      if (sa) sa.scrollTop = 0;
+      const cb = document.getElementById('agreement-accept-check');
+      if (cb) cb.checked = false;
+      updateAgreementSubmit();
+      document.getElementById('agreement-error').classList.add('hidden');
+    }
+
+    function closeAgreementModal(e) {
+      if (e && e.target !== document.getElementById('agreement-modal')) return;
+      document.getElementById('agreement-modal').classList.add('hidden');
+      document.body.style.overflow = '';
+    }
+
+    function onAgreementScroll(el) {
+      const threshold = el.scrollHeight - el.clientHeight - 80;
+      if (el.scrollTop >= threshold && !_agreementScrolled) {
+        _agreementScrolled = true;
+        const label = document.getElementById('agreement-checkbox-label');
+        if (label) label.classList.remove('opacity-50', 'pointer-events-none');
+        const hint = document.getElementById('agreement-scroll-hint');
+        if (hint) hint.classList.add('hidden');
+      }
+    }
+
+    function updateAgreementSubmit() {
+      const cb  = document.getElementById('agreement-accept-check');
+      const btn = document.getElementById('agreement-submit-btn');
+      if (!cb || !btn) return;
+      if (cb.checked && _agreementScrolled) {
+        btn.disabled = false;
+        btn.className = 'px-6 py-3 btn-primary text-white rounded-xl font-semibold text-sm transition-all';
+        btn.style.flex = '2';
+      } else {
+        btn.disabled = true;
+        btn.className = 'px-6 py-3 bg-indigo-500/30 text-indigo-300 rounded-xl font-semibold text-sm cursor-not-allowed transition-all';
+        btn.style.flex = '2';
+      }
+    }
+
+    async function submitAgreementAcceptance() {
+      const cb = document.getElementById('agreement-accept-check');
+      const btn = document.getElementById('agreement-submit-btn');
+      const err = document.getElementById('agreement-error');
+      const errMsg = document.getElementById('agreement-error-msg');
+      if (!cb?.checked || !_agreementScrolled) {
+        err.classList.remove('hidden');
+        errMsg.textContent = 'Please scroll through the full agreement and check the acceptance box.';
+        return;
+      }
+      err.classList.add('hidden');
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Saving…';
+      try {
+        const res = await fetch('/api/agreements/accept', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
+          credentials: 'same-origin',
+          body: JSON.stringify({ document_type: 'host_agreement', version: '${currentAgreementVersion}', source: 'host_dashboard' }),
+        });
+        if (res.ok) {
+          document.getElementById('agreement-modal').classList.add('hidden');
+          document.body.style.overflow = '';
+          // Show toast and reload to refresh the agreement card state
+          const t = document.createElement('div');
+          t.className = 'fixed bottom-6 right-6 z-[100] bg-green-500 text-white px-5 py-3 rounded-2xl shadow-xl flex items-center gap-2 text-sm font-semibold';
+          t.innerHTML = '<i class="fas fa-check-circle"></i> Host Agreement accepted! Refreshing…';
+          document.body.appendChild(t);
+          setTimeout(() => location.reload(), 1800);
+        } else {
+          const data = await res.json().catch(() => ({}));
+          err.classList.remove('hidden');
+          errMsg.textContent = data.error || 'Failed to save acceptance. Please try again.';
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fas fa-signature mr-2"></i>Accept Agreement';
+        }
+      } catch (e) {
+        err.classList.remove('hidden');
+        errMsg.textContent = 'Network error. Please check your connection and try again.';
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-signature mr-2"></i>Accept Agreement';
+      }
+    }
+
     function getCsrfToken() {
       // Read from cookie __pp_csrf (non-httpOnly, written by server)
-      const m = document.cookie.match(/(?:^|;\\s*)__pp_csrf=([^;]+)/);
+      const m = document.cookie.match(/(?:^|;\s*)__pp_csrf=([^;]+)/);
       if (m) return decodeURIComponent(m[1]).split('.').slice(0,3).join('.');
       return sessionStorage.getItem('csrf_token') || '';
     }
@@ -1177,7 +1314,145 @@ hostDashboard.get('/', async (c) => {
         btn.innerHTML = '<i class="fas fa-trash-alt mr-2"></i>Yes, Delete My Account';
       }
     }
+
+    // Auto-open agreement modal if host hasn't accepted current version
+    (function checkAgreement() {
+      const accepted = ${JSON.stringify(hostAgreementVersion)};
+      const required = ${JSON.stringify(currentAgreementVersion)};
+      if (accepted !== required) {
+        // Show after brief delay so page renders first
+        setTimeout(() => openAgreementModal(), 800);
+      }
+    })();
   </script>
+
+  <!-- Host Agreement Acceptance Modal -->
+  <div id="agreement-modal" class="hidden fixed inset-0 bg-black/90 z-[60] flex items-start justify-center p-4 overflow-y-auto"
+       onclick="closeAgreementModal(event)">
+    <div class="bg-charcoal-100 rounded-3xl w-full max-w-3xl border border-yellow-500/30 overflow-hidden my-8"
+         onclick="event.stopPropagation()">
+
+      <!-- Header -->
+      <div class="flex items-center justify-between p-6 border-b border-white/10 sticky top-0 bg-charcoal-100 z-10">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 bg-yellow-500/10 rounded-full flex items-center justify-center">
+            <i class="fas fa-file-signature text-yellow-400"></i>
+          </div>
+          <div>
+            <h3 class="font-bold text-white">Host Agreement</h3>
+            <p class="text-yellow-400 text-xs">Version ${currentAgreementVersion} — Acceptance Required</p>
+          </div>
+        </div>
+        <button onclick="closeAgreementModal()" class="w-8 h-8 bg-charcoal-200 rounded-full flex items-center justify-center text-gray-400 hover:text-white">
+          <i class="fas fa-times text-sm"></i>
+        </button>
+      </div>
+
+      <!-- Scrollable Agreement Content -->
+      <div id="agreement-scroll-area" class="p-6 max-h-[55vh] overflow-y-auto text-sm leading-relaxed"
+           onscroll="onAgreementScroll(this)">
+        <div class="prose-agreement">
+          <!-- Intro banner -->
+          <div class="bg-yellow-500/10 border border-yellow-500/20 rounded-xl p-4 mb-6">
+            <p class="text-yellow-300 text-sm font-semibold flex items-center gap-2">
+              <i class="fas fa-info-circle"></i>
+              Please read the full agreement before accepting. Scroll to the bottom to enable the checkbox.
+            </p>
+          </div>
+
+          <h3 class="text-lg font-semibold text-white mt-0 mb-3">1. ParkPeer's Role as Technology Intermediary</h3>
+          <p class="text-gray-300 mb-3">ParkPeer operates exclusively as a technology intermediary and marketplace platform. We connect Hosts who wish to rent parking spaces with Drivers who seek parking. ParkPeer is not a parking operator, landlord, insurer, or transportation company. We do not own, control, offer, or manage any parking space listed on the platform. All liability arising from the physical condition, safety, or legality of a listed space rests solely with the Host.</p>
+
+          <h3 class="text-lg font-semibold text-white mt-5 mb-3">2. Host Eligibility and Responsibilities</h3>
+          <ul class="list-disc list-inside text-gray-300 mb-3 space-y-1 text-xs">
+            <li>You must be at least 18 years old and legally authorized to list the space.</li>
+            <li>You represent and warrant that you have all necessary rights, licenses, and permissions to rent the space (including landlord or HOA consent where required).</li>
+            <li>You are solely responsible for ensuring the space is safe, accessible, and compliant with local zoning ordinances.</li>
+            <li>You must accurately represent the space, including dimensions, amenities, access instructions, and restrictions.</li>
+            <li>You must respond to booking requests within 24 hours unless Instant Book is enabled.</li>
+            <li>You may not discriminate against Drivers on the basis of any protected class.</li>
+          </ul>
+
+          <h3 class="text-lg font-semibold text-white mt-5 mb-3">3. Fees and Payouts</h3>
+          <p class="text-gray-300 mb-3">ParkPeer charges a platform service fee of <strong class="text-white">15%</strong> of the booking subtotal. You will receive the remaining 85% ("Host Payout") after each completed booking. Payouts are processed via Stripe Connect. You are solely responsible for any taxes owed on your rental income.</p>
+
+          <h3 class="text-lg font-semibold text-white mt-5 mb-3">4. Cancellation Policy</h3>
+          <div class="overflow-x-auto mb-3">
+            <table class="w-full text-xs text-gray-300 border border-white/10 rounded-xl">
+              <thead><tr class="bg-white/5">
+                <th class="px-3 py-2 text-left font-semibold text-white">Timing</th>
+                <th class="px-3 py-2 text-left font-semibold text-white">Driver Refund</th>
+                <th class="px-3 py-2 text-left font-semibold text-white">Host Receives</th>
+              </tr></thead>
+              <tbody>
+                <tr class="border-t border-white/5"><td class="px-3 py-2">&gt; 24 hours before</td><td class="px-3 py-2 text-green-400">100% refund</td><td class="px-3 py-2 text-gray-400">No payout</td></tr>
+                <tr class="border-t border-white/5 bg-white/2"><td class="px-3 py-2">2 – 24 hours before</td><td class="px-3 py-2 text-yellow-400">50% refund</td><td class="px-3 py-2 text-white">50% of subtotal</td></tr>
+                <tr class="border-t border-white/5"><td class="px-3 py-2">&lt; 2 hours before</td><td class="px-3 py-2 text-red-400">No refund</td><td class="px-3 py-2 text-white">Full payout</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3 class="text-lg font-semibold text-white mt-5 mb-3">5. Host Protection Program</h3>
+          <p class="text-gray-300 mb-3">ParkPeer offers basic Host Protection for documented damages caused by Drivers during a booking. Claims must be submitted within 72 hours with photographic evidence. ParkPeer's determination is final. Protection does not cover pre-existing conditions, normal wear and tear, or Host negligence.</p>
+
+          <h3 class="text-lg font-semibold text-white mt-5 mb-3">6. Limitation of Liability & Indemnification</h3>
+          <p class="text-gray-300 mb-3">ParkPeer's aggregate liability shall not exceed the total platform fees earned from that Host in the three months preceding the claim. You agree to indemnify and hold harmless ParkPeer from claims arising from your listings, your spaces, or your violation of this Agreement.</p>
+
+          <h3 class="text-lg font-semibold text-white mt-5 mb-3">7. Governing Law & Dispute Resolution</h3>
+          <p class="text-gray-300 mb-3">This Agreement is governed by the laws of the State of Delaware. Disputes are resolved by binding individual arbitration. Class action waivers apply.</p>
+
+          <h3 class="text-lg font-semibold text-white mt-5 mb-3">8. Agreement Updates</h3>
+          <p class="text-gray-300 mb-3">ParkPeer may update this Agreement at any time. Hosts will be notified of material changes and required to re-accept before their next listing action.</p>
+
+          <p class="text-gray-500 text-xs mt-6 border-t border-white/10 pt-4">
+            <a href="/legal/host-agreement" target="_blank" class="text-indigo-400 hover:text-indigo-300 underline">
+              <i class="fas fa-external-link-alt text-xs mr-1"></i>View full agreement in new tab
+            </a>
+            &nbsp;·&nbsp; For questions: <a href="mailto:legal@parkpeer.com" class="text-indigo-400 underline">legal@parkpeer.com</a>
+            &nbsp;·&nbsp; © 2026 ParkPeer, Inc.
+          </p>
+        </div>
+      </div>
+
+      <!-- Error banner -->
+      <div id="agreement-error" class="hidden mx-6 mt-0 mb-2 p-3 bg-red-500/10 border border-red-500/20 rounded-xl flex items-center gap-2">
+        <i class="fas fa-exclamation-circle text-red-400 text-sm"></i>
+        <p id="agreement-error-msg" class="text-red-400 text-sm">Please scroll through and check the box to accept.</p>
+      </div>
+
+      <!-- Acceptance checkbox + footer -->
+      <div class="p-6 border-t border-white/10">
+        <label id="agreement-checkbox-label" class="flex items-start gap-3 cursor-pointer select-none group opacity-50 pointer-events-none transition-opacity duration-300" id="agreement-accept-label">
+          <input type="checkbox" id="agreement-accept-check"
+            class="mt-0.5 w-5 h-5 accent-indigo-500 rounded cursor-pointer flex-shrink-0"
+            oninput="updateAgreementSubmit()"/>
+          <span class="text-gray-300 text-sm leading-relaxed">
+            I have read and agree to the
+            <a href="/legal/host-agreement" target="_blank" class="text-indigo-400 hover:text-indigo-300 underline font-semibold">ParkPeer Host Agreement</a>
+            (Version ${currentAgreementVersion}), including the cancellation policy, fee structure,
+            host responsibilities, limitation of liability, and indemnification clauses.
+            I understand this is a legally binding agreement.
+          </span>
+        </label>
+        <p id="agreement-scroll-hint" class="text-yellow-400 text-xs mt-2 flex items-center gap-1">
+          <i class="fas fa-arrow-down text-xs animate-bounce"></i>
+          Scroll to the bottom of the agreement above to enable the checkbox.
+        </p>
+
+        <div class="flex gap-3 mt-4">
+          <button onclick="closeAgreementModal()"
+            class="flex-1 py-3 bg-charcoal-200 text-gray-400 rounded-xl font-semibold text-sm hover:text-white transition-colors">
+            Cancel
+          </button>
+          <button id="agreement-submit-btn" onclick="submitAgreementAcceptance()" disabled
+            class="flex-2 px-6 py-3 bg-indigo-500/30 text-indigo-300 rounded-xl font-semibold text-sm cursor-not-allowed transition-all"
+            style="flex: 2">
+            <i class="fas fa-signature mr-2"></i>Accept Agreement
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- Delete Account Confirmation Modal -->
   <div id="delete-account-modal" class="hidden fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4" onclick="closeDeleteAccountModal(event)">

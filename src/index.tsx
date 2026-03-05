@@ -12,6 +12,7 @@ import { adminPanel } from './routes/admin'
 import { adminAuth } from './routes/admin-auth'
 import { apiRoutes } from './routes/api'
 import { legalPages } from './routes/legal'
+import agreementRoutes from './routes/agreements'
 import { securityHeaders } from './middleware/security'
 
 const app = new Hono()
@@ -50,6 +51,7 @@ app.route('/dashboard', driverDashboard)
 app.route('/host', hostDashboard)
 app.route('/auth', authPages)
 app.route('/legal', legalPages)
+app.route('/api/agreements', agreementRoutes)
 // Admin auth (login/logout) MUST be mounted BEFORE the protected admin panel
 app.route('/admin', adminAuth)
 app.route('/admin', adminPanel)

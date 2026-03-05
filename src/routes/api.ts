@@ -55,6 +55,7 @@ import {
   DRIVER_TIERS,
   HOST_TIERS,
 } from '../services/tiers'
+import { CURRENT_VERSIONS, recordAcceptance, requireAgreement } from './agreements'
 
 type Bindings = {
   DB: D1Database
@@ -640,6 +641,17 @@ apiRoutes.post('/payments/confirm', async (c) => {
     return c.json({ error: 'Missing payment_intent_id' }, 400)
   }
 
+  // ── Cancellation Policy acknowledgment enforcement ──────────────────────
+  // Drivers must explicitly acknowledge the cancellation policy at checkout.
+  // body.cancellation_acknowledged = true (sent by frontend checkbox)
+  if (!body.cancellation_acknowledged) {
+    return c.json({
+      error: 'You must acknowledge the cancellation policy before confirming a booking.',
+      cancellation_ack_required: true,
+      policy_version: CURRENT_VERSIONS.cancellation_policy,
+    }, 400)
+  }
+
   try {
     // Verify payment succeeded with Stripe
     const pi = await getPaymentIntent(env as any, payment_intent_id)
@@ -719,7 +731,6 @@ apiRoutes.post('/payments/confirm', async (c) => {
 })
 
 // ════════════════════════════════════════════════════════════════════════════
-// STRIPE — Refund
 // POST /api/payments/refund
 // Body: { payment_intent_id, booking_id, amount_cents?, reason, requester_email }
 // ════════════════════════════════════════════════════════════════════════════
@@ -1040,6 +1051,29 @@ apiRoutes.post('/listings', requireUserAuth(), async (c) => {
       if (userRole !== 'HOST' && userRole !== 'BOTH' && userRole !== 'ADMIN') {
         return c.json({ error: 'Only hosts can create listings. Please switch to a host account.' }, 403)
       }
+    }
+  }
+
+  // ── Host Agreement enforcement ──────────────────────────────────────────
+  // Host must have accepted the current version before creating any listing.
+  // Verify via the denormalized users column (no extra JOIN needed).
+  if (userRole !== 'ADMIN') {
+    try {
+      const hostUser = await db.prepare(
+        'SELECT host_agreement_version FROM users WHERE id = ?'
+      ).bind(session.userId).first<{ host_agreement_version: string | null }>()
+      if (hostUser?.host_agreement_version !== CURRENT_VERSIONS.host_agreement) {
+        return c.json({
+          error: 'You must accept the current Host Agreement before creating a listing.',
+          agreement_required: true,
+          document_type: 'host_agreement',
+          required_version: CURRENT_VERSIONS.host_agreement,
+          accepted_version: hostUser?.host_agreement_version || null,
+        }, 403)
+      }
+    } catch (e: any) {
+      console.warn('[POST /api/listings] Agreement check failed (non-fatal):', e.message)
+      // Don't block on DB error — the frontend also guards this
     }
   }
 
@@ -1516,6 +1550,10 @@ apiRoutes.post('/bookings', requireUserAuth(), async (c) => {
   const vehicle_plate = validateInput(body.vehicle_plate, { maxLength: 20 })
   // Always use authenticated user as driver_id — prevents IDOR
   const driver_id = session?.userId ?? (body.driver_id ? parseInt(body.driver_id) : null)
+  // Cancellation policy acknowledgment
+  const cancelAck        = body.cancellation_acknowledged === true || body.cancellation_acknowledged === 1
+  const cancelPolicyVer  = cancelAck ? (body.cancellation_policy_version || CURRENT_VERSIONS.cancellation_policy) : null
+  const cancelAckIp      = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || null
 
   // ── Race-condition / overlap check (D1) ────────────────────────────────
   if (db) {
@@ -1554,13 +1592,19 @@ apiRoutes.post('/bookings', requireUserAuth(), async (c) => {
         INSERT INTO bookings
           (listing_id, driver_id, host_id, start_time, end_time,
            duration_hours, status, subtotal, platform_fee, host_payout,
-           total_charged, vehicle_plate, vehicle_description, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+           total_charged, vehicle_plate, vehicle_description,
+           cancellation_acknowledged, cancellation_ack_version, cancellation_ack_at, cancellation_ack_ip,
+           created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?,
+                ?, ?, CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END, ?,
+                datetime('now'), datetime('now'))
       `).bind(
         listing_id, driver_id || null, listing.host_id,
         start_datetime, end_datetime, hours,
         base, fee, hostPay, total,
-        vehicle_plate || null, vehicle_plate || null
+        vehicle_plate || null, vehicle_plate || null,
+        cancelAck ? 1 : 0, cancelPolicyVer,
+        cancelAck ? 1 : 0, cancelAckIp
       ).run()
 
       const dbBookingId = insertResult.meta?.last_row_id ?? 0

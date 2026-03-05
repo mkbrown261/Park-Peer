@@ -8,6 +8,7 @@
 
 import { Hono } from 'hono'
 import { Layout } from '../components/layout'
+import { HOST_AGREEMENT_TEXT, CANCELLATION_POLICY_TEXT } from './agreements'
 
 export const legalPages = new Hono()
 
@@ -259,4 +260,35 @@ legalPages.get('/no-bailment', (c) => {
   </div>
   `
   return c.html(Layout('No Bailment Statement — ParkPeer', content))
+})
+
+// ── Host Agreement page ───────────────────────────────────────────────────────
+
+legalPages.get('/host-agreement', (c) => {
+  const content = `
+    <div class="pt-24 pb-16 px-4 max-w-4xl mx-auto">
+      <a href="/host" class="inline-flex items-center gap-2 text-gray-400 hover:text-white text-sm mb-8 transition-colors">
+        <i class="fas fa-arrow-left"></i> Back to Host Dashboard
+      </a>
+      <div class="bg-charcoal-100 rounded-3xl p-8 border border-white/10">
+        ${HOST_AGREEMENT_TEXT}
+      </div>
+    </div>
+  `
+  return c.html(Layout('Host Agreement — ParkPeer', content))
+})
+
+// ── Cancellation Policy page ──────────────────────────────────────────────────
+legalPages.get('/cancellation-policy', (c) => {
+  const content = `
+    <div class="pt-24 pb-16 px-4 max-w-4xl mx-auto">
+      <a href="/dashboard" class="inline-flex items-center gap-2 text-gray-400 hover:text-white text-sm mb-8 transition-colors">
+        <i class="fas fa-arrow-left"></i> Back to Dashboard
+      </a>
+      <div class="bg-charcoal-100 rounded-3xl p-8 border border-white/10">
+        ${CANCELLATION_POLICY_TEXT}
+      </div>
+    </div>
+  `
+  return c.html(Layout('Cancellation Policy — ParkPeer', content))
 })

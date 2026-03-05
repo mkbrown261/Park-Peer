@@ -207,7 +207,37 @@ bookingPage.get('/:id', (c) => {
                 </div>
               </div>
 
-              <!-- Cancellation Policy -->
+              <!-- Cancellation Policy — Full Acknowledgment -->
+              <div class="mt-4 p-4 bg-charcoal-200 border border-white/10 rounded-xl">
+                <div class="flex items-center justify-between mb-3">
+                  <p class="text-white text-xs font-semibold flex items-center gap-2">
+                    <i class="fas fa-calendar-xmark text-green-400"></i>
+                    Cancellation & Refund Policy
+                  </p>
+                  <a href="/legal/cancellation-policy" target="_blank"
+                    class="text-indigo-400 text-xs hover:text-indigo-300 flex items-center gap-1">
+                    <i class="fas fa-external-link-alt text-xs"></i> Full policy
+                  </a>
+                </div>
+                <table class="w-full text-xs text-gray-400 mb-3">
+                  <tbody>
+                    <tr><td class="py-0.5 pr-2">&gt; 24 hrs before</td><td class="text-green-400 font-semibold">Full refund</td></tr>
+                    <tr><td class="py-0.5 pr-2">2 – 24 hrs before</td><td class="text-yellow-400 font-semibold">50% refund</td></tr>
+                    <tr><td class="py-0.5 pr-2">&lt; 2 hrs before</td><td class="text-red-400 font-semibold">No refund</td></tr>
+                  </tbody>
+                </table>
+                <!-- Acknowledgment checkbox — must be checked before Confirm & Pay enables -->
+                <label class="flex items-start gap-2.5 cursor-pointer select-none mt-2" id="cancel-ack-label">
+                  <input type="checkbox" id="cancel-ack-checkbox"
+                    class="mt-0.5 w-4 h-4 accent-indigo-500 rounded cursor-pointer flex-shrink-0"
+                    onchange="updateConfirmBtn()"/>
+                  <span class="text-gray-400 text-xs leading-relaxed">
+                    I understand and agree to the
+                    <a href="/legal/cancellation-policy" target="_blank" class="text-indigo-400 hover:text-indigo-300 underline">ParkPeer Cancellation Policy</a>.
+                    I acknowledge the refund schedule above applies to this booking.
+                  </span>
+                </label>
+              </div>
               <div class="mt-4 p-3 bg-charcoal-200 rounded-xl flex gap-2.5">
                 <i class="fas fa-calendar-xmark text-green-400 mt-0.5 flex-shrink-0"></i>
                 <div>
@@ -362,11 +392,27 @@ bookingPage.get('/:id', (c) => {
       document.getElementById('fee-amount').textContent   = '$' + fee.toFixed(2);
       document.getElementById('total-amount').textContent = '$' + total.toFixed(2);
       document.getElementById('confirm-label').textContent= 'Confirm & Pay $' + total.toFixed(2);
-      document.getElementById('confirm-btn').disabled = false;
+      // Only enable confirm button if cancellation policy is acknowledged
+      const ackCheck = document.getElementById('cancel-ack-checkbox');
+      document.getElementById('confirm-btn').disabled = !(ackCheck && ackCheck.checked);
     }
 
     function updateConfirmButton() {
       updatePriceBreakdown();
+    }
+
+    function updateConfirmBtn() {
+      // Called when cancellation ack checkbox changes
+      const ackCheck = document.getElementById('cancel-ack-checkbox');
+      const btn = document.getElementById('confirm-btn');
+      if (ackCheck && btn) {
+        // Re-run price calculation which sets the disabled state based on dates
+        updatePriceBreakdown();
+        // Additionally disable if ack not checked
+        if (!ackCheck.checked) {
+          btn.disabled = true;
+        }
+      }
     }
 
     document.getElementById('booking-arrive').addEventListener('change', () => { updateDurationDisplay(); updatePriceBreakdown(); });
@@ -391,6 +437,14 @@ bookingPage.get('/:id', (c) => {
         return;
       }
 
+      // Cancellation Policy acknowledgment gate
+      const ackCheck = document.getElementById('cancel-ack-checkbox');
+      if (!ackCheck || !ackCheck.checked) {
+        document.getElementById('cancel-ack-label')?.classList.add('ring', 'ring-red-500/40', 'rounded-xl', 'p-2');
+        alert('Please acknowledge the Cancellation Policy to continue.');
+        return;
+      }
+
       const arrive = document.getElementById('booking-arrive').value;
       const depart = document.getElementById('booking-depart').value;
       if (!arrive || !depart) { alert('Please select arrival and departure times'); return; }
@@ -408,6 +462,8 @@ bookingPage.get('/:id', (c) => {
             start_datetime: arrive,
             end_datetime:   depart,
             vehicle_plate:  document.getElementById('vehicle-plate').value.trim() || null,
+            cancellation_acknowledged: true,
+            cancellation_policy_version: '1.0',
           })
         });
         const data = await res.json();

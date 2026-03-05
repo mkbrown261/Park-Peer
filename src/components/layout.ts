@@ -950,14 +950,23 @@ export const Footer = () => `
       <div>
         <h4 class="font-semibold text-white mb-4 text-sm uppercase tracking-wider">For Hosts</h4>
         <ul class="space-y-2.5">
-          ${['List Your Space','Host Dashboard','Earnings Calculator','Host Protection','Community'].map(l => `<li><a href="/host" class="text-gray-400 hover:text-white text-sm transition-colors">${l}</a></li>`).join('')}
+          <li><a href="/host" class="text-gray-400 hover:text-white text-sm transition-colors">List Your Space</a></li>
+          <li><a href="/host" class="text-gray-400 hover:text-white text-sm transition-colors">Host Dashboard</a></li>
+          <li><a href="/legal/host-agreement" class="text-gray-400 hover:text-white text-sm transition-colors">Host Agreement</a></li>
+          <li><a href="/legal/cancellation-policy" class="text-gray-400 hover:text-white text-sm transition-colors">Cancellation Policy</a></li>
+          <li><a href="/host" class="text-gray-400 hover:text-white text-sm transition-colors">Host Protection</a></li>
         </ul>
       </div>
       <!-- Company -->
       <div>
         <h4 class="font-semibold text-white mb-4 text-sm uppercase tracking-wider">Company</h4>
         <ul class="space-y-2.5">
-          ${['About Us','Careers','Press','Blog','Contact','Terms','Privacy','Insurance'].map(l => `<li><a href="#" class="text-gray-400 hover:text-white text-sm transition-colors">${l}</a></li>`).join('')}
+          <li><a href="#" class="text-gray-400 hover:text-white text-sm transition-colors">About Us</a></li>
+          <li><a href="#" class="text-gray-400 hover:text-white text-sm transition-colors">Careers</a></li>
+          <li><a href="/legal/tos" class="text-gray-400 hover:text-white text-sm transition-colors">Terms of Service</a></li>
+          <li><a href="/legal/privacy" class="text-gray-400 hover:text-white text-sm transition-colors">Privacy Policy</a></li>
+          <li><a href="/legal/cancellation-policy" class="text-gray-400 hover:text-white text-sm transition-colors">Cancellation Policy</a></li>
+          <li><a href="mailto:legal@parkpeer.com" class="text-gray-400 hover:text-white text-sm transition-colors">Legal</a></li>
         </ul>
       </div>
     </div>

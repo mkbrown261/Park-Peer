@@ -442,6 +442,30 @@ driverDashboard.get('/', async (c) => {
               Start Hosting →
             </a>
           </div>
+
+          <!-- Legal Links Card -->
+          <div class="bg-charcoal-100 border border-white/5 rounded-2xl p-4">
+            <h4 class="text-gray-400 font-semibold text-xs mb-3 uppercase tracking-wider flex items-center gap-2">
+              <i class="fas fa-scale-balanced text-gray-500 text-xs"></i> Policies & Legal
+            </h4>
+            <ul class="space-y-2">
+              <li>
+                <a href="/legal/cancellation-policy" class="flex items-center gap-2 text-gray-400 hover:text-indigo-400 text-xs transition-colors">
+                  <i class="fas fa-calendar-xmark text-xs w-3.5"></i> Cancellation Policy
+                </a>
+              </li>
+              <li>
+                <a href="/legal/tos" class="flex items-center gap-2 text-gray-400 hover:text-indigo-400 text-xs transition-colors">
+                  <i class="fas fa-file-contract text-xs w-3.5"></i> Terms of Service
+                </a>
+              </li>
+              <li>
+                <a href="/legal/privacy" class="flex items-center gap-2 text-gray-400 hover:text-indigo-400 text-xs transition-colors">
+                  <i class="fas fa-shield-halved text-xs w-3.5"></i> Privacy Policy
+                </a>
+              </li>
+            </ul>
+          </div>
         </div>
       </div>
     </div>
