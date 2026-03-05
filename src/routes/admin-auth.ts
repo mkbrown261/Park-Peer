@@ -91,7 +91,7 @@ function clearAttempts(ip: string) {
   loginAttempts.delete(ip)
 }
 
-// ─── Auth guard middleware ────────────────────────────────────────────────────
+// ─── Auth guard middleware (page routes — redirects to login) ────────────────
 export async function adminAuthMiddleware(c: any, next: any) {
   // Resolve token secret from env (Cloudflare secret) or fall back to dev key
   const tokenSecret: string =
@@ -100,6 +100,18 @@ export async function adminAuthMiddleware(c: any, next: any) {
   const token = getCookie(c, SESSION_COOKIE)
   if (!token || !(await verifyToken(token, tokenSecret))) {
     return c.redirect('/admin/login?reason=auth')
+  }
+  await next()
+}
+
+// ─── Auth guard middleware (API routes — returns JSON 401, never redirects) ──
+export async function adminApiAuthMiddleware(c: any, next: any) {
+  const tokenSecret: string =
+    (c.env?.ADMIN_TOKEN_SECRET as string | undefined) || 'pp-admin-hmac-dev-key-change-in-prod'
+
+  const token = getCookie(c, SESSION_COOKIE)
+  if (!token || !(await verifyToken(token, tokenSecret))) {
+    return c.json({ error: 'Not authenticated', redirect: '/admin/login?reason=auth' }, 401)
   }
   await next()
 }
@@ -410,6 +422,10 @@ adminAuth.post('/login', async (c) => {
     path: '/',
     maxAge: SESSION_DURATION_HOURS * 3600
   })
+
+  // Expire any old cookie that was set with path='/admin' (pre-fix)
+  // This forces browsers to discard the old restricted-path cookie
+  deleteCookie(c, SESSION_COOKIE, { path: '/admin' })
 
   return c.json({ success: true })
 })

@@ -26,7 +26,7 @@
 
 import { Hono } from 'hono'
 import { getCookie } from 'hono/cookie'
-import { adminAuthMiddleware } from './admin-auth'
+import { adminApiAuthMiddleware } from './admin-auth'
 import { verifyPassword } from '../middleware/security'
 
 type Bindings = {
@@ -40,7 +40,7 @@ type Bindings = {
 export const adminApiRoutes = new Hono<{ Bindings: Bindings }>()
 
 // ── All admin API routes require admin session ────────────────────────────────
-adminApiRoutes.use('/*', adminAuthMiddleware)
+adminApiRoutes.use('/*', adminApiAuthMiddleware)
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 

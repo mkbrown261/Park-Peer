@@ -1310,7 +1310,8 @@ adminPanel.get('/user-control', async (c: any) => {
       if (status) params.set('status', status)
 
       try {
-        const r = await fetch('/api/admin/users?' + params.toString())
+        const r = await fetch('/api/admin/users?' + params.toString(), { credentials: 'same-origin' })
+        if (r.status === 401) { window.location.href = '/admin/login?reason=auth'; return }
         if (!r.ok) throw new Error('Status ' + r.status)
         const d = await r.json()
         ucTotal = d.total
@@ -1416,6 +1417,7 @@ adminPanel.get('/user-control', async (c: any) => {
       try {
         const r = await fetch('/api/admin/users/' + currentSuspendUserId + '/suspend', {
           method: 'POST',
+          credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: currentSuspendAction, reason })
         })
@@ -1468,7 +1470,8 @@ adminPanel.get('/user-control', async (c: any) => {
 
     async function loadDeletePreview(userId) {
       try {
-        const r = await fetch('/api/admin/users/' + userId)
+        const r = await fetch('/api/admin/users/' + userId, { credentials: 'same-origin' })
+        if (!r.ok) return
         const d = await r.json()
         if (d.balance && d.balance.total > 0) {
           const badge = document.getElementById('del-balance-badge')
@@ -1518,9 +1521,11 @@ adminPanel.get('/user-control', async (c: any) => {
       try {
         const vr = await fetch('/api/admin/verify-password', {
           method: 'POST',
+          credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ password })
         })
+        if (vr.status === 401) { window.location.href = '/admin/login?reason=auth'; return }
         const vd = await vr.json()
         if (!vd.verified) {
           document.getElementById('del-pw-error-text').textContent = vd.error || 'Incorrect password'
@@ -1541,9 +1546,11 @@ adminPanel.get('/user-control', async (c: any) => {
       try {
         const dr = await fetch('/api/admin/users/' + currentDeleteUserId + '/delete', {
           method: 'POST',
+          credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ reason, force })
         })
+        if (dr.status === 401) { window.location.href = '/admin/login?reason=auth'; return }
         const dd = await dr.json()
 
         if (dd.success) {
@@ -1576,13 +1583,15 @@ adminPanel.get('/user-control', async (c: any) => {
 
     // ── Detail Panel ───────────────────────────────────────────────────────
     async function openDetailPanel(userId) {
-      document.getElementById('detail-panel').classList.remove('hidden', 'translate-x-full')
+      document.getElementById('detail-panel').classList.remove('hidden')
+      document.getElementById('detail-panel').classList.remove('translate-x-full')
       document.getElementById('detail-overlay').classList.remove('hidden')
       document.getElementById('detail-content').innerHTML =
         '<div class="text-center py-10 text-gray-600"><i class="fas fa-spinner fa-spin text-2xl"></i></div>'
 
       try {
-        const r = await fetch('/api/admin/users/' + userId)
+        const r = await fetch('/api/admin/users/' + userId, { credentials: 'same-origin' })
+        if (r.status === 401) { window.location.href = '/admin/login?reason=auth'; return }
         const d = await r.json()
         renderDetailPanel(d)
       } catch(e) {
