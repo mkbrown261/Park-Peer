@@ -44,6 +44,17 @@ import {
   encryptField,
   decryptField,
 } from '../middleware/security'
+import {
+  recalculateTier,
+  getTierDef,
+  getTierOrder,
+  getNextTierGaps,
+  progressToNext,
+  fetchMetrics,
+  isMaxTier,
+  DRIVER_TIERS,
+  HOST_TIERS,
+} from '../services/tiers'
 
 type Bindings = {
   DB: D1Database
@@ -2684,4 +2695,180 @@ apiRoutes.post('/auth/apple/callback', async (c) => {
     console.error('[OAuth/Apple] Unexpected error:', e.message)
     return c.redirect('/auth/login?error=apple_unexpected')
   }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// TIER & REWARD SYSTEM  —  /api/tiers/*
+// ════════════════════════════════════════════════════════════════════════════
+
+// GET /api/tiers/me  — full tier state + metrics + gaps for authenticated user
+apiRoutes.get('/tiers/me', requireUserAuth(), async (c) => {
+  const db      = c.env?.DB
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+  const session = c.get('user') as any
+  const userId  = session?.userId
+  const rawRole = (session?.role || 'driver').toUpperCase()
+  const role: 'DRIVER' | 'HOST' = (rawRole === 'HOST' || rawRole === 'BOTH') ? 'HOST' : 'DRIVER'
+  // For BOTH role, return both driver and host states
+  const roles: Array<'DRIVER' | 'HOST'> = rawRole === 'BOTH' ? ['DRIVER', 'HOST'] : [role]
+
+  try {
+    const results: any = {}
+    for (const r of roles) {
+      let state: any = await db.prepare(
+        'SELECT * FROM user_tier_state WHERE user_id = ? AND role = ?'
+      ).bind(userId, r).first()
+      if (!state) {
+        // Auto-init on first fetch
+        await recalculateTier(db, userId, r, 'init')
+        state = await db.prepare(
+          'SELECT * FROM user_tier_state WHERE user_id = ? AND role = ?'
+        ).bind(userId, r).first()
+      }
+      const tierDef = getTierDef(r, state.current_tier)
+      const tierOrder = getTierOrder(r)
+      const currentIdx = tierOrder.indexOf(state.current_tier)
+      const nextTierId = currentIdx < tierOrder.length - 1 ? tierOrder[currentIdx + 1] : null
+      const nextTierDef = nextTierId ? getTierDef(r, nextTierId) : null
+      const metrics = {
+        r12_completed:      state.r12_completed_bookings,
+        r12_spend:          state.r12_total_spend,
+        r12_revenue:        state.r12_total_revenue,
+        r12_avg_rating:     state.r12_avg_rating,
+        r12_cancel_rate:    state.r12_cancellation_rate,
+        r12_response_rate:  state.r12_response_rate,
+        r12_avg_response_hrs: state.r12_avg_response_hours,
+        lifetime_completed: state.lifetime_completed,
+        lifetime_spend:     state.lifetime_spend,
+        lifetime_revenue:   state.lifetime_revenue,
+      }
+      const gaps = getNextTierGaps(metrics, state.current_tier, r)
+
+      // Unread notifications
+      const notifs = await db.prepare(`
+        SELECT * FROM tier_notifications WHERE user_id = ? AND read = 0
+        ORDER BY created_at DESC LIMIT 5
+      `).bind(userId).all()
+
+      results[r.toLowerCase()] = {
+        role:            r,
+        current_tier:    state.current_tier,
+        tier_name:       tierDef.name,
+        tier_tagline:    tierDef.tagline,
+        tier_since:      state.tier_since,
+        tier_color:      tierDef.color,
+        tier_gradient:   tierDef.gradient,
+        tier_icon:       tierDef.icon,
+        tier_rank:       tierDef.rank,
+        progress_to_next: state.progress_to_next,
+        is_max_tier:     isMaxTier(state.current_tier, r),
+        next_tier:       nextTierId ? { id: nextTierId, name: nextTierDef?.name, icon: nextTierDef?.icon } : null,
+        benefits:        tierDef.benefits,
+        metrics,
+        gaps,
+        loyalty_credits: state.loyalty_credits,
+        is_protected:    !!state.is_protected,
+        grace_period_ends: state.grace_period_ends,
+        notifications:   notifs.results || [],
+        last_recalculated: state.last_recalculated,
+        consecutive_months: state.consecutive_months,
+      }
+    }
+    return c.json({ success: true, ...results })
+  } catch(e: any) {
+    console.error('[GET /api/tiers/me]', e.message)
+    return c.json({ error: 'Failed to fetch tier data' }, 500)
+  }
+})
+
+// POST /api/tiers/recalculate  — manually trigger a recalculation (rate-limited)
+apiRoutes.post('/tiers/recalculate', requireUserAuth(), async (c) => {
+  const db      = c.env?.DB
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+  const session = c.get('user') as any
+  const userId  = session?.userId
+  const rawRole = (session?.role || 'driver').toUpperCase()
+
+  // Rate limit: max 1 manual recalc per 10 minutes per user
+  const limited = await isRateLimited(db, `tier_recalc:${userId}`, 1, 600)
+  if (limited) return c.json({ error: 'Please wait before recalculating again.' }, 429)
+
+  try {
+    const roles: Array<'DRIVER' | 'HOST'> = rawRole === 'BOTH' ? ['DRIVER', 'HOST'] : [rawRole === 'HOST' ? 'HOST' : 'DRIVER']
+    const results: any[] = []
+    for (const r of roles) {
+      const result = await recalculateTier(db, userId, r, 'manual_request')
+      results.push({ role: r, tier: result.newTier, changed: result.changed, progress: result.progress })
+    }
+    return c.json({ success: true, results })
+  } catch(e: any) {
+    console.error('[POST /api/tiers/recalculate]', e.message)
+    return c.json({ error: 'Recalculation failed' }, 500)
+  }
+})
+
+// GET /api/tiers/notifications  — paginated tier notification inbox
+apiRoutes.get('/tiers/notifications', requireUserAuth(), async (c) => {
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+  const session = c.get('user') as any
+  const limit   = Math.min(parseInt(c.req.query('limit') || '20'), 50)
+  const offset  = parseInt(c.req.query('offset') || '0')
+
+  try {
+    const rows = await db.prepare(`
+      SELECT * FROM tier_notifications WHERE user_id = ?
+      ORDER BY created_at DESC LIMIT ? OFFSET ?
+    `).bind(session.userId, limit, offset).all()
+    const total = await db.prepare(
+      'SELECT COUNT(*) as n FROM tier_notifications WHERE user_id = ?'
+    ).bind(session.userId).first<{n:number}>()
+    return c.json({ success: true, notifications: rows.results, total: total?.n || 0 })
+  } catch(e: any) {
+    return c.json({ error: 'Failed to fetch notifications' }, 500)
+  }
+})
+
+// PATCH /api/tiers/notifications/read  — mark all unread as read
+apiRoutes.patch('/tiers/notifications/read', requireUserAuth(), async (c) => {
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+  const session = c.get('user') as any
+  await db.prepare(
+    'UPDATE tier_notifications SET read = 1 WHERE user_id = ? AND read = 0'
+  ).bind(session.userId).run()
+  return c.json({ success: true })
+})
+
+// GET /api/tiers/history  — tier change history for user
+apiRoutes.get('/tiers/history', requireUserAuth(), async (c) => {
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+  const session = c.get('user') as any
+  try {
+    const rows = await db.prepare(`
+      SELECT * FROM tier_history WHERE user_id = ?
+      ORDER BY created_at DESC LIMIT 20
+    `).bind(session.userId).all()
+    return c.json({ success: true, history: rows.results })
+  } catch(e: any) {
+    return c.json({ error: 'Failed to fetch history' }, 500)
+  }
+})
+
+// GET /api/tiers/definitions  — public tier definitions (no auth required)
+apiRoutes.get('/tiers/definitions', (c) => {
+  return c.json({
+    success: true,
+    driver: Object.values(DRIVER_TIERS).map(t => ({
+      id: t.id, rank: t.rank, name: t.name, tagline: t.tagline,
+      description: t.description, icon: t.icon, color: t.color,
+      requirements: t.req, benefits: t.benefits,
+    })),
+    host: Object.values(HOST_TIERS).map(t => ({
+      id: t.id, rank: t.rank, name: t.name, tagline: t.tagline,
+      description: t.description, icon: t.icon, color: t.color,
+      requirements: t.req, benefits: t.benefits,
+    })),
+  })
 })

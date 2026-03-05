@@ -1,6 +1,8 @@
 import { Hono } from 'hono'
 import { Layout } from '../components/layout'
 import { requireUserAuth, verifyUserToken } from '../middleware/security'
+import { recalculateTier, getTierDef, getNextTierGaps } from '../services/tiers'
+import { renderTierCard } from '../components/tier-card'
 
 type Bindings = { DB: D1Database; USER_TOKEN_SECRET: string }
 
@@ -38,12 +40,62 @@ hostDashboard.get('/', async (c) => {
   let payoutPending   = 0
 
   let hostName = ''
+  let tierCardHTML = ''
 
   if (db && userId) {
     try {
       // Fetch host's display name
       const nameRow = await db.prepare('SELECT full_name FROM users WHERE id = ?').bind(userId).first<{full_name: string}>()
       hostName = nameRow?.full_name || ''
+
+      // ── Tier data ─────────────────────────────────────────────────────────
+      try {
+        await recalculateTier(db, userId, 'HOST', 'dashboard_load')
+        const tierState: any = await db.prepare(
+          'SELECT * FROM user_tier_state WHERE user_id = ? AND role = ?'
+        ).bind(userId, 'HOST').first()
+
+        if (tierState) {
+          const tierDef = getTierDef('HOST', tierState.current_tier)
+          const metrics = {
+            r12_completed:      tierState.r12_completed_bookings,
+            r12_spend:          0,
+            r12_revenue:        tierState.r12_total_revenue,
+            r12_avg_rating:     tierState.r12_avg_rating,
+            r12_cancel_rate:    tierState.r12_cancellation_rate,
+            r12_response_rate:  tierState.r12_response_rate,
+            r12_avg_response_hrs: tierState.r12_avg_response_hours,
+            lifetime_completed: tierState.lifetime_completed,
+            lifetime_spend:     0,
+            lifetime_revenue:   tierState.lifetime_revenue,
+          }
+          const gaps = getNextTierGaps(metrics, tierState.current_tier, 'HOST')
+          tierCardHTML = renderTierCard({
+            role:            'HOST',
+            current_tier:    tierState.current_tier,
+            tier_name:       tierDef.name,
+            tier_tagline:    tierDef.tagline,
+            tier_since:      tierState.tier_since,
+            tier_gradient:   tierDef.gradient,
+            tier_icon:       tierDef.icon,
+            tier_rank:       tierDef.rank,
+            progress_to_next: tierState.progress_to_next,
+            is_max_tier:     tierState.current_tier === 'icon',
+            next_tier:       tierState.current_tier !== 'icon'
+              ? (() => { const o = ['steward','curator','prestige','icon']; const i = o.indexOf(tierState.current_tier); return i < 3 ? { id: o[i+1], name: getTierDef('HOST',o[i+1]).name, icon: getTierDef('HOST',o[i+1]).icon } : null })()
+              : null,
+            benefits:        tierDef.benefits as any,
+            metrics,
+            gaps,
+            loyalty_credits: tierState.loyalty_credits,
+            is_protected:    !!tierState.is_protected,
+            grace_period_ends: tierState.grace_period_ends,
+            consecutive_months: tierState.consecutive_months || 0,
+          })
+        }
+      } catch(tierErr: any) {
+        console.error('[host-dashboard] tier error:', tierErr.message)
+      }
 
       // Revenue from succeeded payments for this host
       const rev = await db.prepare(`
@@ -364,6 +416,16 @@ hostDashboard.get('/', async (c) => {
 
         <!-- Right Sidebar -->
         <div class="space-y-6">
+
+          <!-- Tier Status Card -->
+          ${tierCardHTML || `
+          <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-5">
+            <div class="flex items-center gap-2 mb-2">
+              <i class="fas fa-key text-gray-400"></i>
+              <h3 class="font-bold text-white text-sm">Host Tier</h3>
+            </div>
+            <p class="text-gray-500 text-xs">Complete your first booking to unlock host tier status.</p>
+          </div>`}
           
           <!-- Payout Card — real data -->
           <div class="relative gradient-bg rounded-2xl p-5 overflow-hidden">

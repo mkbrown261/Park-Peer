@@ -1,6 +1,8 @@
 import { Hono } from 'hono'
 import { Layout } from '../components/layout'
 import { requireUserAuth } from '../middleware/security'
+import { recalculateTier, getTierDef, getNextTierGaps, progressToNext } from '../services/tiers'
+import { renderTierCard } from '../components/tier-card'
 
 type Bindings = { DB: D1Database; USER_TOKEN_SECRET: string }
 
@@ -33,12 +35,62 @@ driverDashboard.get('/', async (c) => {
   let historyList:  any[] = []
   let activeBooking: any  = null
   let driverName = ''
+  let tierCardHTML = ''
 
   if (db && userId) {
     try {
       // Fetch driver's display name
       const nameRow = await db.prepare('SELECT full_name FROM users WHERE id = ?').bind(userId).first<{full_name: string}>()
       driverName = nameRow?.full_name || ''
+
+      // ── Tier data (recalculate on each dashboard load for freshness) ──────
+      try {
+        const tierResult = await recalculateTier(db, userId, 'DRIVER', 'dashboard_load')
+        const tierState: any = await db.prepare(
+          'SELECT * FROM user_tier_state WHERE user_id = ? AND role = ?'
+        ).bind(userId, 'DRIVER').first()
+
+        if (tierState) {
+          const tierDef = getTierDef('DRIVER', tierState.current_tier)
+          const metrics = {
+            r12_completed:      tierState.r12_completed_bookings,
+            r12_spend:          tierState.r12_total_spend,
+            r12_revenue:        0,
+            r12_avg_rating:     tierState.r12_avg_rating,
+            r12_cancel_rate:    tierState.r12_cancellation_rate,
+            r12_response_rate:  0,
+            r12_avg_response_hrs: 0,
+            lifetime_completed: tierState.lifetime_completed,
+            lifetime_spend:     tierState.lifetime_spend,
+            lifetime_revenue:   0,
+          }
+          const gaps = getNextTierGaps(metrics, tierState.current_tier, 'DRIVER')
+          tierCardHTML = renderTierCard({
+            role:            'DRIVER',
+            current_tier:    tierState.current_tier,
+            tier_name:       tierDef.name,
+            tier_tagline:    tierDef.tagline,
+            tier_since:      tierState.tier_since,
+            tier_gradient:   tierDef.gradient,
+            tier_icon:       tierDef.icon,
+            tier_rank:       tierDef.rank,
+            progress_to_next: tierState.progress_to_next,
+            is_max_tier:     tierState.current_tier === 'apex',
+            next_tier:       tierState.current_tier !== 'apex'
+              ? (() => { const o = ['nomad','cruiser','vaulted','apex']; const i = o.indexOf(tierState.current_tier); return i < 3 ? { id: o[i+1], name: getTierDef('DRIVER',o[i+1]).name, icon: getTierDef('DRIVER',o[i+1]).icon } : null })()
+              : null,
+            benefits:        tierDef.benefits as any,
+            metrics,
+            gaps,
+            loyalty_credits: tierState.loyalty_credits,
+            is_protected:    !!tierState.is_protected,
+            grace_period_ends: tierState.grace_period_ends,
+            consecutive_months: tierState.consecutive_months || 0,
+          })
+        }
+      } catch(tierErr: any) {
+        console.error('[driver-dashboard] tier error:', tierErr.message)
+      }
 
       // Stats scoped to this driver
       const stats = await db.prepare(`
@@ -319,6 +371,16 @@ driverDashboard.get('/', async (c) => {
 
         <!-- Right Sidebar -->
         <div class="space-y-6">
+
+          <!-- Tier Status Card -->
+          ${tierCardHTML || `
+          <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-5">
+            <div class="flex items-center gap-2 mb-2">
+              <i class="fas fa-compass text-gray-400"></i>
+              <h3 class="font-bold text-white text-sm">Your Tier</h3>
+            </div>
+            <p class="text-gray-500 text-xs">Complete your first booking to unlock tier status.</p>
+          </div>`}
           
           <!-- Quick Actions -->
           <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-5">
