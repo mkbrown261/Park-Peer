@@ -1050,6 +1050,11 @@ adminPanel.get('/user-control', async (c: any) => {
   const db: D1Database | undefined = c.env?.DB
   let totalUsers = 0, totalDeleted = 0, totalRefunded = 0, totalSuspended = 0
 
+  // Extract the session token from cookie to embed directly in page
+  // This way adminFetch works even if sessionStorage is empty (e.g. direct nav)
+  const { getCookie: getC } = await import('hono/cookie')
+  const embeddedToken = getC(c, '__pp_admin') || ''
+
   if (db) {
     try {
       const stats = await Promise.all([
@@ -1298,13 +1303,21 @@ adminPanel.get('/user-control', async (c: any) => {
     let currentDeleteUserName = ''
     let pendingBlockers = null
 
-    // ── Auth helper — always sends Bearer token + cookie ───────────────────
-    // Uses sessionStorage token (set at login) so cookie path issues are bypassed
+    // ── Auth helper — sends Bearer token on every API call ─────────────────
+    // Token is embedded server-side from the session cookie so it always works
+    // regardless of sessionStorage availability or cookie path issues
+    const ADMIN_TOKEN = (function() {
+      // 1. Try server-embedded token (most reliable)
+      const embedded = '${embeddedToken}'
+      if (embedded) return embedded
+      // 2. Fall back to sessionStorage (set at login)
+      try { return sessionStorage.getItem('pp_admin_token') || '' } catch(e) { return '' }
+    })()
+
     function adminFetch(url, options) {
       options = options || {}
-      const token = sessionStorage.getItem('pp_admin_token') || ''
       const headers = Object.assign({}, options.headers || {})
-      if (token) headers['Authorization'] = 'Bearer ' + token
+      if (ADMIN_TOKEN) headers['Authorization'] = 'Bearer ' + ADMIN_TOKEN
       return fetch(url, Object.assign({}, options, {
         credentials: 'same-origin',
         headers: headers
@@ -1740,6 +1753,8 @@ adminPanel.get('/user-control', async (c: any) => {
 // GET /admin/audit-log  — Paginated audit log viewer
 // ════════════════════════════════════════════════════════════════════════════
 adminPanel.get('/audit-log', async (c: any) => {
+  const { getCookie: getC } = await import('hono/cookie')
+  const embeddedToken = getC(c, '__pp_admin') || ''
   const content = `
   <div class="flex items-center justify-between mb-6">
     <p class="text-gray-400 text-sm">Immutable record of all admin actions. Every deletion, refund, and override is logged here.</p>
@@ -1813,6 +1828,18 @@ adminPanel.get('/audit-log', async (c: any) => {
   </div>
 
   <script>
+    const ADMIN_TOKEN = (function() {
+      const embedded = '${embeddedToken}'
+      if (embedded) return embedded
+      try { return sessionStorage.getItem('pp_admin_token') || '' } catch(e) { return '' }
+    })()
+    function adminFetch(url, options) {
+      options = options || {}
+      const headers = Object.assign({}, options.headers || {})
+      if (ADMIN_TOKEN) headers['Authorization'] = 'Bearer ' + ADMIN_TOKEN
+      return fetch(url, Object.assign({}, options, { credentials: 'same-origin', headers: headers }))
+    }
+
     let alOffset = 0
     const alLimit = 50
     let alTotal = 0
