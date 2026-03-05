@@ -196,7 +196,19 @@ export const Layout = (title: string, content: string, extraHead = '', session: 
     const notifList     = document.getElementById('notif-list');
     const markAllBtn    = document.getElementById('notif-mark-all');
 
-    let notifLoaded = false;
+    let notifLoading    = false;  // prevent concurrent fetches
+    let notifDropOpen   = false;
+
+    function updateNotifBadge(n) {
+      if (!notifBadge) return;
+      if (n > 0) {
+        notifBadge.textContent = n > 99 ? '99+' : String(n);
+        notifBadge.classList.remove('hidden');
+      } else {
+        notifBadge.classList.add('hidden');
+        notifBadge.textContent = '';
+      }
+    }
 
     function notifIcon(type) {
       const map = {
@@ -241,25 +253,28 @@ export const Layout = (title: string, content: string, extraHead = '', session: 
     }
 
     async function loadNotifications() {
-      if (!notifList) return;
+      if (!notifList || notifLoading) return;
+      notifLoading = true;
+      // Show loading only if no items yet
+      if (!notifList.innerHTML.includes('notif-item')) {
+        notifList.innerHTML = '<div class="p-4 text-center text-gray-500 text-sm"><i class="fas fa-spinner fa-spin mr-2"></i>Loading…</div>';
+      }
       try {
-        const res = await fetch('/api/notifications?limit=10');
-        if (!res.ok) { notifList.innerHTML = '<div class="p-4 text-center text-gray-500 text-sm">Sign in to see notifications</div>'; return; }
+        const res = await fetch('/api/notifications?limit=15');
+        if (!res.ok) {
+          notifList.innerHTML = '<div class="p-4 text-center text-gray-500 text-sm">Sign in to see notifications</div>';
+          notifLoading = false;
+          return;
+        }
         const data = await res.json();
         const items = data.notifications || [];
 
-        // Update badge
-        if (notifBadge) {
-          if (data.unread_count > 0) {
-            notifBadge.textContent = data.unread_count > 99 ? '99+' : String(data.unread_count);
-            notifBadge.classList.remove('hidden');
-          } else {
-            notifBadge.classList.add('hidden');
-          }
-        }
+        // Always sync badge with server
+        updateNotifBadge(data.unread_count ?? 0);
 
         if (items.length === 0) {
           notifList.innerHTML = '<div class="p-6 text-center text-gray-500 text-sm"><i class="fas fa-bell-slash mb-2 block text-2xl"></i>No notifications yet</div>';
+          notifLoading = false;
           return;
         }
 
@@ -267,7 +282,7 @@ export const Layout = (title: string, content: string, extraHead = '', session: 
           const [iconClass, bgClass, colorClass] = notifIcon(n.type);
           const link = notifLink(n);
           const unread = n.read_status === 0;
-          return \`<div class="notif-item p-4 hover:bg-white/5 cursor-pointer border-b border-white/5 \${unread ? 'bg-white/3' : ''}" data-id="\${n.id}" data-link="\${link || ''}">
+          return \`<div class="notif-item p-4 hover:bg-white/5 cursor-pointer border-b border-white/5 \${unread ? 'bg-indigo-500/5' : ''}" data-id="\${n.id}" data-link="\${link || ''}" data-unread="\${unread ? '1' : '0'}">
             <div class="flex gap-3">
               <div class="w-10 h-10 \${bgClass} rounded-full flex items-center justify-center flex-shrink-0">
                 <i class="\${iconClass} \${colorClass} text-sm"></i>
@@ -277,7 +292,7 @@ export const Layout = (title: string, content: string, extraHead = '', session: 
                 <p class="text-xs text-gray-400 mt-0.5 line-clamp-2">\${n.message}</p>
                 <span class="text-xs \${unread ? 'text-indigo-400' : 'text-gray-500'} mt-1 block">\${timeAgo(n.created_at)}</span>
               </div>
-              \${unread ? '<div class="w-2 h-2 bg-indigo-500 rounded-full mt-2 flex-shrink-0"></div>' : ''}
+              \${unread ? '<div class="w-2 h-2 bg-indigo-500 rounded-full mt-2 flex-shrink-0 notif-dot"></div>' : ''}
             </div>
           </div>\`;
         }).join('');
@@ -287,6 +302,17 @@ export const Layout = (title: string, content: string, extraHead = '', session: 
           el.addEventListener('click', async () => {
             const id   = el.getAttribute('data-id');
             const link = el.getAttribute('data-link');
+            // Optimistic UI: mark read immediately
+            if (el.getAttribute('data-unread') === '1') {
+              el.setAttribute('data-unread', '0');
+              el.classList.remove('bg-indigo-500/5');
+              const titleEl = el.querySelector('p.text-white');
+              if (titleEl) { titleEl.classList.remove('text-white', 'font-semibold'); titleEl.classList.add('text-gray-300'); }
+              const dot = el.querySelector('.notif-dot');
+              if (dot) dot.remove();
+              const cur = parseInt(notifBadge?.textContent || '0', 10);
+              updateNotifBadge(Math.max(0, cur - 1));
+            }
             await fetch('/api/notifications/read', {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
@@ -298,53 +324,52 @@ export const Layout = (title: string, content: string, extraHead = '', session: 
 
       } catch (err) {
         if (notifList) notifList.innerHTML = '<div class="p-4 text-center text-gray-500 text-sm">Could not load notifications</div>';
+      } finally {
+        notifLoading = false;
       }
     }
 
     if (notifBtn && notifDropdown) {
       notifBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        notifDropdown.classList.toggle('hidden');
-        if (!notifLoaded) { notifLoaded = true; loadNotifications(); }
+        notifDropOpen = !notifDropOpen;
+        if (notifDropOpen) {
+          notifDropdown.classList.remove('hidden');
+          loadNotifications();  // always refresh when opening
+        } else {
+          notifDropdown.classList.add('hidden');
+        }
       });
-      document.addEventListener('click', () => notifDropdown.classList.add('hidden'));
+      document.addEventListener('click', (e) => {
+        if (notifDropOpen && notifDropdown && !notifDropdown.contains(e.target) && e.target !== notifBtn) {
+          notifDropOpen = false;
+          notifDropdown.classList.add('hidden');
+        }
+      });
     }
 
     if (markAllBtn) {
       markAllBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
         await fetch('/api/notifications/read', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(() => {});
-        if (notifBadge) { notifBadge.classList.add('hidden'); notifBadge.textContent = ''; }
-        notifList && notifList.querySelectorAll('.notif-item').forEach(el => {
-          el.classList.remove('bg-white/3');
-          const dot = el.querySelector('.bg-indigo-500.rounded-full');
-          if (dot) dot.remove();
-          const title = el.querySelector('p.text-white');
-          if (title) { title.classList.remove('text-white', 'font-semibold'); title.classList.add('text-gray-300'); }
-          const ts = el.querySelector('span.text-indigo-400');
-          if (ts) { ts.classList.remove('text-indigo-400'); ts.classList.add('text-gray-500'); }
-        });
+        updateNotifBadge(0);
+        // Refresh to show updated state
+        await loadNotifications();
       });
     }
 
-    // Poll badge count every 60s (only when user is on page)
+    // Poll badge count every 30s (only when user is on page and dropdown is closed)
     async function pollBadge() {
+      if (notifDropOpen) return;  // skip while dropdown open, loadNotifications handles it
       try {
         const res = await fetch('/api/notifications?limit=1');
         if (!res.ok) return;
         const data = await res.json();
-        if (notifBadge) {
-          if (data.unread_count > 0) {
-            notifBadge.textContent = data.unread_count > 99 ? '99+' : String(data.unread_count);
-            notifBadge.classList.remove('hidden');
-          } else {
-            notifBadge.classList.add('hidden');
-          }
-        }
+        updateNotifBadge(data.unread_count ?? 0);
       } catch {}
     }
     pollBadge(); // initial count on page load
-    setInterval(pollBadge, 60000);
+    setInterval(pollBadge, 30000);
 
     // User menu
     const userBtn = document.getElementById('user-menu-btn');

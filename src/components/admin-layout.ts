@@ -213,7 +213,8 @@ export const AdminLayout = (title: string, content: string) => `<!DOCTYPE html>
     const adminNotifBadge    = document.getElementById('admin-notif-badge')
     const adminNotifList     = document.getElementById('admin-notif-list')
     const adminMarkAllBtn    = document.getElementById('admin-notif-mark-all')
-    let adminNotifLoaded     = false
+    let adminNotifLoading    = false  // prevent concurrent fetches
+    let adminDropdownOpen    = false
 
     const notifIconMap = {
       booking_request:   ['fas fa-car',          'rgba(91,46,255,.15)',  '#a78bfa'],
@@ -247,25 +248,41 @@ export const AdminLayout = (title: string, content: string) => `<!DOCTYPE html>
       return Math.floor(s/86400) + 'd ago'
     }
 
+    function updateAdminBadge(unreadCount) {
+      if (!adminNotifBadge) return
+      if (unreadCount > 0) {
+        adminNotifBadge.textContent = unreadCount > 99 ? '99+' : String(unreadCount)
+        adminNotifBadge.classList.remove('hidden')
+      } else {
+        adminNotifBadge.classList.add('hidden')
+        adminNotifBadge.textContent = ''
+      }
+    }
+
     async function loadAdminNotifs() {
-      if (!adminNotifList) return
+      if (!adminNotifList || adminNotifLoading) return
+      adminNotifLoading = true
+      // Show loading spinner only if list is currently empty/stale
+      const currentContent = adminNotifList.innerHTML
+      if (!currentContent.includes('admin-notif-item')) {
+        adminNotifList.innerHTML = '<div class="p-4 text-center text-gray-500 text-sm"><i class="fas fa-spinner fa-spin mr-2"></i>Loading…</div>'
+      }
       try {
-        const res  = await fetch('/api/admin/notifications?limit=15')
-        if (!res.ok) { adminNotifList.innerHTML = '<div class="p-4 text-center text-gray-500 text-sm">Unable to load (' + res.status + ')</div>'; return }
+        const res  = await fetch('/api/admin/notifications?limit=20')
+        if (!res.ok) {
+          adminNotifList.innerHTML = '<div class="p-4 text-center text-gray-500 text-sm"><i class="fas fa-exclamation-circle mr-2 text-red-400"></i>Unable to load (' + res.status + ')</div>'
+          adminNotifLoading = false
+          return
+        }
         const data = await res.json()
 
-        if (adminNotifBadge) {
-          if (data.unread_count > 0) {
-            adminNotifBadge.textContent = data.unread_count > 99 ? '99+' : String(data.unread_count)
-            adminNotifBadge.classList.remove('hidden')
-          } else {
-            adminNotifBadge.classList.add('hidden')
-          }
-        }
+        // Always sync badge with server count
+        updateAdminBadge(data.unread_count ?? 0)
 
         const items = data.notifications || []
         if (items.length === 0) {
-          adminNotifList.innerHTML = '<div class="p-6 text-center text-gray-500 text-sm"><i class="fas fa-bell-slash mb-2 block text-xl"></i>No notifications</div>'
+          adminNotifList.innerHTML = '<div class="p-6 text-center text-gray-500 text-sm"><i class="fas fa-bell-slash mb-2 block text-xl"></i>No notifications yet</div>'
+          adminNotifLoading = false
           return
         }
 
@@ -273,7 +290,7 @@ export const AdminLayout = (title: string, content: string) => `<!DOCTYPE html>
           const [icon, bg, color] = notifIconMap[n.type] || ['fas fa-bell','rgba(107,114,128,.15)','#9ca3af']
           const link    = adminNotifLink(n)
           const unread  = n.read_status === 0
-          return \`<div class="admin-notif-item px-4 py-3 hover:bg-white/5 cursor-pointer border-b border-white/5 \${unread ? 'bg-white/3' : ''}" data-id="\${n.id}" data-link="\${link}">
+          return \`<div class="admin-notif-item px-4 py-3 hover:bg-white/5 cursor-pointer border-b border-white/5 \${unread ? 'bg-indigo-500/5' : ''}" data-id="\${n.id}" data-link="\${link}" data-unread="\${unread ? '1' : '0'}">
             <div class="flex gap-3 items-start">
               <div class="w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0" style="background:\${bg}">
                 <i class="\${icon} text-xs" style="color:\${color}"></i>
@@ -283,7 +300,7 @@ export const AdminLayout = (title: string, content: string) => `<!DOCTYPE html>
                 <p class="text-xs text-gray-500 mt-0.5 line-clamp-2">\${n.message}</p>
                 <span class="text-[10px] \${unread ? 'text-indigo-400' : 'text-gray-600'} mt-0.5 block">\${timeAgo(n.created_at)}</span>
               </div>
-              \${unread ? '<div class="w-1.5 h-1.5 bg-indigo-500 rounded-full mt-1.5 flex-shrink-0"></div>' : ''}
+              \${unread ? '<div class="w-1.5 h-1.5 bg-indigo-500 rounded-full mt-1.5 flex-shrink-0 notif-dot"></div>' : ''}
             </div>
           </div>\`
         }).join('')
@@ -292,6 +309,18 @@ export const AdminLayout = (title: string, content: string) => `<!DOCTYPE html>
           el.addEventListener('click', async () => {
             const id   = el.getAttribute('data-id')
             const link = el.getAttribute('data-link')
+            // Mark as read visually immediately
+            if (el.getAttribute('data-unread') === '1') {
+              el.setAttribute('data-unread', '0')
+              el.classList.remove('bg-indigo-500/5')
+              const titleEl = el.querySelector('p.text-white')
+              if (titleEl) { titleEl.classList.remove('text-white', 'font-semibold'); titleEl.classList.add('text-gray-300') }
+              const dot = el.querySelector('.notif-dot')
+              if (dot) dot.remove()
+              // Decrement badge
+              const cur = parseInt(adminNotifBadge?.textContent || '0', 10)
+              updateAdminBadge(Math.max(0, cur - 1))
+            }
             await fetch('/api/admin/notifications/read', {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
@@ -300,51 +329,54 @@ export const AdminLayout = (title: string, content: string) => `<!DOCTYPE html>
             if (link) window.location.href = link
           })
         })
-      } catch {
-        if (adminNotifList) adminNotifList.innerHTML = '<div class="p-4 text-center text-gray-500 text-sm">Could not load</div>'
+      } catch (err) {
+        if (adminNotifList) adminNotifList.innerHTML = '<div class="p-4 text-center text-gray-500 text-sm"><i class="fas fa-wifi mr-2 text-red-400"></i>Could not load notifications</div>'
+      } finally {
+        adminNotifLoading = false
       }
     }
 
     if (adminNotifBtn && adminNotifDropdown) {
       adminNotifBtn.addEventListener('click', e => {
         e.stopPropagation()
-        adminNotifDropdown.classList.toggle('hidden')
-        if (!adminNotifLoaded) { adminNotifLoaded = true; loadAdminNotifs() }
+        adminDropdownOpen = !adminDropdownOpen
+        if (adminDropdownOpen) {
+          adminNotifDropdown.classList.remove('hidden')
+          loadAdminNotifs()  // always refresh when opening
+        } else {
+          adminNotifDropdown.classList.add('hidden')
+        }
       })
-      document.addEventListener('click', () => adminNotifDropdown.classList.add('hidden'))
+      document.addEventListener('click', e => {
+        if (adminDropdownOpen && !adminNotifDropdown.contains(e.target) && e.target !== adminNotifBtn) {
+          adminDropdownOpen = false
+          adminNotifDropdown.classList.add('hidden')
+        }
+      })
     }
 
     if (adminMarkAllBtn) {
       adminMarkAllBtn.addEventListener('click', async e => {
         e.stopPropagation()
         await fetch('/api/admin/notifications/read', { method:'PATCH', headers:{'Content-Type':'application/json'}, body:'{}' }).catch(()=>{})
-        if (adminNotifBadge) { adminNotifBadge.classList.add('hidden'); adminNotifBadge.textContent = '' }
-        adminNotifList && adminNotifList.querySelectorAll('.admin-notif-item').forEach(el => {
-          el.classList.remove('bg-white/3')
-          const dot = el.querySelector('.bg-indigo-500.rounded-full')
-          if (dot) dot.remove()
-        })
+        updateAdminBadge(0)
+        // Refresh list to reflect read state
+        await loadAdminNotifs()
       })
     }
 
-    // Poll badge every 60s
+    // Poll badge every 30s — keeps count in sync with server
     async function pollAdminBadge() {
+      if (adminDropdownOpen) return  // skip poll while dropdown is open (loadAdminNotifs handles it)
       try {
         const res  = await fetch('/api/admin/notifications?limit=1')
         if (!res.ok) return
         const data = await res.json()
-        if (adminNotifBadge) {
-          if (data.unread_count > 0) {
-            adminNotifBadge.textContent = data.unread_count > 99 ? '99+' : String(data.unread_count)
-            adminNotifBadge.classList.remove('hidden')
-          } else {
-            adminNotifBadge.classList.add('hidden')
-          }
-        }
+        updateAdminBadge(data.unread_count ?? 0)
       } catch {}
     }
     pollAdminBadge()
-    setInterval(pollAdminBadge, 60000)
+    setInterval(pollAdminBadge, 30000)
   </script>
 </body>
 </html>`

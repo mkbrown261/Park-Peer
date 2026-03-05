@@ -158,8 +158,8 @@ apiRoutes.post('/auth/register', async (c) => {
     // Send welcome email (non-blocking)
     sendWelcomeEmail(c.env as any, { toEmail: email, toName: full_name, role: role }).catch(() => {})
 
-    // Admin in-app notification: new registration
-    notifyNewRegistration(c.env as any, {
+    // Admin in-app notification: new registration (await to ensure it runs before response)
+    await notifyNewRegistration(c.env as any, {
       userId, userName: full_name, userEmail: email, role: roleForJwt,
     }).catch(() => {})
 
@@ -1062,22 +1062,21 @@ apiRoutes.post('/webhooks/stripe', async (c) => {
             `UPDATE payments SET status = 'succeeded' WHERE stripe_payment_intent_id = ?`
           ).bind(pi.id).run()
 
-          // Fire in-app notification for webhook-confirmed bookings
-          ;(async () => {
-            try {
-              const bk = await db.prepare(`
-                SELECT b.id, b.driver_id, b.host_id, b.start_time, b.end_time,
-                       b.total_charged, b.host_payout, b.vehicle_plate,
-                       l.title AS listing_title, l.address, l.city,
-                       d.full_name AS driver_name, d.email AS driver_email, d.phone AS driver_phone,
-                       h.full_name AS host_name,   h.email AS host_email,   h.phone AS host_phone
-                FROM bookings b
-                LEFT JOIN listings l ON b.listing_id = l.id
-                LEFT JOIN users d    ON b.driver_id  = d.id
-                LEFT JOIN users h    ON b.host_id    = h.id
-                WHERE b.stripe_payment_intent_id = ?
-              `).bind(pi.id).first<any>()
-              if (!bk) return
+          // Fire in-app notification for webhook-confirmed bookings (awaited)
+          try {
+            const bk = await db.prepare(`
+              SELECT b.id, b.driver_id, b.host_id, b.start_time, b.end_time,
+                     b.total_charged, b.host_payout, b.vehicle_plate,
+                     l.title AS listing_title, l.address, l.city,
+                     d.full_name AS driver_name, d.email AS driver_email, d.phone AS driver_phone,
+                     h.full_name AS host_name,   h.email AS host_email,   h.phone AS host_phone
+              FROM bookings b
+              LEFT JOIN listings l ON b.listing_id = l.id
+              LEFT JOIN users d    ON b.driver_id  = d.id
+              LEFT JOIN users h    ON b.host_id    = h.id
+              WHERE b.stripe_payment_intent_id = ?
+            `).bind(pi.id).first<any>()
+            if (bk) {
               await notifyBookingConfirmed(env as any, {
                 driverId:       bk.driver_id,
                 driverName:     bk.driver_name  || 'Driver',
@@ -1096,8 +1095,8 @@ apiRoutes.post('/webhooks/stripe', async (c) => {
                 hostPayout:     bk.host_payout  || 0,
                 vehiclePlate:   bk.vehicle_plate || '',
               })
-            } catch (ne: any) { console.error('[Webhook notify confirmed]', ne.message) }
-          })()
+            }
+          } catch (ne: any) { console.error('[Webhook notify confirmed]', ne.message) }
         } catch (e: any) {
           console.error('[Webhook] D1 update error (payment_intent.succeeded):', e.message)
         }
@@ -1486,9 +1485,9 @@ apiRoutes.post('/listings', requireUserAuth(), async (c) => {
     const newId = result.meta?.last_row_id ?? null
     console.log(`[POST /api/listings] Created listing id=${newId} for user=${session.userId}`)
 
-    // Admin in-app notification: new listing
+    // Admin in-app notification: new listing (await to ensure it runs before response)
     if (newId) {
-      notifyNewListing(c.env as any, {
+      await notifyNewListing(c.env as any, {
         hostName: session.full_name || session.email || 'A host',
         listingId: Number(newId),
         listingTitle: sanitizeHtml(title),
@@ -1936,39 +1935,37 @@ apiRoutes.post('/bookings', requireUserAuth(), async (c) => {
       const dbBookingId = insertResult.meta?.last_row_id ?? 0
       const bookingRef  = 'PP-' + new Date().getFullYear() + '-' + String(dbBookingId).padStart(4, '0')
 
-      // ── Fire booking request notification (async, non-blocking) ─────────
-      ;(async () => {
-        try {
-          const driver = await db.prepare('SELECT full_name, email, phone FROM users WHERE id = ?')
-            .bind(driver_id).first<any>()
-          const host = await db.prepare('SELECT id, full_name, email, phone FROM users WHERE id = ?')
-            .bind(listing.host_id).first<any>()
-          const listingRow = await db.prepare('SELECT title, address, city FROM listings WHERE id = ?')
-            .bind(listing_id).first<any>()
-          const listingTitle = listingRow?.title || 'Parking Space'
-          const listingAddress = [listingRow?.address, listingRow?.city].filter(Boolean).join(', ')
-          if (host) {
-            await notifyBookingRequest(c.env as any, {
-              driverId: driver_id as number,
-              driverName: driver?.full_name || 'A driver',
-              driverEmail: driver?.email || '',
-              driverPhone: driver?.phone || null,
-              hostId: listing.host_id,
-              hostName: host.full_name || 'Host',
-              hostEmail: host.email || '',
-              hostPhone: host.phone || null,
-              bookingId: Number(dbBookingId),
-              listingId: listing_id,
-              listingTitle,
-              listingAddress,
-              startTime: start_datetime,
-              endTime: end_datetime,
-              totalCharged: total,
-              hostPayout: hostPay,
-            })
-          }
-        } catch (ne: any) { console.error('[notify booking request]', ne.message) }
-      })()
+      // ── Fire booking request notification (awaited before response) ────
+      try {
+        const driver = await db.prepare('SELECT full_name, email, phone FROM users WHERE id = ?')
+          .bind(driver_id).first<any>()
+        const host = await db.prepare('SELECT id, full_name, email, phone FROM users WHERE id = ?')
+          .bind(listing.host_id).first<any>()
+        const listingRow = await db.prepare('SELECT title, address, city FROM listings WHERE id = ?')
+          .bind(listing_id).first<any>()
+        const listingTitle = listingRow?.title || 'Parking Space'
+        const listingAddress = [listingRow?.address, listingRow?.city].filter(Boolean).join(', ')
+        if (host) {
+          await notifyBookingRequest(c.env as any, {
+            driverId: driver_id as number,
+            driverName: driver?.full_name || 'A driver',
+            driverEmail: driver?.email || '',
+            driverPhone: driver?.phone || null,
+            hostId: listing.host_id,
+            hostName: host.full_name || 'Host',
+            hostEmail: host.email || '',
+            hostPhone: host.phone || null,
+            bookingId: Number(dbBookingId),
+            listingId: listing_id,
+            listingTitle,
+            listingAddress,
+            startTime: start_datetime,
+            endTime: end_datetime,
+            totalCharged: total,
+            hostPayout: hostPay,
+          })
+        }
+      } catch (ne: any) { console.error('[notify booking request]', ne.message) }
 
       return c.json({
         id: bookingRef, db_id: dbBookingId, listing_id,

@@ -110,13 +110,17 @@ export async function notifyAdmin(
   const db = env.DB
   if (!db) return
   const related = relatedEntity ? JSON.stringify(relatedEntity) : null
-  await db.prepare(`
-    INSERT INTO notifications
-      (user_id, user_role, type, title, message, related_entity,
-       read_status, delivery_inapp, delivery_email, delivery_sms,
-       email_sent, sms_sent, created_at)
-    VALUES (0, 'admin', ?, ?, ?, ?, 0, 1, 0, 0, 0, 0, datetime('now'))
-  `).bind(type, title, message, related).run().catch((e: any) => console.error('[notifyAdmin]', e.message))
+  try {
+    await db.prepare(`
+      INSERT INTO notifications
+        (user_id, user_role, type, title, message, related_entity,
+         read_status, delivery_inapp, delivery_email, delivery_sms,
+         email_sent, sms_sent, created_at)
+      VALUES (0, 'admin', ?, ?, ?, ?, 0, 1, 0, 0, 0, 0, datetime('now'))
+    `).bind(type, title, message, related).run()
+  } catch (e: any) {
+    console.error('[notifyAdmin] DB insert failed:', e.message)
+  }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -186,7 +190,7 @@ export async function notifyBookingRequest(env: Env, data: {
     }, false, false) // no duplicate email/SMS — Stripe confirm will send those
 
     // ── Admin ────────────────────────────────────────────────────────────
-    notifyAdmin(env, 'booking_request', '🚗 New Booking',
+    await notifyAdmin(env, 'booking_request', '🚗 New Booking',
       `${data.driverName} booked "${data.listingTitle}" — #${data.bookingId}`,
       { type: 'booking', id: data.bookingId })
   } catch (e: any) {
@@ -333,7 +337,7 @@ export async function notifyBookingCancelled(env: Env, data: {
       }).then(() => markSmsSent(db, hNotifId)).catch(() => {})
     }
 
-    notifyAdmin(env, 'booking_cancelled', 'Booking Cancelled',
+    await notifyAdmin(env, 'booking_cancelled', 'Booking Cancelled',
       `Booking #${data.bookingId} "${data.listingTitle}" cancelled by ${data.cancelledBy}`,
       { type: 'booking', id: data.bookingId })
   } catch (e: any) {
@@ -430,7 +434,7 @@ export async function notifyNewRegistration(env: Env, data: {
   userEmail: string
   role:      string
 }): Promise<void> {
-  notifyAdmin(env, 'new_registration', '👤 New User Registered',
+  await notifyAdmin(env, 'new_registration', '👤 New User Registered',
     `${data.userName} (${data.userEmail}) joined as ${data.role}.`,
     { type: 'user', id: data.userId })
 }
@@ -441,7 +445,7 @@ export async function notifyNewListing(env: Env, data: {
   listingId:    number
   listingTitle: string
 }): Promise<void> {
-  notifyAdmin(env, 'new_listing', '🅿️ New Listing Created',
+  await notifyAdmin(env, 'new_listing', '🅿️ New Listing Created',
     `${data.hostName} created "${data.listingTitle}" (#${data.listingId}).`,
     { type: 'listing', id: data.listingId })
 }
@@ -452,7 +456,7 @@ export async function notifyDisputeOpened(env: Env, data: {
   disputeId: number
   reason:    string
 }): Promise<void> {
-  notifyAdmin(env, 'dispute_opened', '⚖️ Dispute Opened',
+  await notifyAdmin(env, 'dispute_opened', '⚖️ Dispute Opened',
     `Dispute on Booking #${data.bookingId}: "${data.reason.slice(0,100)}"`,
     { type: 'dispute', id: data.disputeId })
 }
@@ -477,7 +481,7 @@ export async function notifyRefundProcessed(env: Env, data: {
       relatedEntity: { type: 'booking', id: data.bookingId },
     }, prefs.payout_email === 1, false)
 
-    notifyAdmin(env, 'refund_processed', '💸 Refund Issued',
+    await notifyAdmin(env, 'refund_processed', '💸 Refund Issued',
       `$${data.amount.toFixed(2)} refunded for Booking #${data.bookingId}`,
       { type: 'booking', id: data.bookingId })
   } catch (e: any) {
