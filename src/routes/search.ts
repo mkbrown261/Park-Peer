@@ -697,43 +697,56 @@ searchPage.get('/', async (c) => {
       if (amenitiesArr.includes('24hr_access'))     tags.push('24/7')
       if (amenitiesArr.includes('shuttle'))         tags.push('Shuttle')
 
-      card.innerHTML = \`
-        <div class="flex gap-0">
-          <div class="w-28 h-28 bg-gradient-to-br from-charcoal-300 to-charcoal-400 flex items-center justify-center flex-shrink-0 relative overflow-hidden">
-            <i class="fas \${typeIcon} text-3xl text-white/20"></i>
-            <span class="\${badge.cls} text-xs font-bold absolute top-2 left-2 px-1.5 py-0.5 rounded-md">\${badge.text}</span>
-          </div>
-          <div class="flex-1 p-3 min-w-0">
-            <div class="flex items-start justify-between gap-2">
-              <div class="min-w-0">
-                <h3 class="font-bold text-white text-sm group-hover:text-indigo-300 transition-colors truncate">\${l.title}</h3>
-                <p class="text-gray-500 text-xs flex items-center gap-1 mt-0.5 truncate">
-                  <i class="fas fa-map-pin text-indigo-400 flex-shrink-0"></i> \${l.address}
-                  \${l.city ? ', ' + l.city : ''}
-                </p>
-              </div>
-              <div class="text-right flex-shrink-0">
-                <p class="font-black text-white text-base">$\${(l.price_hourly || 0).toFixed(0)}<span class="text-gray-500 font-normal text-xs">/hr</span></p>
-                \${l.price_daily ? '<p class="text-gray-500 text-xs">$' + l.price_daily.toFixed(0) + '/day</p>' : ''}
-              </div>
-            </div>
-            <div class="flex items-center justify-between mt-2 flex-wrap gap-1">
-              <div class="flex items-center gap-2 flex-wrap">
-                <div class="flex items-center gap-1">
-                  <i class="fas fa-star text-amber-400 text-xs"></i>
-                  <span class="text-white text-xs font-semibold">\${(l.rating || 0).toFixed(1)}</span>
-                  <span class="text-gray-500 text-xs">(\${l.review_count || 0})</span>
-                </div>
-                \${l.pri_score != null ? \`<span class="pri-tooltip"><span class="text-gray-400 text-xs">PRI: <span class="font-semibold text-white">\${l.pri_score}%</span>\${priDot(l.pri_score)}</span><span class="pri-tip">Reliability: \${l.pri_score}%<br>Based on \${l.pri_bookings || 0} bookings, \${l.pri_cancels || 0} cancellations<br>Avg confirmation: \${(l.pri_confirm_hours||0).toFixed(1)} hrs</span></span>\` : (l.pri_bookings < 5 ? '<span class="text-gray-600 text-xs">New Listing</span>' : '')}
-              </div>
-              <div class="flex gap-1 flex-wrap justify-end items-center">
-                \${tags.slice(0,2).map(t => '<span class="text-xs bg-charcoal-300 text-gray-400 px-1.5 py-0.5 rounded-md">' + t + '</span>').join('')}
-              </div>
-            </div>
-            \${l.host ? \`<p class="text-gray-600 text-xs mt-1.5 flex items-center">\${l.host.name || ''}\\${hostBadges(l.host)}</p>\` : ''}
-          </div>
-        </div>
-      \`
+      // Build PRI badge using string concat (no nested template literals)
+      const priHtml = l.pri_score != null
+        ? '<span class="pri-tooltip">' +
+            '<span class="text-gray-400 text-xs">PRI: <span class="font-semibold text-white">' + l.pri_score + '%</span>' + priDot(l.pri_score) + '</span>' +
+            '<span class="pri-tip">Reliability: ' + l.pri_score + '%<br>Based on ' + (l.pri_bookings || 0) + ' bookings, ' + (l.pri_cancels || 0) + ' cancellations<br>Avg confirmation: ' + ((l.pri_confirm_hours||0)).toFixed(1) + ' hrs</span>' +
+          '</span>'
+        : (l.pri_bookings < 5 ? '<span class="text-gray-600 text-xs">New Listing</span>' : '')
+      const hostLine = l.host
+        ? '<p class="text-gray-600 text-xs mt-1.5 flex items-center">' + (l.host.name || '') + hostBadges(l.host) + '</p>'
+        : ''
+      const dailyPrice = l.price_daily
+        ? '<p class="text-gray-500 text-xs">$' + l.price_daily.toFixed(0) + '/day</p>'
+        : ''
+
+      card.innerHTML =
+        '<div class="flex gap-0">' +
+          '<div class="w-28 h-28 bg-gradient-to-br from-charcoal-300 to-charcoal-400 flex items-center justify-center flex-shrink-0 relative overflow-hidden">' +
+            '<i class="fas ' + typeIcon + ' text-3xl text-white/20"></i>' +
+            '<span class="' + badge.cls + ' text-xs font-bold absolute top-2 left-2 px-1.5 py-0.5 rounded-md">' + badge.text + '</span>' +
+          '</div>' +
+          '<div class="flex-1 p-3 min-w-0">' +
+            '<div class="flex items-start justify-between gap-2">' +
+              '<div class="min-w-0">' +
+                '<h3 class="font-bold text-white text-sm group-hover:text-indigo-300 transition-colors truncate">' + l.title + '</h3>' +
+                '<p class="text-gray-500 text-xs flex items-center gap-1 mt-0.5 truncate">' +
+                  '<i class="fas fa-map-pin text-indigo-400 flex-shrink-0"></i> ' + l.address +
+                  (l.city ? ', ' + l.city : '') +
+                '</p>' +
+              '</div>' +
+              '<div class="text-right flex-shrink-0">' +
+                '<p class="font-black text-white text-base">$' + (l.price_hourly || 0).toFixed(0) + '<span class="text-gray-500 font-normal text-xs">/hr</span></p>' +
+                dailyPrice +
+              '</div>' +
+            '</div>' +
+            '<div class="flex items-center justify-between mt-2 flex-wrap gap-1">' +
+              '<div class="flex items-center gap-2 flex-wrap">' +
+                '<div class="flex items-center gap-1">' +
+                  '<i class="fas fa-star text-amber-400 text-xs"></i>' +
+                  '<span class="text-white text-xs font-semibold">' + (l.rating || 0).toFixed(1) + '</span>' +
+                  '<span class="text-gray-500 text-xs">(' + (l.review_count || 0) + ')</span>' +
+                '</div>' +
+                priHtml +
+              '</div>' +
+              '<div class="flex gap-1 flex-wrap justify-end items-center">' +
+                tags.slice(0,2).map(t => '<span class="text-xs bg-charcoal-300 text-gray-400 px-1.5 py-0.5 rounded-md">' + t + '</span>').join('') +
+              '</div>' +
+            '</div>' +
+            hostLine +
+          '</div>' +
+        '</div>'
 
       card.addEventListener('mouseenter', () => highlightPin(l.id))
       card.addEventListener('mouseleave', () => unhighlightPin(l.id))
@@ -860,37 +873,35 @@ searchPage.get('/', async (c) => {
 
     const popup = new mapboxgl.Popup({ offset: 10, maxWidth: '280px', closeButton: true })
       .setLngLat([l.lng, l.lat])
-      .setHTML(\`
-        <div class="p-4">
-          <div class="flex items-start gap-2 mb-3">
-            <div class="w-10 h-10 bg-indigo-500/20 rounded-xl flex items-center justify-center flex-shrink-0">
-              <i class="fas \${l.type === 'garage' ? 'fa-warehouse' : l.type === 'driveway' ? 'fa-home' : 'fa-parking'} text-indigo-400"></i>
-            </div>
-            <div class="flex-1 min-w-0">
-              <h4 class="font-bold text-white text-sm leading-tight mb-0.5 truncate">\${l.title}</h4>
-              <p class="text-gray-400 text-xs truncate">\${l.address}\${l.city ? ', ' + l.city : ''}</p>
-            </div>
-          </div>
-          <div class="flex items-center justify-between mb-3">
-            <div>
-              <span class="text-2xl font-black text-white">$\${(l.price_hourly||0).toFixed(0)}</span>
-              <span class="text-gray-400 text-xs">/hr</span>
-              \${l.price_daily ? '<span class="text-gray-500 text-xs ml-2">$' + l.price_daily.toFixed(0) + '/day</span>' : ''}
-            </div>
-            <div class="flex items-center gap-1">
-              <i class="fas fa-star text-amber-400 text-xs"></i>
-              <span class="text-white text-sm font-semibold">\${(l.rating||0).toFixed(1)}</span>
-              <span class="text-gray-400 text-xs">(\${l.review_count||0})</span>
-              \${l.pri_score != null ? \`<span class="ml-1 text-xs font-semibold" style="color:\${l.pri_score>=95?'#16a34a':l.pri_score>=85?'#2563eb':l.pri_score>=75?'#ca8a04':'#dc2626'}">• \${l.pri_score}%</span>\` : ''}
-            </div>
-          </div>
-          \${tags.length > 0 ? '<div class="flex gap-1 flex-wrap mb-3">' + tags.slice(0,4).map(t => '<span class="text-xs bg-white/5 text-gray-400 px-2 py-0.5 rounded-full flex items-center gap-1"><i class=\\"fas ' + t.i + ' text-indigo-400 text-xs\\"></i>' + t.t + '</span>').join('') + '</div>' : ''}
-          \${l.instant_book ? '<div class="flex items-center gap-1.5 mb-3"><span class="w-1.5 h-1.5 bg-lime-500 rounded-full"></span><span class="text-lime-400 text-xs font-semibold">Instant Book Available</span></div>' : ''}
-          <a href="/listing/\${l.id}" class="block w-full py-2.5 btn-primary text-white text-center text-sm font-bold rounded-xl transition-all">
-            View & Reserve
-          </a>
-        </div>
-      \`)
+      .setHTML(
+        '<div class="p-4">' +
+          '<div class="flex items-start gap-2 mb-3">' +
+            '<div class="w-10 h-10 bg-indigo-500/20 rounded-xl flex items-center justify-center flex-shrink-0">' +
+              '<i class="fas ' + (l.type === 'garage' ? 'fa-warehouse' : l.type === 'driveway' ? 'fa-home' : 'fa-parking') + ' text-indigo-400"></i>' +
+            '</div>' +
+            '<div class="flex-1 min-w-0">' +
+              '<h4 class="font-bold text-white text-sm leading-tight mb-0.5 truncate">' + l.title + '</h4>' +
+              '<p class="text-gray-400 text-xs truncate">' + l.address + (l.city ? ', ' + l.city : '') + '</p>' +
+            '</div>' +
+          '</div>' +
+          '<div class="flex items-center justify-between mb-3">' +
+            '<div>' +
+              '<span class="text-2xl font-black text-white">$' + (l.price_hourly||0).toFixed(0) + '</span>' +
+              '<span class="text-gray-400 text-xs">/hr</span>' +
+              (l.price_daily ? '<span class="text-gray-500 text-xs ml-2">$' + l.price_daily.toFixed(0) + '/day</span>' : '') +
+            '</div>' +
+            '<div class="flex items-center gap-1">' +
+              '<i class="fas fa-star text-amber-400 text-xs"></i>' +
+              '<span class="text-white text-sm font-semibold">' + (l.rating||0).toFixed(1) + '</span>' +
+              '<span class="text-gray-400 text-xs">(' + (l.review_count||0) + ')</span>' +
+              (l.pri_score != null ? '<span class="ml-1 text-xs font-semibold" style="color:' + (l.pri_score>=95?'#16a34a':l.pri_score>=85?'#2563eb':l.pri_score>=75?'#ca8a04':'#dc2626') + '">• ' + l.pri_score + '%</span>' : '') +
+            '</div>' +
+          '</div>' +
+          (tags.length > 0 ? '<div class="flex gap-1 flex-wrap mb-3">' + tags.slice(0,4).map(t => '<span class="text-xs bg-white/5 text-gray-400 px-2 py-0.5 rounded-full flex items-center gap-1"><i class=\\"fas ' + t.i + ' text-indigo-400 text-xs\\"></i>' + t.t + '</span>').join('') + '</div>' : '') +
+          (l.instant_book ? '<div class="flex items-center gap-1.5 mb-3"><span class="w-1.5 h-1.5 bg-lime-500 rounded-full"></span><span class="text-lime-400 text-xs font-semibold">Instant Book Available</span></div>' : '') +
+          '<a href="/listing/' + l.id + '" class="block w-full py-2.5 btn-primary text-white text-center text-sm font-bold rounded-xl transition-all">View &amp; Reserve</a>' +
+        '</div>'
+      )
       .addTo(map)
 
     activePopup = popup
