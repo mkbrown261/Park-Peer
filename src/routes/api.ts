@@ -557,45 +557,68 @@ apiRoutes.get('/geocode/autocomplete', requireUserAuth(), async (c) => {
   try {
     const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(q)}.json` +
       `?access_token=${token}` +
-      `&country=${country}` +
+      `&country=${encodeURIComponent(country)}` +
       `&types=address` +
       `&autocomplete=true` +
+      `&fuzzyMatch=true` +
       `&limit=${limit}`
 
     const res  = await fetch(url)
+    if (!res.ok) {
+      const errText = await res.text()
+      console.error('[GET /api/geocode/autocomplete] Mapbox error:', res.status, errText.substring(0, 200))
+      return c.json({ error: 'Geocoding service error', features: [] }, 502)
+    }
     const data: any = await res.json()
 
-    if (!data.features) return c.json({ features: [] })
+    console.log(`[GET /api/geocode/autocomplete] q="${q}" raw_count=${data.features?.length ?? 0}`)
 
-    // Shape the response — only expose what the frontend needs
+    if (!data.features || !data.features.length) {
+      return c.json({ features: [] })
+    }
+
+    // Shape the response — only expose what the frontend needs.
+    // Mapbox v5 address feature anatomy:
+    //   f.text             = street name only (e.g. "Main Street")
+    //   f.properties.address = house number (e.g. "123")  ← NOT the full street
+    //   f.place_name       = full formatted address (e.g. "123 Main Street, Austin, Texas 78701, United States")
+    //   f.context[]        = array of parent features (postcode, place, region, country)
     const features = data.features.map((f: any) => {
-      const ctx   = f.context || []
-      const city  = ctx.find((c: any) => c.id?.startsWith('place'))?.text     || ''
-      const state = ctx.find((c: any) => c.id?.startsWith('region'))?.text    || ''
-      const zip   = ctx.find((c: any) => c.id?.startsWith('postcode'))?.text  || ''
-      const country_text = ctx.find((c: any) => c.id?.startsWith('country'))?.short_code?.toUpperCase() || 'US'
+      const ctx    = f.context || []
+      const city   = ctx.find((x: any) => x.id?.startsWith('place'))?.text    || ''
+      const state  = ctx.find((x: any) => x.id?.startsWith('region'))?.text   || ''
+      const zip    = ctx.find((x: any) => x.id?.startsWith('postcode'))?.text || ''
+      const countryCode = ctx.find((x: any) => x.id?.startsWith('country'))?.short_code?.toUpperCase() || 'US'
+
+      // Build street address: house number (from properties.address) + street name (f.text)
+      const houseNum  = (f.properties?.address || '').trim()
+      const streetName = (f.text || '').trim()
+      const street    = houseNum ? `${houseNum} ${streetName}` : streetName
 
       return {
-        id:               f.id,
-        place_name:       f.place_name,
-        text:             f.text,           // street number + name
-        address:          f.properties?.address || f.text,
+        id:          f.id,
+        place_name:  f.place_name,           // full display string for dropdown
+        text:        street,                  // "123 Main Street" — street address line
+        address:     street,                  // alias kept for backward compat
         city,
         state,
         zip,
-        country:          country_text,
-        lat:              f.center?.[1] ?? null,
-        lng:              f.center?.[0] ?? null,
-        relevance:        f.relevance,
+        country:     countryCode,
+        lat:         f.center?.[1] ?? null,
+        lng:         f.center?.[0] ?? null,
+        relevance:   f.relevance,
+        place_id:    f.id,                   // use Mapbox feature id as place_id
       }
     })
-    // Filter: must have lat/lng and be a real address (relevance > 0.4)
-    .filter((f: any) => f.lat && f.lng && f.relevance > 0.3)
+    // Only require lat/lng — do NOT filter by relevance during autocomplete
+    // (partial queries return low relevance scores by design)
+    .filter((f: any) => f.lat != null && f.lng != null)
 
+    console.log(`[GET /api/geocode/autocomplete] q="${q}" returned=${features.length}`)
     return c.json({ features })
   } catch (e: any) {
     console.error('[GET /api/geocode/autocomplete]', e.message)
-    return c.json({ error: 'Geocoding service unavailable' }, 502)
+    return c.json({ error: 'Geocoding service unavailable', features: [] }, 502)
   }
 })
 

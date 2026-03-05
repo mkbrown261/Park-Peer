@@ -1635,22 +1635,16 @@ hostDashboard.get('/', async (c) => {
         clearError();
 
         try {
-          // Resolve full geocode details via server proxy
-          const res  = await fetch('/api/geocode/autocomplete?q=' + encodeURIComponent(s.place_name) + '&types=address&limit=1', {
-            credentials: 'same-origin'
-          });
-          const data = await res.json().catch(() => ({}));
-          const item = (data.features || [])[0] || s;
-
-          // Extract components
-          const lat      = item.lat       || s.lat;
-          const lng      = item.lng       || s.lng;
-          const address  = item.address   || s.address   || '';
-          const city     = item.city      || s.city      || '';
-          const state    = item.state     || s.state     || '';
-          const zip      = item.zip       || s.zip       || '';
-          const placeId  = item.place_id  || s.place_id  || s.id || '';
-          const formatted= item.place_name|| s.place_name|| address;
+          // All data is already in the suggestion object returned by the first autocomplete call.
+          // No second network request needed — avoids re-query failures on full place_name strings.
+          const lat      = s.lat      || null;
+          const lng      = s.lng      || null;
+          const address  = (s.address || s.text || '').trim();
+          const city     = (s.city    || '').trim();
+          const state    = (s.state   || '').trim();
+          const zip      = (s.zip     || '').trim();
+          const placeId  = s.place_id || s.id || '';
+          const formatted = s.place_name || address;
 
           if (!lat || !lng) {
             setIcon('fa-triangle-exclamation text-red-400');
@@ -1667,7 +1661,7 @@ hostDashboard.get('/', async (c) => {
             return;
           }
 
-          // Populate hidden fields
+          // Populate the visible input and all hidden fields
           const inp = inputEl();
           if (inp) inp.value = formatted;
           hiddenAddr().value  = address;
@@ -1686,7 +1680,7 @@ hostDashboard.get('/', async (c) => {
           showMapPreview(lat, lng);
           addrState = 'selected';
 
-        } catch {
+        } catch(err) {
           setIcon('fa-triangle-exclamation text-red-400');
           setBadge('✗ Error', 'text-red-400');
           showError('Address verification failed. Please try again.');
