@@ -458,7 +458,7 @@ searchPage.get('/', async (c) => {
     document.getElementById('filter-date').value = today
     document.getElementById('filter-date').min = today
 
-    // Parse initial query
+    // Parse initial query from URL (?q=wilmington or ?city=wilmington)
     const urlQ = new URLSearchParams(window.location.search)
     const qVal = urlQ.get('q') || urlQ.get('city') || ''
     if (qVal) document.getElementById('search-input').value = qVal
@@ -470,32 +470,32 @@ searchPage.get('/', async (c) => {
     } catch(e) {}
     initMap()
 
-    // Load listings based on initial search
+    // ALWAYS load all listings immediately — never block on geolocation.
+    // If a text query is present, geocode + load. Otherwise load everything
+    // now, then silently refine with geolocation once it resolves.
     if (qVal) {
       await geocodeAndLoad(qVal)
     } else {
-      // Try user's location first
+      // Load all listings right away so the map is never empty
+      await loadListings()
+
+      // Optionally refine with user's real location in the background
       if (navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(
           pos => {
             mapCenter = { lat: pos.coords.latitude, lng: pos.coords.longitude }
             if (map) map.flyTo({ center: [mapCenter.lng, mapCenter.lat], zoom: 12 })
-            loadListings()
+            loadListings()  // re-load centered on user
           },
-          () => showPromptLocation()  // User denied location — ask them to search
+          () => {}  // silently ignore — listings already shown
         )
-      } else {
-        showPromptLocation()  // No geolocation API — ask them to search
       }
     }
   })
 
   function showPromptLocation() {
-    document.getElementById('loading-skeleton').style.display = 'none'
-    document.getElementById('no-results').classList.add('hidden')
-    document.getElementById('prompt-location').classList.remove('hidden')
-    document.getElementById('count-num').textContent = '–'
-    document.getElementById('count-label').textContent = 'enter a location'
+    // No longer used to block listing display — kept for compatibility
+    document.getElementById('prompt-location')?.classList.add('hidden')
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
