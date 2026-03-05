@@ -937,7 +937,8 @@ hostDashboard.get('/', async (c) => {
 
       // Validate required fields
       if (!title) { showListingError('Space title is required.'); return; }
-      if (addrVerif !== '1' || !lat || !lng) {
+      // Require that address was selected from autocomplete (has lat/lng)
+      if (!lat || !lng) {
         showListingError('Please select a verified address from the autocomplete suggestions.');
         const inp = document.getElementById('listing-address-input');
         if (inp) inp.focus();

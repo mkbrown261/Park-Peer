@@ -1263,29 +1263,42 @@ apiRoutes.post('/listings', requireUserAuth(), async (c) => {
     const description  = validateInput(body.description,  { maxLength: 2000 })
     const instantBook  = body.instant_book === true || body.instant_book === 1 || body.instant_book === '1' ? 1 : 0
 
-    // ── Address verification — REQUIRED ──────────────────────────────────
-    // lat, lng, and place_id must come from the Mapbox autocomplete selection.
-    // We do NOT accept manually typed addresses without geocoordinates.
-    const lat      = body.lat      ? parseFloat(body.lat)      : null
-    const lng      = body.lng      ? parseFloat(body.lng)      : null
+    // ── Address verification ──────────────────────────────────────────────
     const placeId  = validateInput(body.place_id, { maxLength: 200 }) || null
+    let lat        = body.lat  ? parseFloat(body.lat)  : null
+    let lng        = body.lng  ? parseFloat(body.lng)  : null
 
     // Reject PO Boxes server-side
     if (/\b(p\.?\s*o\.?\s*box|post\s*office\s*box)\b/i.test(address)) {
       return c.json({ error: 'PO Box addresses are not accepted. Please use a physical street address.' }, 400)
     }
 
-    // Require verified lat/lng — no coordinates = no listing
-    if (!lat || !lng || isNaN(lat) || isNaN(lng)) {
-      return c.json({
-        error: 'A verified address with map coordinates is required. Please select an address from the autocomplete suggestions.',
-        address_verification_required: true,
-      }, 400)
+    // If frontend didn't supply coordinates, fall back to server-side Mapbox geocoding
+    if ((!lat || !lng || isNaN(lat) || isNaN(lng)) && c.env?.MAPBOX_TOKEN) {
+      try {
+        const fullAddr = `${address}, ${city}, ${state} ${zip}`
+        const geoUrl   = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(fullAddr)}.json` +
+          `?access_token=${c.env.MAPBOX_TOKEN}&country=us&types=address&limit=1`
+        const geoRes   = await fetch(geoUrl)
+        const geoData: any = await geoRes.json()
+        const feature  = geoData.features?.[0]
+        if (feature?.center) {
+          lat = feature.center[1]
+          lng = feature.center[0]
+          console.log(`[POST /api/listings] Server geocoded: lat=${lat} lng=${lng}`)
+        }
+      } catch (geoErr: any) {
+        console.warn('[POST /api/listings] Server geocoding failed (non-fatal):', geoErr.message)
+      }
     }
 
-    // Validate coordinate ranges
-    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-      return c.json({ error: 'Invalid map coordinates. Please reselect your address.' }, 400)
+    // Normalise invalid coords to null rather than blocking the listing
+    if (lat !== null && lng !== null && !isNaN(lat) && !isNaN(lng)) {
+      if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+        lat = null; lng = null
+      }
+    } else {
+      lat = null; lng = null
     }
 
     const finalLat = lat
