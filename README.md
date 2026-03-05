@@ -3,7 +3,8 @@
 > **"Your Space. Their Spot."** — The Airbnb for parking driveways, garages, and lots.
 
 ## 🌐 Live URL
-**App:** https://3000-irmaapulgdg0tqn4wkd1q-c81df28e.sandbox.novita.ai
+**App:** https://parkpeer.pages.dev
+**Admin Panel:** https://parkpeer.pages.dev/admin/login
 
 ## 🎯 Project Overview
 - **Goal:** Peer-to-peer parking marketplace where users list private parking and drivers book affordable spots
@@ -45,6 +46,64 @@
 | GET | `/api/estimate-earnings` | Calculate host earnings |
 | GET | `/api/listings/:id/availability` | Check availability |
 | GET | `/api/admin/stats` | Admin platform statistics |
+
+
+
+## 🛡️ Admin User Management System
+
+### Admin Control Panel (`/admin/user-control`)
+Full user lifecycle management with compliance, refunds, and auditing.
+
+#### Features Implemented
+| Feature | Status |
+|---|---|
+| Paginated user list with search/filter | ✅ |
+| Suspend / Unsuspend accounts | ✅ |
+| Delete account with PII scrub (GDPR) | ✅ |
+| Blocker enforcement (disputes, active bookings) | ✅ |
+| Force-override with admin password re-entry | ✅ |
+| Auto-calculate refundable balance | ✅ |
+| Stripe refund for driver credits | ✅ |
+| Manual refund flag for host earnings | ✅ |
+| AdminAuditLog (immutable) | ✅ |
+| AdminRefundLog (all money movements) | ✅ |
+| User deletions GDPR compliance record | ✅ |
+| Sidebar user detail panel | ✅ |
+| Real-time toast notifications | ✅ |
+| Audit Log viewer (`/admin/audit-log`) | ✅ |
+| Refund Log viewer | ✅ |
+
+#### Admin API Endpoints
+| Method | Route | Description |
+|---|---|---|
+| GET | `/api/admin/stats` | Dashboard stats |
+| GET | `/api/admin/users` | Paginated user list |
+| GET | `/api/admin/users/:id` | User detail + balance + blockers |
+| POST | `/api/admin/users/:id/delete` | Full deletion pipeline |
+| POST | `/api/admin/users/:id/suspend` | Suspend or unsuspend |
+| POST | `/api/admin/users/:id/refund` | Standalone manual refund |
+| POST | `/api/admin/verify-password` | Admin password re-confirm |
+| GET | `/api/admin/audit-log` | Paginated audit log |
+| GET | `/api/admin/refund-log` | Paginated refund log |
+
+#### Deletion Pipeline Steps
+1. Verify admin identity via session cookie
+2. Check blockers (open disputes, active bookings) — block or force-override
+3. Cancel all future bookings (`cancel_reason = 'Account deleted by admin'`)
+4. Deactivate all listings (→ `archived`)
+5. Calculate refundable balance (driver future credits + host unpaid earnings)
+6. Issue Stripe refunds via Payment Intent API (auto-fallback to `manual_required`)
+7. Write to `admin_audit_log` (immutable, with full details JSON)
+8. Write to `admin_refund_log` (per-refund record)
+9. Write to `user_deletions` (GDPR compliance, email SHA-256 hashed)
+10. Soft-delete: scrub PII (email → `deleted_{id}@deleted.parkpeer`, name → `[Deleted User]`)
+
+#### Database Tables
+| Table | Purpose |
+|---|---|
+| `admin_audit_log` | Immutable log of every admin action |
+| `admin_refund_log` | Every refund/money-movement record |
+| `user_deletions` | GDPR compliance records (email hashed) |
 
 ## 🧠 Data Models
 
