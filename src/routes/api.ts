@@ -970,15 +970,43 @@ apiRoutes.post('/payments/refund', async (c) => {
       ])
     }
 
-    // ── In-app notification: refund/cancellation ─────────────────────────
-    if (body.requester_user_id) {
-      notifyRefundProcessed(env as any, {
-        userId: Number(body.requester_user_id),
-        userRole: body.requester_role || 'driver',
-        amount: refundAmount,
-        bookingId: booking_id || 0,
-      }).catch(() => {})
-    }
+    // ── In-app notifications: cancellation for driver + host ─────────────
+    ;(async () => {
+      try {
+        const db = env?.DB
+        if (!db || !booking_id) return
+        // Look up booking + both parties
+        const bk = await db.prepare(`
+          SELECT b.id, b.driver_id, b.host_id, b.start_time, b.end_time,
+                 l.title AS listing_title,
+                 d.full_name AS driver_name, d.email AS driver_email, d.phone AS driver_phone,
+                 h.full_name AS host_name,   h.email AS host_email,   h.phone AS host_phone
+          FROM bookings b
+          LEFT JOIN listings l ON b.listing_id = l.id
+          LEFT JOIN users d    ON b.driver_id  = d.id
+          LEFT JOIN users h    ON b.host_id    = h.id
+          WHERE b.id = ?
+        `).bind(booking_id).first<any>()
+
+        if (!bk) return
+        const cancelledBy = body.cancelled_by || body.requester_role || 'user'
+
+        await notifyBookingCancelled(env as any, {
+          driverId:     bk.driver_id,
+          driverName:   bk.driver_name  || 'Driver',
+          driverEmail:  bk.driver_email || '',
+          driverPhone:  bk.driver_phone || null,
+          hostId:       bk.host_id,
+          hostName:     bk.host_name    || 'Host',
+          hostEmail:    bk.host_email   || '',
+          hostPhone:    bk.host_phone   || null,
+          bookingId:    booking_id,
+          listingTitle: bk.listing_title || 'Parking Space',
+          refundAmount,
+          cancelledBy,
+        })
+      } catch (ne: any) { console.error('[notify cancel]', ne.message) }
+    })()
 
     return c.json({
       success: true,
@@ -1033,6 +1061,43 @@ apiRoutes.post('/webhooks/stripe', async (c) => {
           await db.prepare(
             `UPDATE payments SET status = 'succeeded' WHERE stripe_payment_intent_id = ?`
           ).bind(pi.id).run()
+
+          // Fire in-app notification for webhook-confirmed bookings
+          ;(async () => {
+            try {
+              const bk = await db.prepare(`
+                SELECT b.id, b.driver_id, b.host_id, b.start_time, b.end_time,
+                       b.total_charged, b.host_payout, b.vehicle_plate,
+                       l.title AS listing_title, l.address, l.city,
+                       d.full_name AS driver_name, d.email AS driver_email, d.phone AS driver_phone,
+                       h.full_name AS host_name,   h.email AS host_email,   h.phone AS host_phone
+                FROM bookings b
+                LEFT JOIN listings l ON b.listing_id = l.id
+                LEFT JOIN users d    ON b.driver_id  = d.id
+                LEFT JOIN users h    ON b.host_id    = h.id
+                WHERE b.stripe_payment_intent_id = ?
+              `).bind(pi.id).first<any>()
+              if (!bk) return
+              await notifyBookingConfirmed(env as any, {
+                driverId:       bk.driver_id,
+                driverName:     bk.driver_name  || 'Driver',
+                driverEmail:    bk.driver_email || '',
+                driverPhone:    bk.driver_phone || null,
+                hostId:         bk.host_id,
+                hostName:       bk.host_name    || 'Host',
+                hostEmail:      bk.host_email   || '',
+                hostPhone:      bk.host_phone   || null,
+                bookingId:      bk.id,
+                listingTitle:   bk.listing_title || 'Parking Space',
+                listingAddress: [bk.address, bk.city].filter(Boolean).join(', '),
+                startTime:      bk.start_time,
+                endTime:        bk.end_time,
+                totalCharged:   bk.total_charged || (pi.amount / 100),
+                hostPayout:     bk.host_payout  || 0,
+                vehiclePlate:   bk.vehicle_plate || '',
+              })
+            } catch (ne: any) { console.error('[Webhook notify confirmed]', ne.message) }
+          })()
         } catch (e: any) {
           console.error('[Webhook] D1 update error (payment_intent.succeeded):', e.message)
         }
@@ -1893,11 +1958,13 @@ apiRoutes.post('/bookings', requireUserAuth(), async (c) => {
               hostEmail: host.email || '',
               hostPhone: host.phone || null,
               bookingId: Number(dbBookingId),
+              listingId: listing_id,
               listingTitle,
               listingAddress,
               startTime: start_datetime,
               endTime: end_datetime,
               totalCharged: total,
+              hostPayout: hostPay,
             })
           }
         } catch (ne: any) { console.error('[notify booking request]', ne.message) }
@@ -3613,22 +3680,28 @@ apiRoutes.get('/notifications', requireUserAuth(), async (c) => {
 
   const limit  = Math.min(parseInt(c.req.query('limit')  || '30'), 100)
   const offset = parseInt(c.req.query('offset') || '0')
+  const isAdmin = (session?.role || '').toLowerCase() === 'admin'
 
   try {
+    // Admins see their own notifications + all admin-role notifications (user_id=0)
+    const userIdClause = isAdmin
+      ? '(user_id = ? OR (user_id = 0 AND user_role = \'admin\'))'
+      : 'user_id = ?'
+
     const rows = await db.prepare(`
       SELECT id, type, title, message, related_entity, read_status, created_at
       FROM notifications
-      WHERE user_id = ? AND delivery_inapp = 1
+      WHERE ${userIdClause} AND delivery_inapp = 1
       ORDER BY created_at DESC
       LIMIT ? OFFSET ?
     `).bind(userId, limit, offset).all<any>()
 
     const unread = await db.prepare(
-      'SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND read_status = 0 AND delivery_inapp = 1'
+      `SELECT COUNT(*) AS n FROM notifications WHERE ${userIdClause} AND read_status = 0 AND delivery_inapp = 1`
     ).bind(userId).first<{ n: number }>()
 
     const total = await db.prepare(
-      'SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND delivery_inapp = 1'
+      `SELECT COUNT(*) AS n FROM notifications WHERE ${userIdClause} AND delivery_inapp = 1`
     ).bind(userId).first<{ n: number }>()
 
     return c.json({
@@ -3654,15 +3727,31 @@ apiRoutes.patch('/notifications/read', requireUserAuth(), async (c) => {
   let body: any = {}
   try { body = await c.req.json() } catch {}
 
+  const isAdmin = (session?.role || '').toLowerCase() === 'admin'
+
   try {
     if (body.id) {
-      await db.prepare(
-        'UPDATE notifications SET read_status = 1 WHERE id = ? AND user_id = ?'
-      ).bind(body.id, userId).run()
+      // Mark specific notification — also allow admin to mark user_id=0 rows
+      if (isAdmin) {
+        await db.prepare(
+          'UPDATE notifications SET read_status = 1 WHERE id = ? AND (user_id = ? OR user_id = 0)'
+        ).bind(body.id, userId).run()
+      } else {
+        await db.prepare(
+          'UPDATE notifications SET read_status = 1 WHERE id = ? AND user_id = ?'
+        ).bind(body.id, userId).run()
+      }
     } else {
-      await db.prepare(
-        'UPDATE notifications SET read_status = 1 WHERE user_id = ? AND read_status = 0'
-      ).bind(userId).run()
+      // Mark all read
+      if (isAdmin) {
+        await db.prepare(
+          'UPDATE notifications SET read_status = 1 WHERE (user_id = ? OR (user_id = 0 AND user_role = \'admin\')) AND read_status = 0'
+        ).bind(userId).run()
+      } else {
+        await db.prepare(
+          'UPDATE notifications SET read_status = 1 WHERE user_id = ? AND read_status = 0'
+        ).bind(userId).run()
+      }
     }
     return c.json({ success: true })
   } catch (e: any) {

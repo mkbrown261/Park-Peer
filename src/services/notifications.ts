@@ -123,53 +123,70 @@ export async function notifyAdmin(
 // EVENT FUNCTIONS — call these from API routes
 // ════════════════════════════════════════════════════════════════════════════
 
-// ── 1. Booking requested → HOST ───────────────────────────────────────────────
+// ── 1. Booking requested → HOST (alert) + DRIVER (confirmation of submission) ─
 export async function notifyBookingRequest(env: Env, data: {
-  hostId:        number
-  hostName:      string
-  hostEmail:     string
-  hostPhone:     string | null
-  driverName:    string
-  bookingId:     number
-  listingId:     number
-  listingTitle:  string
-  startTime:     string
-  endTime:       string
-  hostPayout:    number
+  driverId:       number
+  driverName:     string
+  driverEmail:    string
+  driverPhone:    string | null
+  hostId:         number
+  hostName:       string
+  hostEmail:      string
+  hostPhone:      string | null
+  bookingId:      number
+  listingId:      number
+  listingTitle:   string
+  listingAddress: string
+  startTime:      string
+  endTime:        string
+  totalCharged:   number   // what driver pays
+  hostPayout:     number   // host's share
 }): Promise<void> {
   const db = env.DB
   if (!db) return
   try {
-    const prefs = await getPrefs(db, data.hostId)
-    const notifId = await createInApp(db, {
+    // ── Host: new booking alert ──────────────────────────────────────────
+    const hPrefs = await getPrefs(db, data.hostId)
+    const hNotifId = await createInApp(db, {
       userId:   data.hostId,
       userRole: 'host',
       type:     'booking_request',
-      title:    'New Booking Request',
-      message:  `${data.driverName} wants to book "${data.listingTitle}" · ${fmtRange(data.startTime, data.endTime)}`,
+      title:    '🚗 New Booking Request',
+      message:  `${data.driverName} wants to book "${data.listingTitle}" · ${fmtRange(data.startTime, data.endTime)} · $${data.hostPayout.toFixed(2)} payout`,
       relatedEntity: { type: 'booking', id: data.bookingId },
-    }, prefs.booking_email === 1, prefs.booking_sms === 1)
+    }, hPrefs.booking_email === 1, hPrefs.booking_sms === 1)
 
-    if (prefs.booking_email === 1) {
+    if (hPrefs.booking_email === 1) {
       sendHostBookingAlert(env as any, {
         hostEmail: data.hostEmail, hostName: data.hostName,
         bookingId: data.bookingId, listingTitle: data.listingTitle,
         driverName: data.driverName, startTime: data.startTime,
         endTime: data.endTime, hostPayout: data.hostPayout,
-      }).then(() => markEmailSent(db, notifId)).catch(() => {})
+      }).then(() => markEmailSent(db, hNotifId)).catch(() => {})
     }
 
-    if (prefs.booking_sms === 1 && data.hostPhone) {
+    if (hPrefs.booking_sms === 1 && data.hostPhone) {
       smsSendHostAlert(env as any, {
         toPhone: data.hostPhone, hostName: data.hostName,
         bookingId: data.bookingId, listingTitle: data.listingTitle,
         driverName: data.driverName, startTime: data.startTime,
         endTime: data.endTime, hostPayout: data.hostPayout,
-      }).then(() => markSmsSent(db, notifId)).catch(() => {})
+      }).then(() => markSmsSent(db, hNotifId)).catch(() => {})
     }
 
-    // Admin gets notified too
-    notifyAdmin(env, 'booking_request', 'New Booking',
+    // ── Driver: booking submitted confirmation ───────────────────────────
+    const dPrefs = await getPrefs(db, data.driverId)
+    await createInApp(db, {
+      userId:   data.driverId,
+      userRole: 'driver',
+      type:     'booking_request',
+      title:    '📋 Booking Submitted',
+      message:  `Your request for "${data.listingTitle}" · ${fmtRange(data.startTime, data.endTime)} is pending host approval.`,
+      relatedEntity: { type: 'booking', id: data.bookingId },
+    }, false, false) // no duplicate email/SMS — Stripe confirm will send those
+
+    // ── Admin ────────────────────────────────────────────────────────────
+    notifyAdmin(env, 'booking_request', '🚗 New Booking',
       `${data.driverName} booked "${data.listingTitle}" — #${data.bookingId}`,
       { type: 'booking', id: data.bookingId })
   } catch (e: any) {
@@ -177,50 +194,69 @@ export async function notifyBookingRequest(env: Env, data: {
   }
 }
 
-// ── 2. Booking confirmed (payment captured) → DRIVER ─────────────────────────
+// ── 2. Booking confirmed (payment captured) → DRIVER + HOST ──────────────────
 export async function notifyBookingConfirmed(env: Env, data: {
   driverId:       number
   driverName:     string
   driverEmail:    string
   driverPhone:    string | null
+  hostId:         number
+  hostName:       string
+  hostEmail:      string
+  hostPhone:      string | null
   bookingId:      number
   listingTitle:   string
   listingAddress: string
   startTime:      string
   endTime:        string
   totalCharged:   number
+  hostPayout:     number
   vehiclePlate?:  string
 }): Promise<void> {
   const db = env.DB
   if (!db) return
   try {
-    const prefs = await getPrefs(db, data.driverId)
-    const notifId = await createInApp(db, {
+    // ── Driver: booking confirmed ────────────────────────────────────────
+    const dPrefs = await getPrefs(db, data.driverId)
+    const dNotifId = await createInApp(db, {
       userId:   data.driverId,
       userRole: 'driver',
       type:     'booking_confirmed',
       title:    '✅ Booking Confirmed!',
-      message:  `Your reservation at "${data.listingTitle}" is confirmed · ${fmtRange(data.startTime, data.endTime)}`,
+      message:  `Your reservation at "${data.listingTitle}" is confirmed · ${fmtRange(data.startTime, data.endTime)} · $${data.totalCharged.toFixed(2)} charged`,
       relatedEntity: { type: 'booking', id: data.bookingId },
-    }, prefs.booking_email === 1, prefs.booking_sms === 1)
+    }, dPrefs.booking_email === 1, dPrefs.booking_sms === 1)
 
-    if (prefs.booking_email === 1) {
+    if (dPrefs.booking_email === 1) {
       sendBookingConfirmation(env as any, {
         driverEmail: data.driverEmail, driverName: data.driverName,
         bookingId: data.bookingId, listingTitle: data.listingTitle,
         listingAddress: data.listingAddress, startTime: data.startTime,
         endTime: data.endTime, totalCharged: data.totalCharged,
         vehiclePlate: data.vehiclePlate || '',
-      }).then(() => markEmailSent(db, notifId)).catch(() => {})
+      }).then(() => markEmailSent(db, dNotifId)).catch(() => {})
     }
 
-    if (prefs.booking_sms === 1 && data.driverPhone) {
+    if (dPrefs.booking_sms === 1 && data.driverPhone) {
       smsSendBookingConfirmation(env as any, {
         toPhone: data.driverPhone, driverName: data.driverName,
         bookingId: data.bookingId, listingTitle: data.listingTitle,
         listingAddress: data.listingAddress, startTime: data.startTime,
         endTime: data.endTime, totalCharged: data.totalCharged,
-      }).then(() => markSmsSent(db, notifId)).catch(() => {})
+      }).then(() => markSmsSent(db, dNotifId)).catch(() => {})
+    }
+
+    // ── Host: payment received / booking confirmed ───────────────────────
+    if (data.hostId > 0) {
+      const hPrefs = await getPrefs(db, data.hostId)
+      await createInApp(db, {
+        userId:   data.hostId,
+        userRole: 'host',
+        type:     'booking_confirmed',
+        title:    '💳 Payment Received',
+        message:  `${data.driverName} paid for "${data.listingTitle}" · ${fmtRange(data.startTime, data.endTime)} · $${data.hostPayout.toFixed(2)} payout`,
+        relatedEntity: { type: 'booking', id: data.bookingId },
+      }, false, false) // host already got email alert at booking_request stage
     }
   } catch (e: any) {
     console.error('[notifyBookingConfirmed]', e.message)

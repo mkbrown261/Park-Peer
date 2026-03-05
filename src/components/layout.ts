@@ -9,6 +9,7 @@ export const Layout = (title: string, content: string, extraHead = '', session: 
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>${title} — ParkPeer</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg"/>
+  <script>window._ppUserRole = ${JSON.stringify((session?.role || '').toLowerCase())};</script>
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet"/>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet"/>
@@ -216,13 +217,15 @@ export const Layout = (title: string, content: string, extraHead = '', session: 
     }
 
     function notifLink(n) {
-      if (!n.related_entity) return null;
+      if (!n.related_entity) return '/dashboard';
       const { type, id } = n.related_entity;
-      if (type === 'booking') return '/dashboard';
-      if (type === 'listing') return '/listing/' + id;
-      if (type === 'user')    return '/dashboard';
-      if (type === 'dispute') return '/dashboard';
-      return '/dashboard';
+      const role = (window._ppUserRole || '').toLowerCase();
+      const isAdmin = role === 'admin';
+      if (type === 'booking')  return isAdmin ? '/admin/bookings'    : '/dashboard';
+      if (type === 'listing')  return isAdmin ? '/admin/listings'    : '/listing/' + id;
+      if (type === 'user')     return isAdmin ? '/admin/user-control': '/dashboard';
+      if (type === 'dispute')  return isAdmin ? '/admin/disputes'    : '/dashboard';
+      return isAdmin ? '/admin' : '/dashboard';
     }
 
     function timeAgo(dateStr) {
