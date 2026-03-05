@@ -105,11 +105,20 @@ export async function adminAuthMiddleware(c: any, next: any) {
 }
 
 // ─── Auth guard middleware (API routes — returns JSON 401, never redirects) ──
+// Accepts token from cookie OR Authorization: Bearer header (for JS fetch calls)
 export async function adminApiAuthMiddleware(c: any, next: any) {
   const tokenSecret: string =
     (c.env?.ADMIN_TOKEN_SECRET as string | undefined) || 'pp-admin-hmac-dev-key-change-in-prod'
 
-  const token = getCookie(c, SESSION_COOKIE)
+  // Try cookie first, then Authorization: Bearer header
+  let token = getCookie(c, SESSION_COOKIE)
+  if (!token) {
+    const authHeader = c.req.header('Authorization') || ''
+    if (authHeader.startsWith('Bearer ')) {
+      token = authHeader.slice(7)
+    }
+  }
+
   if (!token || !(await verifyToken(token, tokenSecret))) {
     return c.json({ error: 'Not authenticated', redirect: '/admin/login?reason=auth' }, 401)
   }
@@ -333,6 +342,9 @@ adminAuth.get('/login', async (c) => {
         const data = await res.json()
 
         if (res.ok && data.success) {
+          // Store token in sessionStorage so API calls can use it via Bearer header
+          // This is the primary auth mechanism - bypasses cookie path issues
+          if (data.token) sessionStorage.setItem('pp_admin_token', data.token)
           icon.className = 'fas fa-check'
           label.textContent = 'Access Granted'
           btn.style.background = 'linear-gradient(135deg, #00C853, #00a844)'
@@ -427,7 +439,7 @@ adminAuth.post('/login', async (c) => {
   // This forces browsers to discard the old restricted-path cookie
   deleteCookie(c, SESSION_COOKIE, { path: '/admin' })
 
-  return c.json({ success: true })
+  return c.json({ success: true, token })
 })
 
 // ── GET /admin/logout ─────────────────────────────────────────────────────────

@@ -49,7 +49,12 @@ adminApiRoutes.use('/*', adminApiAuthMiddleware)
  * If no DB admin record found (env-var based auth), returns synthetic id=0 record.
  */
 async function getAdminUser(c: any): Promise<{ id: number; email: string; username: string } | null> {
-  const token = getCookie(c, '__pp_admin')
+  // Accept token from cookie OR Authorization: Bearer header
+  let token = getCookie(c, '__pp_admin')
+  if (!token) {
+    const authHeader = c.req.header('Authorization') || ''
+    if (authHeader.startsWith('Bearer ')) token = authHeader.slice(7)
+  }
   if (!token) return null
 
   // Token format: <username>.<issuedAt>.<hmac>  (from admin-auth.ts signToken)

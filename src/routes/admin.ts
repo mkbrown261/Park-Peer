@@ -1298,6 +1298,19 @@ adminPanel.get('/user-control', async (c: any) => {
     let currentDeleteUserName = ''
     let pendingBlockers = null
 
+    // ── Auth helper — always sends Bearer token + cookie ───────────────────
+    // Uses sessionStorage token (set at login) so cookie path issues are bypassed
+    function adminFetch(url, options) {
+      options = options || {}
+      const token = sessionStorage.getItem('pp_admin_token') || ''
+      const headers = Object.assign({}, options.headers || {})
+      if (token) headers['Authorization'] = 'Bearer ' + token
+      return fetch(url, Object.assign({}, options, {
+        credentials: 'same-origin',
+        headers: headers
+      }))
+    }
+
     // ── Load users table ───────────────────────────────────────────────────
     async function ucLoad() {
       const q      = document.getElementById('uc-search').value.trim()
@@ -1310,7 +1323,7 @@ adminPanel.get('/user-control', async (c: any) => {
       if (status) params.set('status', status)
 
       try {
-        const r = await fetch('/api/admin/users?' + params.toString(), { credentials: 'same-origin' })
+        const r = await adminFetch('/api/admin/users?' + params.toString())
         if (r.status === 401) { window.location.href = '/admin/login?reason=auth'; return }
         if (!r.ok) throw new Error('Status ' + r.status)
         const d = await r.json()
@@ -1415,9 +1428,8 @@ adminPanel.get('/user-control', async (c: any) => {
       btn.disabled = true
       document.getElementById('sus-btn-text').textContent = 'Processing...'
       try {
-        const r = await fetch('/api/admin/users/' + currentSuspendUserId + '/suspend', {
+        const r = await adminFetch('/api/admin/users/' + currentSuspendUserId + '/suspend', {
           method: 'POST',
-          credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: currentSuspendAction, reason })
         })
@@ -1470,7 +1482,7 @@ adminPanel.get('/user-control', async (c: any) => {
 
     async function loadDeletePreview(userId) {
       try {
-        const r = await fetch('/api/admin/users/' + userId, { credentials: 'same-origin' })
+        const r = await adminFetch('/api/admin/users/' + userId)
         if (!r.ok) return
         const d = await r.json()
         if (d.balance && d.balance.total > 0) {
@@ -1522,9 +1534,8 @@ adminPanel.get('/user-control', async (c: any) => {
       pwErr.classList.add('hidden')
 
       try {
-        const res = await fetch('/api/admin/users/' + currentDeleteUserId + '/delete', {
+        const res = await adminFetch('/api/admin/users/' + currentDeleteUserId + '/delete', {
           method: 'POST',
-          credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ reason, force, password })
         })
@@ -1589,7 +1600,7 @@ adminPanel.get('/user-control', async (c: any) => {
         '<div class="text-center py-10 text-gray-600"><i class="fas fa-spinner fa-spin text-2xl"></i></div>'
 
       try {
-        const r = await fetch('/api/admin/users/' + userId, { credentials: 'same-origin' })
+        const r = await adminFetch('/api/admin/users/' + userId)
         if (r.status === 401) { window.location.href = '/admin/login?reason=auth'; return }
         const d = await r.json()
         renderDetailPanel(d)
@@ -1811,7 +1822,7 @@ adminPanel.get('/audit-log', async (c: any) => {
       const params = new URLSearchParams({ limit: alLimit, offset: alOffset })
       if (action) params.set('action', action)
       try {
-        const r = await fetch('/api/admin/audit-log?' + params.toString())
+        const r = await adminFetch('/api/admin/audit-log?' + params.toString())
         const d = await r.json()
         alTotal = d.total
         renderAuditTable(d.entries || [])
@@ -1855,7 +1866,7 @@ adminPanel.get('/audit-log', async (c: any) => {
 
     async function loadRefundLog() {
       try {
-        const r = await fetch('/api/admin/refund-log?limit=50')
+        const r = await adminFetch('/api/admin/refund-log?limit=50')
         const d = await r.json()
         const tbody = document.getElementById('rl-table-body')
         const entries = d.entries || []
