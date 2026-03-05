@@ -1052,23 +1052,82 @@ adminPanel.get('/user-control', async (c: any) => {
   let totalUsers = 0, totalDeleted = 0, totalRefunded = 0, totalSuspended = 0
 
   // Extract the session token from cookie to embed directly in page
-  // This way adminFetch works even if sessionStorage is empty (e.g. direct nav)
   const embeddedToken = getCookie(c, '__pp_admin') || ''
 
+  // Load users + stats directly from DB — render server-side, no JS fetch needed
+  let users: any[] = []
   if (db) {
     try {
-      const stats = await Promise.all([
-        db.prepare(`SELECT COUNT(*) as n FROM users WHERE status NOT IN ('deleted','suspended')`).first<any>(),
-        db.prepare(`SELECT COUNT(*) as n FROM users WHERE status='suspended'`).first<any>(),
-        db.prepare(`SELECT COUNT(*) as n FROM user_deletions`).first<any>(),
-        db.prepare(`SELECT COALESCE(SUM(total_refunded),0) as n FROM user_deletions`).first<any>(),
+      const [statsRows, userRows] = await Promise.all([
+        Promise.all([
+          db.prepare(`SELECT COUNT(*) as n FROM users WHERE status NOT IN ('deleted','suspended')`).first<any>(),
+          db.prepare(`SELECT COUNT(*) as n FROM users WHERE status='suspended'`).first<any>(),
+          db.prepare(`SELECT COUNT(*) as n FROM user_deletions`).first<any>(),
+          db.prepare(`SELECT COALESCE(SUM(total_refunded),0) as n FROM user_deletions`).first<any>(),
+        ]),
+        db.prepare(`
+          SELECT u.id, u.full_name, u.email, u.role, u.status, u.created_at,
+            (SELECT COUNT(*) FROM listings l WHERE l.host_id=u.id AND l.status='active') as active_listings,
+            (SELECT COUNT(*) FROM bookings b WHERE (b.driver_id=u.id OR b.host_id=u.id) AND b.status IN ('confirmed','pending')) as active_bookings,
+            0 as open_disputes, 0 as total_paid, 0 as total_earned
+          FROM users u
+          WHERE u.status != 'deleted'
+          ORDER BY u.created_at DESC
+          LIMIT 100
+        `).all<any>(),
       ])
-      totalUsers     = stats[0]?.n ?? 0
-      totalSuspended = stats[1]?.n ?? 0
-      totalDeleted   = stats[2]?.n ?? 0
-      totalRefunded  = Math.round((stats[3]?.n ?? 0) * 100) / 100
-    } catch {}
+      totalUsers     = statsRows[0]?.n ?? 0
+      totalSuspended = statsRows[1]?.n ?? 0
+      totalDeleted   = statsRows[2]?.n ?? 0
+      totalRefunded  = Math.round((statsRows[3]?.n ?? 0) * 100) / 100
+      users = userRows.results || []
+    } catch (e: any) {
+      // fall through with empty arrays
+    }
   }
+
+  // Helper to escape HTML for server-rendered output
+  const esc = (s: string) => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')
+  const fmtDate = (d: string) => {
+    try { return new Date(d).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' }) } catch { return d||'—' }
+  }
+
+  const userRows = users.map(u => {
+    const roleColor = u.role === 'ADMIN' ? 'badge-indigo' : u.role === 'HOST' ? 'badge-green' : 'badge-amber'
+    const statusColor = u.status === 'active' ? 'badge-green' : u.status === 'suspended' ? 'badge-red' : 'badge-gray'
+    const initials = (u.full_name || u.email || '?').substring(0,2).toUpperCase()
+    const nameEsc = esc(u.full_name || 'Unknown')
+    const emailEsc = esc(u.email || '')
+    return `<tr class="border-b border-white/5 hover:bg-white/[.025] transition-colors" data-name="${nameEsc.toLowerCase()}" data-email="${emailEsc.toLowerCase()}" data-role="${u.role||''}" data-status="${u.status||''}">
+      <td class="px-4 py-3">
+        <div class="flex items-center gap-2.5">
+          <div class="w-8 h-8 gradient-bg rounded-full flex items-center justify-center text-xs font-bold text-white flex-shrink-0">${initials}</div>
+          <div class="min-w-0">
+            <p class="text-white text-xs font-semibold truncate max-w-[120px]">${esc(u.full_name||'—')}</p>
+            <p class="text-gray-600 text-xs truncate max-w-[120px]">${emailEsc}</p>
+          </div>
+        </div>
+      </td>
+      <td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-semibold ${roleColor}">${esc(u.role||'—')}</span></td>
+      <td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-semibold ${statusColor}">${esc(u.status||'—')}</span></td>
+      <td class="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">${fmtDate(u.created_at)}</td>
+      <td class="px-4 py-3 text-center text-xs ${u.active_listings > 0 ? 'text-indigo-400 font-semibold' : 'text-gray-600'}">${u.active_listings}</td>
+      <td class="px-4 py-3 text-center text-xs ${u.active_bookings > 0 ? 'text-amber-400 font-semibold' : 'text-gray-600'}">${u.active_bookings}</td>
+      <td class="px-4 py-3 text-xs text-gray-600">—</td>
+      <td class="px-4 py-3 text-center"><span class="text-gray-700 text-xs">—</span></td>
+      <td class="px-4 py-3">
+        <div class="flex items-center gap-2">
+          <button onclick="openDetailPanel(${u.id})" class="text-indigo-400 hover:text-indigo-300 text-xs font-medium transition-colors px-2 py-1 rounded hover:bg-indigo-500/10">Detail</button>
+          ${u.role !== 'ADMIN' ? `
+          <button onclick="openSuspendModal(${u.id},'${nameEsc}','${esc(u.status)}')" class="text-amber-400 hover:text-amber-300 text-xs font-medium transition-colors px-2 py-1 rounded hover:bg-amber-500/10">${u.status === 'suspended' ? 'Unsuspend' : 'Suspend'}</button>
+          <button onclick="openDeleteModal(${u.id},'${nameEsc}','${emailEsc}','${esc(u.role)}')" class="text-red-400 hover:text-red-300 text-xs font-medium transition-colors px-2 py-1 rounded hover:bg-red-500/10 flex items-center gap-1"><i class="fas fa-trash-can text-xs"></i> Delete</button>
+          ` : '<span class="text-xs text-gray-600 italic">Admin</span>'}
+        </div>
+      </td>
+    </tr>`
+  }).join('')
+
+  const emptyRow = `<tr><td colspan="9" class="text-center py-10 text-gray-600 text-sm">No users found.</td></tr>`
 
   const content = `
   <!-- Header -->
@@ -1118,52 +1177,43 @@ adminPanel.get('/user-control', async (c: any) => {
   <div class="flex flex-wrap gap-3 mb-5">
     <div class="relative flex-1 min-w-[220px]">
       <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-xs pointer-events-none"></i>
-      <input type="text" id="uc-search" placeholder="Search by name, email, or ID..."
+      <input type="text" id="uc-search" placeholder="Search by name or email..."
         class="w-full bg-charcoal-100 border border-white/10 rounded-xl pl-9 pr-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500"
-        oninput="ucSearch()"/>
+        oninput="filterTable()"/>
     </div>
-    <select id="uc-role" onchange="ucSearch()"
+    <select id="uc-role" onchange="filterTable()"
       class="bg-charcoal-100 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-gray-400 focus:outline-none focus:border-indigo-500">
       <option value="">All Roles</option>
       <option value="DRIVER">Drivers</option>
       <option value="HOST">Hosts</option>
       <option value="BOTH">Both</option>
     </select>
-    <select id="uc-status" onchange="ucSearch()"
+    <select id="uc-status" onchange="filterTable()"
       class="bg-charcoal-100 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-gray-400 focus:outline-none focus:border-indigo-500">
       <option value="">All Statuses</option>
       <option value="active">Active</option>
       <option value="suspended">Suspended</option>
     </select>
-    <button onclick="ucSearch()" class="btn-primary px-4 py-2.5 rounded-xl text-sm text-white font-semibold flex items-center gap-2">
-      <i class="fas fa-magnifying-glass text-xs"></i> Search
-    </button>
   </div>
 
-  <!-- Users Table -->
+  <!-- Users Table — rendered server-side, no JS fetch needed -->
   <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
     <div class="overflow-x-auto">
-      <table class="w-full text-sm">
+      <table class="w-full text-sm" id="uc-table">
         <thead class="bg-charcoal-200/60">
           <tr>
-            ${['User', 'Role', 'Status', 'Joined', 'Active Listings', 'Active Bookings', 'Balance', 'Disputes', 'Actions'].map(h =>
+            ${['User', 'Role', 'Status', 'Joined', 'Listings', 'Bookings', 'Balance', 'Disputes', 'Actions'].map(h =>
               `<th class="px-4 py-3 text-left text-xs text-gray-500 uppercase tracking-wider font-semibold whitespace-nowrap">${h}</th>`
             ).join('')}
           </tr>
         </thead>
         <tbody id="uc-table-body">
-          <tr><td colspan="9" class="text-center py-10 text-gray-600 text-sm">
-            <i class="fas fa-spinner fa-spin mr-2"></i> Loading users...
-          </td></tr>
+          ${users.length ? userRows : emptyRow}
         </tbody>
       </table>
     </div>
-    <div class="flex items-center justify-between px-5 py-3 border-t border-white/5">
-      <p class="text-gray-600 text-xs" id="uc-count">Loading...</p>
-      <div class="flex gap-2">
-        <button id="uc-prev" onclick="ucPage(-1)" class="px-3 py-1.5 bg-charcoal-200 text-gray-500 hover:text-white rounded-lg text-xs transition-colors disabled:opacity-40">← Prev</button>
-        <button id="uc-next" onclick="ucPage(1)"  class="px-3 py-1.5 bg-charcoal-200 text-gray-500 hover:text-white rounded-lg text-xs transition-colors disabled:opacity-40">Next →</button>
-      </div>
+    <div class="px-5 py-3 border-t border-white/5">
+      <p class="text-gray-500 text-xs" id="uc-count">${users.length} user${users.length !== 1 ? 's' : ''} total</p>
     </div>
   </div>
 
@@ -1296,21 +1346,14 @@ adminPanel.get('/user-control', async (c: any) => {
 
   <script>
     // ── State ──────────────────────────────────────────────────────────────
-    let ucOffset  = 0
-    const ucLimit = 25
-    let ucTotal   = 0
     let currentDeleteUserId = null
     let currentDeleteUserName = ''
     let pendingBlockers = null
 
-    // ── Auth helper — sends Bearer token on every API call ─────────────────
-    // Token is embedded server-side from the session cookie so it always works
-    // regardless of sessionStorage availability or cookie path issues
+    // ── Auth helper — Bearer token for modal API calls ─────────────────────
     const ADMIN_TOKEN = (function() {
-      // 1. Try server-embedded token (most reliable)
       const embedded = '${embeddedToken}'
       if (embedded) return embedded
-      // 2. Fall back to sessionStorage (set at login)
       try { return sessionStorage.getItem('pp_admin_token') || '' } catch(e) { return '' }
     })()
 
@@ -1318,91 +1361,33 @@ adminPanel.get('/user-control', async (c: any) => {
       options = options || {}
       const headers = Object.assign({}, options.headers || {})
       if (ADMIN_TOKEN) headers['Authorization'] = 'Bearer ' + ADMIN_TOKEN
-      return fetch(url, Object.assign({}, options, {
-        credentials: 'same-origin',
-        headers: headers
-      }))
+      return fetch(url, Object.assign({}, options, { credentials: 'same-origin', headers: headers }))
     }
 
-    // ── Load users table ───────────────────────────────────────────────────
-    async function ucLoad() {
-      const q      = document.getElementById('uc-search').value.trim()
-      const role   = document.getElementById('uc-role').value
-      const status = document.getElementById('uc-status').value
-
-      const params = new URLSearchParams({ limit: ucLimit, offset: ucOffset })
-      if (q)      params.set('q', q)
-      if (role)   params.set('role', role)
-      if (status) params.set('status', status)
-
-      try {
-        const r = await adminFetch('/api/admin/users?' + params.toString())
-        if (r.status === 401) { window.location.href = '/admin/login?reason=auth'; return }
-        if (!r.ok) throw new Error('Status ' + r.status)
-        const d = await r.json()
-        ucTotal = d.total
-        renderUcTable(d.users || [])
-        document.getElementById('uc-count').textContent =
-          'Showing ' + (ucOffset + 1) + '–' + Math.min(ucOffset + ucLimit, ucTotal) + ' of ' + ucTotal + ' users'
-        document.getElementById('uc-prev').disabled = ucOffset === 0
-        document.getElementById('uc-next').disabled = ucOffset + ucLimit >= ucTotal
-      } catch(e) {
-        document.getElementById('uc-table-body').innerHTML =
-          '<tr><td colspan="9" class="text-center py-8 text-red-400 text-sm">Failed to load users: ' + e.message + '</td></tr>'
-      }
+    // ── Client-side table filter (no fetch needed — users are server-rendered) ──
+    function filterTable() {
+      const q      = (document.getElementById('uc-search').value || '').toLowerCase()
+      const role   = document.getElementById('uc-role').value.toLowerCase()
+      const status = document.getElementById('uc-status').value.toLowerCase()
+      const rows   = document.querySelectorAll('#uc-table-body tr[data-name]')
+      let visible  = 0
+      rows.forEach(row => {
+        const name   = (row.dataset.name   || '')
+        const email  = (row.dataset.email  || '')
+        const rRole  = (row.dataset.role   || '').toLowerCase()
+        const rStat  = (row.dataset.status || '').toLowerCase()
+        const show   = (!q || name.includes(q) || email.includes(q)) &&
+                       (!role   || rRole   === role) &&
+                       (!status || rStat === status)
+        row.style.display = show ? '' : 'none'
+        if (show) visible++
+      })
+      const cnt = document.getElementById('uc-count')
+      if (cnt) cnt.textContent = visible + ' user' + (visible !== 1 ? 's' : '') + (q||role||status ? ' matching filter' : ' total')
     }
 
-    function ucSearch() { ucOffset = 0; ucLoad() }
-    function ucPage(dir) {
-      ucOffset = Math.max(0, ucOffset + dir * ucLimit)
-      ucLoad()
-    }
-
-    function renderUcTable(users) {
-      const tbody = document.getElementById('uc-table-body')
-      if (!users.length) {
-        tbody.innerHTML = '<tr><td colspan="9" class="text-center py-10 text-gray-600 text-sm">No users found matching your search.</td></tr>'
-        return
-      }
-      tbody.innerHTML = users.map(u => {
-        const roleColor = u.role === 'ADMIN' ? 'badge-indigo' : u.role === 'HOST' ? 'badge-green' : 'badge-amber'
-        const statusColor = u.status === 'active' ? 'badge-green' : u.status === 'suspended' ? 'badge-red' : 'badge-gray'
-        const initials = (u.full_name || u.email || '?').substring(0,2).toUpperCase()
-        const hasDisputes = u.open_disputes > 0
-        const hasBlockers = u.open_disputes > 0 || u.active_bookings > 0
-        return '<tr class="border-b border-white/5 hover:bg-white/[.025] transition-colors table-row">' +
-          '<td class="px-4 py-3">' +
-            '<div class="flex items-center gap-2.5">' +
-              '<div class="w-8 h-8 gradient-bg rounded-full flex items-center justify-center text-xs font-bold text-white flex-shrink-0">' + initials + '</div>' +
-              '<div class="min-w-0">' +
-                '<p class="text-white text-xs font-semibold truncate max-w-[120px]">' + (u.full_name || '—') + '</p>' +
-                '<p class="text-gray-600 text-xs truncate max-w-[120px]">' + u.email + '</p>' +
-              '</div>' +
-            '</div>' +
-          '</td>' +
-          '<td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-semibold ' + roleColor + '">' + (u.role || '—') + '</span></td>' +
-          '<td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-semibold ' + statusColor + '">' + u.status + '</span></td>' +
-          '<td class="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">' + formatDate(u.created_at) + '</td>' +
-          '<td class="px-4 py-3 text-center text-xs ' + (u.active_listings > 0 ? 'text-indigo-400 font-semibold' : 'text-gray-600') + '">' + u.active_listings + '</td>' +
-          '<td class="px-4 py-3 text-center text-xs ' + (u.active_bookings > 0 ? 'text-amber-400 font-semibold' : 'text-gray-600') + '">' + u.active_bookings + '</td>' +
-          '<td class="px-4 py-3 text-xs ' + ((u.total_paid + u.total_earned) > 0 ? 'text-lime-400 font-semibold' : 'text-gray-600') + '">' +
-            (u.total_paid > 0 || u.total_earned > 0 ? '$' + (Math.max(u.total_paid, u.total_earned)).toFixed(2) : '—') +
-          '</td>' +
-          '<td class="px-4 py-3 text-center">' +
-            (hasDisputes ? '<span class="badge-red text-xs px-2 py-0.5 rounded-full font-semibold">' + u.open_disputes + ' open</span>' : '<span class="text-gray-700 text-xs">—</span>') +
-          '</td>' +
-          '<td class="px-4 py-3">' +
-            '<div class="flex items-center gap-2">' +
-              '<button onclick="openDetailPanel(' + u.id + ')" class="text-indigo-400 hover:text-indigo-300 text-xs font-medium transition-colors px-2 py-1 rounded hover:bg-indigo-500/10">Detail</button>' +
-              (u.role !== 'ADMIN' ? (
-                '<button onclick="openSuspendModal(' + u.id + ', \'' + escapeHtml(u.full_name||'Unknown') + '\', \'' + u.status + '\')" class="text-amber-400 hover:text-amber-300 text-xs font-medium transition-colors px-2 py-1 rounded hover:bg-amber-500/10">' + (u.status === 'suspended' ? 'Unsuspend' : 'Suspend') + '</button>' +
-                '<button onclick="openDeleteModal(' + u.id + ', \'' + escapeHtml(u.full_name||'Unknown') + '\', \'' + escapeHtml(u.email) + '\', \'' + u.role + '\')" class="text-red-400 hover:text-red-300 text-xs font-medium transition-colors px-2 py-1 rounded hover:bg-red-500/10 flex items-center gap-1"><i class=\\"fas fa-trash-can text-xs\\"></i> Delete</button>'
-              ) : '<span class="text-xs text-gray-600 italic">Admin</span>') +
-            '</div>' +
-          '</td>' +
-        '</tr>'
-      }).join('')
-    }
+    // ── After delete/suspend: reload page to refresh table ─────────────────
+    function reloadPage() { window.location.reload() }
 
     // ── Suspend Modal ──────────────────────────────────────────────────────
     let currentSuspendUserId = null
@@ -1451,7 +1436,7 @@ adminPanel.get('/user-control', async (c: any) => {
           closeSuspendModal()
           const label = currentSuspendAction === 'suspend' ? 'User Suspended' : 'User Unsuspended'
           showToast('success', label, 'Account status changed to ' + d.new_status + '.')
-          setTimeout(ucLoad, 400)
+          setTimeout(reloadPage, 600)
         } else {
           showToast('error', 'Action Failed', d.error || 'Unknown error')
           btn.disabled = false
@@ -1588,7 +1573,7 @@ adminPanel.get('/user-control', async (c: any) => {
             data.balance_refunded > 0
               ? 'User deleted. $' + data.balance_refunded.toFixed(2) + ' refunded.'
               : 'User deleted successfully.')
-          setTimeout(ucLoad, 600)
+          setTimeout(reloadPage, 800)
         } else {
           pwErrTx.textContent = data.error || 'Deletion failed — unknown error'
           pwErr.classList.remove('hidden')
@@ -1739,11 +1724,6 @@ adminPanel.get('/user-control', async (c: any) => {
     function escapeHtml(s) {
       return String(s||'').replace(/'/g,"\\'").replace(/"/g,'&quot;')
     }
-
-    // ── Init ───────────────────────────────────────────────────────────────
-    // Call directly — DOMContentLoaded may already have fired by the time
-    // this inline script (inside <main>) is parsed by the browser.
-    ucLoad()
   </script>
   `
   return c.html(AdminLayout('User Control', content))
