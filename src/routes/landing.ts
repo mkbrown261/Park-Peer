@@ -163,6 +163,22 @@ landingPage.get('/', async (c) => {
     <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-indigo-900/10 rounded-full blur-3xl"></div>
     
     <div class="absolute inset-0 pointer-events-none">
+      <div class="absolute top-32 left-16 animate-bounce" style="animation-delay:0s;animation-duration:3s;">
+        <div class="bg-indigo-500 text-white text-xs font-bold px-3 py-1.5 rounded-full shadow-lg glow-indigo">$8/hr</div>
+        <div class="w-2 h-2 bg-indigo-500 rounded-full mx-auto mt-1"></div>
+      </div>
+      <div class="absolute top-48 right-20 animate-bounce" style="animation-delay:0.5s;animation-duration:3.5s;">
+        <div class="bg-lime-500 text-charcoal text-xs font-bold px-3 py-1.5 rounded-full shadow-lg glow-lime">$5/hr</div>
+        <div class="w-2 h-2 bg-lime-500 rounded-full mx-auto mt-1"></div>
+      </div>
+      <div class="absolute bottom-48 left-24 animate-bounce" style="animation-delay:1s;animation-duration:4s;">
+        <div class="bg-indigo-500 text-white text-xs font-bold px-3 py-1.5 rounded-full shadow-lg glow-indigo">$12/hr</div>
+        <div class="w-2 h-2 bg-indigo-500 rounded-full mx-auto mt-1"></div>
+      </div>
+      <div class="absolute bottom-32 right-32 animate-bounce" style="animation-delay:1.5s;animation-duration:2.8s;">
+        <div class="bg-indigo-400 text-white text-xs font-bold px-3 py-1.5 rounded-full shadow-lg">$6/hr</div>
+        <div class="w-2 h-2 bg-indigo-400 rounded-full mx-auto mt-1"></div>
+      </div>
     </div>
 
     <div class="relative z-10 max-w-5xl mx-auto px-4 text-center slide-up">
