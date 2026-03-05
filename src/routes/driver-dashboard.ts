@@ -36,6 +36,7 @@ driverDashboard.get('/', async (c) => {
   let activeBooking: any  = null
   let driverName = ''
   let tierCardHTML = ''
+  let savingsData: any = null
 
   if (db && userId) {
     try {
@@ -155,7 +156,105 @@ driverDashboard.get('/', async (c) => {
       `).bind(userId).first<any>()
       avgRating = ratingRow?.avg_r ? Math.round(ratingRow.avg_r * 10) / 10 : 0
 
+      // ── Savings data ─────────────────────────────────────────────────────
+      try {
+        const savingsRow = await db.prepare(
+          'SELECT * FROM driver_savings WHERE driver_id = ?'
+        ).bind(userId).first<any>()
+        if (savingsRow) {
+          let nbhd: any[] = []
+          try { nbhd = JSON.parse(savingsRow.neighborhood_breakdown || '[]') } catch {}
+          savingsData = {
+            total_bookings:   savingsRow.total_bookings,
+            total_savings:    Math.round(savingsRow.total_savings * 100) / 100,
+            total_paid:       Math.round(savingsRow.total_amount_paid * 100) / 100,
+            avg_paid:         savingsRow.total_bookings > 0
+              ? Math.round(savingsRow.total_amount_paid / savingsRow.total_bookings * 100) / 100
+              : 0,
+            avg_garage:       18.0,
+            avg_savings_per:  savingsRow.total_bookings > 0
+              ? Math.round((savingsRow.total_garage_equivalent - savingsRow.total_amount_paid) / savingsRow.total_bookings * 100) / 100
+              : 0,
+            milestone_100:    savingsRow.milestone_100 === 1,
+            milestone_250:    savingsRow.milestone_250 === 1,
+            milestone_500:    savingsRow.milestone_500 === 1,
+            milestone_1000:   savingsRow.milestone_1000 === 1,
+            neighborhood_breakdown: nbhd,
+          }
+        }
+      } catch(e: any) { console.error('[driver-dashboard] savings:', e.message) }
+
     } catch(e: any) { console.error('[driver-dashboard]', e.message) }
+  }
+
+  // ── Savings HTML helpers (pre-computed to avoid nested template literals) ──
+  let milestonesHTML = ''
+  let neighborhoodHTML = ''
+  let savingsCardHTML = ''
+  if (savingsData && (savingsData.total_bookings || 0) >= 2) {
+    const milestones = [
+      { label: '$100 Saved',   achieved: savingsData.milestone_100  },
+      { label: '$250 Saved',   achieved: savingsData.milestone_250  },
+      { label: '$500 Saved',   achieved: savingsData.milestone_500  },
+      { label: '$1,000 Saved', achieved: savingsData.milestone_1000 },
+    ]
+    milestonesHTML = milestones.map(m => m.achieved
+      ? '<span class="flex items-center gap-1 text-xs bg-lime-500/10 border border-lime-500/20 text-lime-400 px-2.5 py-1 rounded-full font-medium"><i class="fas fa-check text-xs"></i> ' + m.label + '</span>'
+      : '<span class="text-xs text-gray-600 px-2.5 py-1 rounded-full border border-white/5 font-medium">' + m.label + '</span>'
+    ).join('')
+
+    if (savingsData.neighborhood_breakdown.length > 0) {
+      const nbhdRows = savingsData.neighborhood_breakdown.slice(0, 5).map((n: any) =>
+        '<div class="flex items-center justify-between text-xs">' +
+          '<div class="flex items-center gap-2">' +
+            '<i class="fas fa-map-pin text-indigo-400"></i>' +
+            '<span class="text-gray-300">' + (n.city || 'Unknown') + '</span>' +
+            '<span class="text-gray-600">(' + n.bookings + ' bookings)</span>' +
+          '</div>' +
+          '<span class="text-lime-400 font-semibold">$' + Math.round(n.savings) + ' saved</span>' +
+        '</div>'
+      ).join('')
+      neighborhoodHTML = '<div id="savings-breakdown" class="hidden">' +
+        '<p class="text-xs text-gray-500 font-semibold uppercase tracking-wider mb-2">By City</p>' +
+        '<div class="space-y-2">' + nbhdRows + '</div>' +
+        '<p class="text-gray-600 text-xs mt-3">Avg garage rate used: $18/hr (US estimate)</p>' +
+        '</div>'
+    }
+
+    savingsCardHTML = `
+      <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden" id="savings-section">
+        <div class="flex items-center justify-between p-5 border-b border-white/5">
+          <h3 class="font-bold text-white text-lg flex items-center gap-2">
+            <i class="fas fa-piggy-bank text-lime-500"></i> Your Savings
+          </h3>
+          <button onclick="toggleSavingsBreakdown()" class="text-indigo-400 hover:text-indigo-300 text-xs font-medium transition-colors">Breakdown</button>
+        </div>
+        <div class="p-5 space-y-4">
+          <div class="flex items-end gap-2">
+            <span class="text-4xl font-black text-lime-400">$${savingsData.total_savings.toFixed(0)}</span>
+            <span class="text-gray-400 text-sm mb-1">total saved</span>
+          </div>
+          <div class="grid grid-cols-3 gap-3 text-center text-xs">
+            <div class="bg-charcoal-200 rounded-xl p-3">
+              <p class="text-gray-400 mb-1">Bookings</p>
+              <p class="font-bold text-white text-base">${savingsData.total_bookings}</p>
+            </div>
+            <div class="bg-charcoal-200 rounded-xl p-3">
+              <p class="text-gray-400 mb-1">Avg You Paid</p>
+              <p class="font-bold text-white text-base">$${savingsData.avg_paid.toFixed(0)}</p>
+            </div>
+            <div class="bg-charcoal-200 rounded-xl p-3">
+              <p class="text-gray-400 mb-1">Avg Saved</p>
+              <p class="font-bold text-lime-400 text-base">$${savingsData.avg_savings_per.toFixed(0)}</p>
+            </div>
+          </div>
+          <div>
+            <p class="text-xs text-gray-500 font-semibold uppercase tracking-wider mb-2">Milestones</p>
+            <div class="flex flex-wrap gap-2">${milestonesHTML}</div>
+          </div>
+          ${neighborhoodHTML}
+        </div>
+      </div>`
   }
 
   // ── Format helpers ─────────────────────────────────────────────────────────
@@ -367,6 +466,9 @@ driverDashboard.get('/', async (c) => {
               ${historyHTML}
             </div>
           </div>
+
+          <!-- Savings Dashboard -->
+          ${savingsCardHTML}
         </div>
 
         <!-- Right Sidebar -->
@@ -488,6 +590,12 @@ driverDashboard.get('/', async (c) => {
       }
       updateCountdown();
       setInterval(updateCountdown, 60000);
+    }
+
+    // ── Savings breakdown toggle ──────────────────────────────────────────
+    function toggleSavingsBreakdown() {
+      const el = document.getElementById('savings-breakdown')
+      if (el) el.classList.toggle('hidden')
     }
 
     // ── Delete Account ────────────────────────────────────────────────────

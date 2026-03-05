@@ -1069,14 +1069,14 @@ apiRoutes.post('/emails/welcome', async (c) => {
 
 // ════════════════════════════════════════════════════════════════════════════
 // LISTINGS — Real D1 data with geo-filtering
-// GET /api/listings?q=&type=&city=&lat=&lng=&radius_km=&min_price=&max_price=&instant=&limit=&offset=
+// GET /api/listings?q=&type=&city=&lat=&lng=&radius_km=&min_price=&max_price=&instant=&min_pri=&sort=&limit=&offset=
 // ════════════════════════════════════════════════════════════════════════════
 apiRoutes.get('/listings', async (c) => {
   const {
     q, type, city, lat, lng,
     radius_km = '50',
     min_price, max_price,
-    instant,
+    instant, min_pri, sort,
     limit = '50', offset = '0'
   } = c.req.query()
 
@@ -1095,6 +1095,7 @@ apiRoutes.get('/listings', async (c) => {
     if (min_price) { where.push('l.rate_hourly >= ?'); params.push(parseFloat(min_price)) }
     if (max_price) { where.push('l.rate_hourly <= ?'); params.push(parseFloat(max_price)) }
     if (instant === '1' || instant === 'true') { where.push('l.instant_book = 1') }
+    if (min_pri) { where.push('l.pri_score >= ?'); params.push(parseFloat(min_pri)) }
     if (q) {
       where.push("(l.title LIKE ? OR l.address LIKE ? OR l.city LIKE ? OR l.description LIKE ?)")
       const ql = `%${q}%`
@@ -1119,27 +1120,40 @@ apiRoutes.get('/listings', async (c) => {
     const whereClause = where.length ? 'WHERE ' + where.join(' AND ') : ''
     const lim  = Math.min(100, parseInt(limit))
     const off  = parseInt(offset)
+    const orderBy = sort === 'reliability'
+      ? 'l.pri_score DESC NULLS LAST, l.avg_rating DESC'
+      : 'l.avg_rating DESC, l.review_count DESC'
 
     const countQ  = await db.prepare(`SELECT COUNT(*) as total FROM listings l ${whereClause}`).bind(...params).first<{total:number}>()
     const total   = countQ?.total ?? 0
 
+    // Include PRI score and host credentials in a single pass
+    // pri_score on listings table is the denormalized fast-path value
     const rows = await db.prepare(`
       SELECT l.id, l.title, l.type, l.address, l.city, l.state, l.zip,
              l.lat, l.lng,
              l.rate_hourly, l.rate_daily, l.rate_monthly,
              l.max_vehicle_size, l.amenities, l.instant_book,
              l.avg_rating, l.review_count, l.status,
-             u.full_name as host_name, u.id as host_id
+             l.pri_score,
+             u.full_name as host_name, u.id as host_id,
+             hc.tier1_verified, hc.tier2_secure, hc.tier3_performance, hc.tier4_founding,
+             pm.total_bookings as pri_total_bookings, pm.cancel_count,
+             pm.avg_confirm_hours, pm.avg_response_minutes
       FROM listings l
       LEFT JOIN users u ON l.host_id = u.id
+      LEFT JOIN host_credentials hc ON hc.host_id = l.host_id
+      LEFT JOIN pri_metrics pm ON pm.listing_id = l.id
       ${whereClause}
-      ORDER BY l.avg_rating DESC, l.review_count DESC
+      ORDER BY ${orderBy}
       LIMIT ? OFFSET ?
     `).bind(...params, lim, off).all()
 
     const data = (rows.results || []).map((r: any) => {
       let amenities: string[] = []
       try { amenities = JSON.parse(r.amenities || '[]') } catch {}
+      const pri = r.pri_score != null ? Math.round(r.pri_score) : null
+      const priDisplay = pri !== null && (r.pri_total_bookings || 0) >= 5 ? pri : null
       return {
         id: r.id,
         title: r.title,
@@ -1157,7 +1171,19 @@ apiRoutes.get('/listings', async (c) => {
         instant_book: r.instant_book === 1,
         rating: r.avg_rating,
         review_count: r.review_count,
-        host: { id: r.host_id, name: r.host_name },
+        pri_score: priDisplay,
+        pri_bookings: r.pri_total_bookings || 0,
+        pri_cancels: r.cancel_count || 0,
+        pri_confirm_hours: r.avg_confirm_hours || 0,
+        pri_response_mins: r.avg_response_minutes || 0,
+        host: {
+          id: r.host_id,
+          name: r.host_name,
+          verified: r.tier1_verified === 1,
+          secure: r.tier2_secure === 1,
+          performance: r.tier3_performance === 1,
+          founding: r.tier4_founding === 1,
+        },
         available: true
       }
     })
@@ -3087,4 +3113,394 @@ apiRoutes.get('/tiers/definitions', (c) => {
       requirements: t.req, benefits: t.benefits,
     })),
   })
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// PRI (Parking Reliability Index) — calculate & store for a listing
+// Called internally after booking events; also exposed for admin/on-demand use
+// ════════════════════════════════════════════════════════════════════════════
+
+/** Calculate PRI for a listing and upsert into pri_metrics + listings.pri_score */
+async function recalculatePri(db: D1Database, listingId: number): Promise<number | null> {
+  try {
+    // Fetch booking stats for this listing
+    const stats = await db.prepare(`
+      SELECT
+        COUNT(*)                                         AS total,
+        SUM(CASE WHEN status='cancelled' AND cancelled_by IN ('host') THEN 1 ELSE 0 END) AS host_cancels,
+        AVG(CASE WHEN status IN ('confirmed','active','completed')
+                 THEN CAST((julianday(updated_at) - julianday(created_at)) * 24 AS REAL)
+                 ELSE NULL END)                          AS avg_confirm_hrs
+      FROM bookings
+      WHERE listing_id = ?
+    `).bind(listingId).first<any>()
+
+    const total      = stats?.total     ?? 0
+    const cancels    = stats?.host_cancels ?? 0
+    const confirmHrs = stats?.avg_confirm_hrs ?? 0
+
+    // Need at least 5 bookings for a valid PRI
+    if (total < 5) return null
+
+    // Rating variance from reviews
+    const varRow = await db.prepare(`
+      SELECT AVG(rating) as avg_r, COUNT(*) as cnt,
+             SUM(rating * rating) as sum_sq
+      FROM reviews WHERE listing_id = ? AND status = 'published'
+    `).bind(listingId).first<any>()
+
+    let varianceScore = 80 // default if no reviews
+    if (varRow && varRow.cnt >= 3) {
+      const mean  = varRow.avg_r || 0
+      const sqMean = (varRow.sum_sq || 0) / varRow.cnt
+      const variance = sqMean - mean * mean
+      // Low variance (0–0.5) = high score. variance > 2 = score 0
+      varianceScore = Math.max(0, Math.min(100, 100 - variance * 50))
+    }
+
+    // Component scores
+    const cancelRate       = total > 0 ? (cancels / total) : 0
+    const cancellationScore = Math.max(0, 100 - cancelRate * 100)
+
+    // Confirmation speed: 0 hrs = 100, 24+ hrs = 0
+    const confirmationScore = Math.max(0, Math.min(100, 100 - (confirmHrs / 24) * 100))
+
+    // Responsiveness: not tracked in DB yet — default to 80
+    const responsivenessScore = 80
+
+    // Weighted PRI
+    const pri = (
+      cancellationScore  * 0.30 +
+      confirmationScore  * 0.25 +
+      responsivenessScore * 0.20 +
+      varianceScore      * 0.25
+    )
+
+    const priRounded = Math.round(pri * 10) / 10
+
+    // Upsert pri_metrics
+    await db.prepare(`
+      INSERT INTO pri_metrics
+        (listing_id, cancellation_score, confirmation_score, responsiveness_score,
+         consistency_score, total_bookings, cancel_count, avg_confirm_hours,
+         avg_response_minutes, rating_variance, pri_score, calculated_at, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))
+      ON CONFLICT(listing_id) DO UPDATE SET
+        cancellation_score=excluded.cancellation_score,
+        confirmation_score=excluded.confirmation_score,
+        responsiveness_score=excluded.responsiveness_score,
+        consistency_score=excluded.consistency_score,
+        total_bookings=excluded.total_bookings,
+        cancel_count=excluded.cancel_count,
+        avg_confirm_hours=excluded.avg_confirm_hours,
+        pri_score=excluded.pri_score,
+        updated_at=datetime('now')
+    `).bind(
+      listingId,
+      cancellationScore, confirmationScore, responsivenessScore, varianceScore,
+      total, cancels, confirmHrs, 0, 0,
+      priRounded
+    ).run()
+
+    // Denormalize to listings table for fast sort/filter
+    await db.prepare(
+      `UPDATE listings SET pri_score = ?, updated_at = datetime('now') WHERE id = ?`
+    ).bind(priRounded, listingId).run()
+
+    // Update host_credentials tier3 (PRI >= 95)
+    const listingHost = await db.prepare('SELECT host_id FROM listings WHERE id = ?').bind(listingId).first<any>()
+    if (listingHost?.host_id) {
+      const hostPriRow = await db.prepare(`
+        SELECT MAX(pri_score) as best_pri FROM listings WHERE host_id = ? AND status = 'active'
+      `).bind(listingHost.host_id).first<any>()
+      const bestPri = hostPriRow?.best_pri ?? 0
+      const isHighPerf = bestPri >= 95 ? 1 : 0
+      await db.prepare(`
+        INSERT INTO host_credentials (host_id, tier3_performance, tier3_performance_at, updated_at)
+        VALUES (?, ?, CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END, datetime('now'))
+        ON CONFLICT(host_id) DO UPDATE SET
+          tier3_performance = excluded.tier3_performance,
+          tier3_performance_at = CASE
+            WHEN excluded.tier3_performance = 1 AND tier3_performance = 0 THEN datetime('now')
+            ELSE tier3_performance_at END,
+          updated_at = datetime('now')
+      `).bind(listingHost.host_id, isHighPerf, isHighPerf).run()
+    }
+
+    return priRounded
+  } catch (e: any) {
+    console.error('[recalculatePri] listing', listingId, e.message)
+    return null
+  }
+}
+
+// GET /api/pri/:listingId — PRI score + breakdown for a single listing
+apiRoutes.get('/pri/:listingId', async (c) => {
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+  const listingId = parseInt(c.req.param('listingId'))
+  if (!listingId) return c.json({ error: 'Invalid listing ID' }, 400)
+
+  try {
+    // Check existing record first
+    let row = await db.prepare(
+      'SELECT * FROM pri_metrics WHERE listing_id = ?'
+    ).bind(listingId).first<any>()
+
+    // If no record or stale (>1hr), recalculate
+    if (!row || (Date.now() - new Date(row.updated_at).getTime()) > 3600000) {
+      await recalculatePri(db, listingId)
+      row = await db.prepare(
+        'SELECT * FROM pri_metrics WHERE listing_id = ?'
+      ).bind(listingId).first<any>()
+    }
+
+    // Check booking count threshold
+    const bookingCount = row?.total_bookings ?? 0
+    if (bookingCount < 5) {
+      return c.json({ pri_score: null, is_new: true, bookings: bookingCount })
+    }
+
+    return c.json({
+      pri_score:    row ? Math.round(row.pri_score) : null,
+      is_new:       false,
+      bookings:     row?.total_bookings ?? 0,
+      cancels:      row?.cancel_count ?? 0,
+      confirm_hrs:  row?.avg_confirm_hours ?? 0,
+      response_mins: row?.avg_response_minutes ?? 0,
+      cancellation_score:   row?.cancellation_score ?? 0,
+      confirmation_score:   row?.confirmation_score ?? 0,
+      responsiveness_score: row?.responsiveness_score ?? 0,
+      consistency_score:    row?.consistency_score ?? 0,
+    })
+  } catch (e: any) {
+    return c.json({ error: 'Failed to fetch PRI', detail: e.message }, 500)
+  }
+})
+
+// GET /api/host-credentials/:hostId — host badges for a single host
+apiRoutes.get('/host-credentials/:hostId', async (c) => {
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+  const hostId = parseInt(c.req.param('hostId'))
+  if (!hostId) return c.json({ error: 'Invalid host ID' }, 400)
+
+  try {
+    // Auto-sync tier1 from users.id_verified
+    const userRow = await db.prepare(
+      'SELECT id_verified, created_at FROM users WHERE id = ?'
+    ).bind(hostId).first<any>()
+
+    if (userRow) {
+      const FOUNDING_DATE = new Date('2025-12-31T23:59:59Z')
+      const isFounder = userRow.created_at
+        ? new Date(userRow.created_at) <= FOUNDING_DATE
+        : false
+
+      await db.prepare(`
+        INSERT INTO host_credentials
+          (host_id, tier1_verified, tier1_verified_at, tier4_founding, tier4_founding_at, updated_at)
+        VALUES (?, ?, CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END,
+                ?, CASE WHEN ? = 1 THEN ? ELSE NULL END, datetime('now'))
+        ON CONFLICT(host_id) DO UPDATE SET
+          tier1_verified = excluded.tier1_verified,
+          tier4_founding = excluded.tier4_founding,
+          tier4_founding_at = CASE
+            WHEN excluded.tier4_founding = 1 AND tier4_founding = 0 THEN datetime('now')
+            ELSE tier4_founding_at END,
+          updated_at = datetime('now')
+      `).bind(
+        hostId,
+        userRow.id_verified ?? 0,
+        userRow.id_verified ?? 0,
+        isFounder ? 1 : 0,
+        isFounder ? 1 : 0,
+        userRow.created_at
+      ).run()
+    }
+
+    const creds = await db.prepare(
+      'SELECT * FROM host_credentials WHERE host_id = ?'
+    ).bind(hostId).first<any>()
+
+    if (!creds) return c.json({ verified: false, secure: false, performance: false, founding: false })
+
+    return c.json({
+      verified:         creds.tier1_verified === 1,
+      verified_at:      creds.tier1_verified_at,
+      secure:           creds.tier2_secure === 1,
+      secure_at:        creds.tier2_secure_at,
+      performance:      creds.tier3_performance === 1,
+      performance_at:   creds.tier3_performance_at,
+      founding:         creds.tier4_founding === 1,
+      founding_at:      creds.tier4_founding_at,
+    })
+  } catch (e: any) {
+    return c.json({ error: 'Failed to fetch host credentials', detail: e.message }, 500)
+  }
+})
+
+// GET /api/savings — driver savings summary (authenticated)
+apiRoutes.get('/savings', requireUserAuth(), async (c) => {
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+  const session = c.get('user') as any
+  const driverId = session.userId
+
+  try {
+    // Recalculate savings from completed bookings
+    const bookings = await db.prepare(`
+      SELECT b.id, b.duration_hours, b.total_charged, b.start_time,
+             l.city, l.zip
+      FROM bookings b
+      JOIN listings l ON b.listing_id = l.id
+      WHERE b.driver_id = ? AND b.status = 'completed'
+      ORDER BY b.start_time DESC
+    `).bind(driverId).all<any>()
+
+    const rows = bookings.results || []
+    const AVG_GARAGE_RATE = 18.0 // $/hr conservative US estimate
+
+    let totalPaid = 0
+    let totalGarage = 0
+    const cityMap: Record<string, { city: string; zip: string; bookings: number; paid: number; garage: number }> = {}
+
+    for (const b of rows) {
+      const hrs    = b.duration_hours || 1
+      const paid   = b.total_charged  || 0
+      const garage = hrs * AVG_GARAGE_RATE
+      totalPaid   += paid
+      totalGarage += garage
+
+      const key = b.city || 'Unknown'
+      if (!cityMap[key]) cityMap[key] = { city: b.city || 'Unknown', zip: b.zip || '', bookings: 0, paid: 0, garage: 0 }
+      cityMap[key].bookings++
+      cityMap[key].paid   += paid
+      cityMap[key].garage += garage
+    }
+
+    const totalSavings = Math.max(0, totalGarage - totalPaid)
+    const nbhdBreakdown = Object.values(cityMap)
+      .map(c => ({ ...c, savings: Math.max(0, c.garage - c.paid) }))
+      .sort((a, b) => b.savings - a.savings)
+
+    // Upsert driver_savings
+    const milestones = {
+      m100:  totalSavings >= 100  ? 1 : 0,
+      m250:  totalSavings >= 250  ? 1 : 0,
+      m500:  totalSavings >= 500  ? 1 : 0,
+      m1000: totalSavings >= 1000 ? 1 : 0,
+    }
+
+    await db.prepare(`
+      INSERT INTO driver_savings
+        (driver_id, total_bookings, total_amount_paid, total_garage_equivalent,
+         total_savings, neighborhood_breakdown,
+         milestone_100, milestone_250, milestone_500, milestone_1000, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))
+      ON CONFLICT(driver_id) DO UPDATE SET
+        total_bookings=excluded.total_bookings,
+        total_amount_paid=excluded.total_amount_paid,
+        total_garage_equivalent=excluded.total_garage_equivalent,
+        total_savings=excluded.total_savings,
+        neighborhood_breakdown=excluded.neighborhood_breakdown,
+        milestone_100=excluded.milestone_100,
+        milestone_250=excluded.milestone_250,
+        milestone_500=excluded.milestone_500,
+        milestone_1000=excluded.milestone_1000,
+        updated_at=datetime('now')
+    `).bind(
+      driverId, rows.length, Math.round(totalPaid * 100) / 100,
+      Math.round(totalGarage * 100) / 100, Math.round(totalSavings * 100) / 100,
+      JSON.stringify(nbhdBreakdown),
+      milestones.m100, milestones.m250, milestones.m500, milestones.m1000
+    ).run()
+
+    const monthlyAvg = rows.length > 0
+      ? (() => {
+          const months = new Set(rows.map((b: any) => (b.start_time || '').substring(0,7)))
+          return months.size > 0 ? Math.round(totalSavings / months.size * 100) / 100 : 0
+        })()
+      : 0
+
+    return c.json({
+      success: true,
+      total_bookings:   rows.length,
+      total_paid:       Math.round(totalPaid * 100) / 100,
+      total_savings:    Math.round(totalSavings * 100) / 100,
+      avg_paid:         rows.length > 0 ? Math.round(totalPaid / rows.length * 100) / 100 : 0,
+      avg_garage_rate:  AVG_GARAGE_RATE,
+      avg_savings_per_booking: rows.length > 0 ? Math.round((totalGarage - totalPaid) / rows.length * 100) / 100 : 0,
+      monthly_avg:      monthlyAvg,
+      annual_projection: Math.round(monthlyAvg * 12 * 100) / 100,
+      neighborhood_breakdown: nbhdBreakdown,
+      milestones: {
+        m100:  milestones.m100 === 1,
+        m250:  milestones.m250 === 1,
+        m500:  milestones.m500 === 1,
+        m1000: milestones.m1000 === 1,
+      }
+    })
+  } catch (e: any) {
+    return c.json({ error: 'Failed to fetch savings', detail: e.message }, 500)
+  }
+})
+
+// GET /api/top-hosts?lat=&lng=&radius_km= — top hosts in a geographic area
+apiRoutes.get('/top-hosts', async (c) => {
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+  const { lat, lng, radius_km = '50' } = c.req.query()
+
+  try {
+    let where = ["l.status = 'active'"]
+    const params: any[] = []
+
+    if (lat && lng) {
+      const latF = parseFloat(lat), lngF = parseFloat(lng)
+      if (latF !== 0 || lngF !== 0) {
+        const km = parseFloat(radius_km)
+        const latDelta = km / 111.0
+        const lngDelta = km / (111.0 * Math.cos(latF * Math.PI / 180))
+        where.push('l.lat BETWEEN ? AND ? AND l.lng BETWEEN ? AND ?')
+        params.push(latF - latDelta, latF + latDelta, lngF - lngDelta, lngF + lngDelta)
+      }
+    }
+
+    const whereStr = 'WHERE ' + where.join(' AND ')
+
+    const rows = await db.prepare(`
+      SELECT u.id, u.full_name,
+             COUNT(l.id)         AS listing_count,
+             AVG(l.avg_rating)   AS avg_rating,
+             AVG(l.pri_score)    AS avg_pri,
+             SUM(l.review_count) AS total_reviews,
+             hc.tier1_verified, hc.tier2_secure, hc.tier3_performance, hc.tier4_founding
+      FROM listings l
+      JOIN users u ON l.host_id = u.id
+      LEFT JOIN host_credentials hc ON hc.host_id = u.id
+      ${whereStr}
+      GROUP BY u.id
+      HAVING listing_count >= 1
+      ORDER BY avg_pri DESC NULLS LAST, avg_rating DESC
+      LIMIT 5
+    `).bind(...params).all<any>()
+
+    const hosts = (rows.results || []).map((r: any) => ({
+      id:            r.id,
+      name:          r.full_name || 'ParkPeer Host',
+      listing_count: r.listing_count,
+      avg_rating:    r.avg_rating ? Math.round(r.avg_rating * 10) / 10 : 0,
+      avg_pri:       r.avg_pri ? Math.round(r.avg_pri) : null,
+      total_reviews: r.total_reviews || 0,
+      verified:      r.tier1_verified === 1,
+      secure:        r.tier2_secure === 1,
+      performance:   r.tier3_performance === 1,
+      founding:      r.tier4_founding === 1,
+    }))
+
+    return c.json({ success: true, hosts })
+  } catch (e: any) {
+    return c.json({ error: 'Failed to fetch top hosts', detail: e.message }, 500)
+  }
 })

@@ -99,6 +99,7 @@ searchPage.get('/', async (c) => {
           <option value="price_asc">Price: Low to High</option>
           <option value="price_desc">Price: High to Low</option>
           <option value="reviews">Most Reviewed</option>
+          <option value="reliability">Most Reliable</option>
         </select>
       </div>
 
@@ -183,6 +184,17 @@ searchPage.get('/', async (c) => {
         <div class="text-center">
           <div class="w-12 h-12 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-3"></div>
           <p class="text-gray-400 text-sm">Loading map...</p>
+        </div>
+      </div>
+
+      <!-- Top Hosts Widget -->
+      <div id="top-hosts-widget" class="hidden absolute bottom-16 left-4 z-10 w-64">
+        <div class="glass rounded-2xl border border-white/10 overflow-hidden">
+          <button onclick="toggleTopHosts()" class="w-full px-4 py-2.5 flex items-center justify-between text-left">
+            <span class="text-white text-xs font-bold"><i class="fas fa-crown text-amber-400 mr-1.5"></i>Top Hosts Nearby</span>
+            <i id="top-hosts-chevron" class="fas fa-chevron-up text-gray-500 text-xs transition-transform"></i>
+          </button>
+          <div id="top-hosts-list" class="border-t border-white/10 px-3 py-2 space-y-2 text-xs"></div>
         </div>
       </div>
 
@@ -291,16 +303,7 @@ searchPage.get('/', async (c) => {
             `).join('')}
           </div>
         </div>
-        <!-- Booking Options -->
-        <div>
-          <h4 class="font-semibold text-white mb-3">Booking Options</h4>
-          <div class="space-y-2">
-            <label class="flex items-center justify-between p-3 bg-charcoal-200 rounded-xl cursor-pointer border border-white/5">
-              <span class="text-sm text-gray-300 flex items-center gap-2"><i class="fas fa-bolt text-lime-500"></i> Instant Book Only</span>
-              <input type="checkbox" id="instant-only" class="accent-indigo-500 w-4 h-4"/>
-            </label>
-          </div>
-        </div>
+        <!-- Booking Options -->\n        <div>\n          <h4 class=\"font-semibold text-white mb-3\">Booking Options</h4>\n          <div class=\"space-y-2\">\n            <label class=\"flex items-center justify-between p-3 bg-charcoal-200 rounded-xl cursor-pointer border border-white/5\">\n              <span class=\"text-sm text-gray-300 flex items-center gap-2\"><i class=\"fas fa-bolt text-lime-500\"></i> Instant Book Only</span>\n              <input type=\"checkbox\" id=\"instant-only\" class=\"accent-indigo-500 w-4 h-4\"/>\n            </label>\n            <label class=\"flex items-center justify-between p-3 bg-charcoal-200 rounded-xl cursor-pointer border border-white/5\">\n              <span class=\"text-sm text-gray-300 flex items-center gap-2\"><i class=\"fas fa-layer-group text-green-400\"></i> Show Trusted Zones</span>\n              <input type=\"checkbox\" id=\"trusted-zones\" class=\"accent-green-500 w-4 h-4\" onchange=\"toggleTrustedZones(this.checked)\"/>\n            </label>\n          </div>\n        </div>\n        <!-- Reliability Filter -->\n        <div>\n          <h4 class=\"font-semibold text-white mb-1\">Minimum Reliability</h4>\n          <p class=\"text-xs text-gray-500 mb-3\">Show spots with at least X% reliability</p>\n          <div class=\"flex items-center gap-3\">\n            <input type=\"range\" id=\"pri-range\" min=\"0\" max=\"100\" step=\"5\" value=\"0\"\n              oninput=\"document.getElementById('pri-label').textContent = this.value > 0 ? this.value + '%' : 'Any'\"\n              class=\"flex-1 accent-green-500\"/>\n            <span class=\"text-indigo-300 text-sm font-bold w-10 text-right\" id=\"pri-label\">Any</span>\n          </div>\n        </div>
       </div>
       <div class="p-4 border-t border-white/10 flex gap-3">
         <button onclick="resetFilters()"
@@ -356,6 +359,37 @@ searchPage.get('/', async (c) => {
       font-family: 'Inter', sans-serif;
     }
     .park-pin:hover, .park-pin.active { background: #C6FF00 !important; color: #121212 !important; transform: scale(1.15); border-color: #C6FF00; }
+    .park-pin.pri-green  { background: #16a34a; }
+    .park-pin.pri-blue   { background: #2563eb; }
+    .park-pin.pri-yellow { background: #ca8a04; }
+    .park-pin.pri-gray   { background: #6b7280; }
+    .pri-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-left: 3px; vertical-align: middle; }
+    .pri-dot-green  { background: #16a34a; }
+    .pri-dot-blue   { background: #2563eb; }
+    .pri-dot-yellow { background: #ca8a04; }
+    .pri-dot-red    { background: #dc2626; }
+    .pri-tooltip { position: relative; display: inline-block; }
+    .pri-tooltip .pri-tip {
+      visibility: hidden; opacity: 0; transition: opacity 0.2s;
+      position: absolute; bottom: 125%; left: 50%; transform: translateX(-50%);
+      background: #1a1a1a; border: 1px solid rgba(255,255,255,0.1);
+      color: #e5e7eb; border-radius: 10px; padding: 8px 10px;
+      font-size: 11px; line-height: 1.5; white-space: nowrap; z-index: 100;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+      pointer-events: none;
+    }
+    .pri-tooltip:hover .pri-tip { visibility: visible; opacity: 1; }
+    .badge-tooltip { position: relative; display: inline-block; cursor: default; }
+    .badge-tooltip .badge-tip {
+      visibility: hidden; opacity: 0; transition: opacity 0.2s 0.1s;
+      position: absolute; bottom: 125%; left: 50%; transform: translateX(-50%);
+      background: #1a1a1a; border: 1px solid rgba(255,255,255,0.1);
+      color: #e5e7eb; border-radius: 8px; padding: 4px 8px;
+      font-size: 11px; white-space: nowrap; z-index: 100;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+      pointer-events: none;
+    }
+    .badge-tooltip:hover .badge-tip { visibility: visible; opacity: 1; }
     .scrollbar-hide::-webkit-scrollbar { display: none; }
   </style>
 
@@ -373,8 +407,41 @@ searchPage.get('/', async (c) => {
   let mapCenter = { lat: 0, lng: 0 }  // Will be set by geolocation or search
   let mapRadius = 50
   let mapStyleId = 'dark-v11'
+  let trustedZonesEnabled = false
+  let topHostsCollapsed = false
+  let trustedZoneLayerAdded = false
 
   let MAPBOX_TOKEN = ''
+
+  // PRI helpers
+  function priColor(score) {
+    if (score == null) return null
+    if (score >= 95) return 'green'
+    if (score >= 85) return 'blue'
+    if (score >= 75) return 'yellow'
+    return 'red'
+  }
+  function priDot(score) {
+    if (score == null) return ''
+    const color = priColor(score)
+    return \`<span class="pri-dot pri-dot-\${color}"></span>\`
+  }
+  function priPinClass(score) {
+    if (score == null) return ''
+    if (score >= 95) return 'pri-green'
+    if (score >= 85) return 'pri-blue'
+    if (score >= 75) return 'pri-yellow'
+    return 'pri-gray'
+  }
+  function hostBadges(host) {
+    if (!host) return ''
+    let badges = ''
+    if (host.verified)    badges += \`<span class="badge-tooltip ml-1"><span style="color:#2563eb;font-size:12px">✓</span><span class="badge-tip">Identity Verified</span></span>\`
+    if (host.secure)      badges += \`<span class="badge-tooltip ml-0.5"><span style="color:#16a34a;font-size:12px">🛡</span><span class="badge-tip">Secure Location</span></span>\`
+    if (host.performance) badges += \`<span class="badge-tooltip ml-0.5"><span style="color:#d97706;font-size:12px">⭐</span><span class="badge-tip">High-Performance Host</span></span>\`
+    if (host.founding)    badges += \`<span class="badge-tooltip ml-0.5"><span style="color:#7c3aed;font-size:12px">🏆</span><span class="badge-tip">Founding Member</span></span>\`
+    return badges
+  }
 
   const MAP_STYLES = {
     dark:      'mapbox://styles/mapbox/dark-v11',
@@ -528,6 +595,13 @@ searchPage.get('/', async (c) => {
 
     if (document.getElementById('instant-only')?.checked) params.set('instant', '1')
 
+    // PRI minimum filter
+    const minPri = parseInt(document.getElementById('pri-range')?.value || '0')
+    if (minPri > 0) params.set('min_pri', minPri)
+
+    // Sort (pass reliability sort to API for server-side ordering)
+    if (currentSort === 'reliability') params.set('sort', 'reliability')
+
     const q = document.getElementById('search-input').value.trim()
     if (q) params.set('q', q)
 
@@ -569,10 +643,11 @@ searchPage.get('/', async (c) => {
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   function applySortAndRender() {
     let sorted = [...allListings]
-    if (currentSort === 'price_asc')  sorted.sort((a, b) => a.price_hourly - b.price_hourly)
-    if (currentSort === 'price_desc') sorted.sort((a, b) => b.price_hourly - a.price_hourly)
-    if (currentSort === 'rating')     sorted.sort((a, b) => (b.rating || 0) - (a.rating || 0))
-    if (currentSort === 'reviews')    sorted.sort((a, b) => (b.review_count || 0) - (a.review_count || 0))
+    if (currentSort === 'price_asc')   sorted.sort((a, b) => a.price_hourly - b.price_hourly)
+    if (currentSort === 'price_desc')  sorted.sort((a, b) => b.price_hourly - a.price_hourly)
+    if (currentSort === 'rating')      sorted.sort((a, b) => (b.rating || 0) - (a.rating || 0))
+    if (currentSort === 'reviews')     sorted.sort((a, b) => (b.review_count || 0) - (a.review_count || 0))
+    if (currentSort === 'reliability') sorted.sort((a, b) => (b.pri_score ?? -1) - (a.pri_score ?? -1))
 
     document.getElementById('count-num').textContent = sorted.length
     document.getElementById('count-label').textContent = 'spots nearby'
@@ -580,6 +655,11 @@ searchPage.get('/', async (c) => {
     renderListingCards(sorted)
     renderMapPins(sorted)
     updateMapSpotCount()
+
+    // Update trusted zones overlay if enabled
+    if (trustedZonesEnabled) toggleTrustedZones(true)
+    // Load/refresh top hosts widget
+    loadTopHosts()
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -637,16 +717,20 @@ searchPage.get('/', async (c) => {
                 \${l.price_daily ? '<p class="text-gray-500 text-xs">$' + l.price_daily.toFixed(0) + '/day</p>' : ''}
               </div>
             </div>
-            <div class="flex items-center justify-between mt-2">
-              <div class="flex items-center gap-1">
-                <i class="fas fa-star text-amber-400 text-xs"></i>
-                <span class="text-white text-xs font-semibold">\${(l.rating || 0).toFixed(1)}</span>
-                <span class="text-gray-500 text-xs">(\${l.review_count || 0})</span>
+            <div class="flex items-center justify-between mt-2 flex-wrap gap-1">
+              <div class="flex items-center gap-2 flex-wrap">
+                <div class="flex items-center gap-1">
+                  <i class="fas fa-star text-amber-400 text-xs"></i>
+                  <span class="text-white text-xs font-semibold">\${(l.rating || 0).toFixed(1)}</span>
+                  <span class="text-gray-500 text-xs">(\${l.review_count || 0})</span>
+                </div>
+                \${l.pri_score != null ? \`<span class="pri-tooltip"><span class="text-gray-400 text-xs">PRI: <span class="font-semibold text-white">\${l.pri_score}%</span>\${priDot(l.pri_score)}</span><span class="pri-tip">Reliability: \${l.pri_score}%<br>Based on \${l.pri_bookings || 0} bookings, \${l.pri_cancels || 0} cancellations<br>Avg confirmation: \${(l.pri_confirm_hours||0).toFixed(1)} hrs</span></span>\` : (l.pri_bookings < 5 ? '<span class="text-gray-600 text-xs">New Listing</span>' : '')}
               </div>
-              <div class="flex gap-1 flex-wrap justify-end">
-                \${tags.slice(0,3).map(t => '<span class="text-xs bg-charcoal-300 text-gray-400 px-1.5 py-0.5 rounded-md">' + t + '</span>').join('')}
+              <div class="flex gap-1 flex-wrap justify-end items-center">
+                \${tags.slice(0,2).map(t => '<span class="text-xs bg-charcoal-300 text-gray-400 px-1.5 py-0.5 rounded-md">' + t + '</span>').join('')}
               </div>
             </div>
+            \${l.host ? \`<p class="text-gray-600 text-xs mt-1.5 flex items-center">\${l.host.name || ''}\\${hostBadges(l.host)}</p>\` : ''}
           </div>
         </div>
       \`
@@ -674,7 +758,7 @@ searchPage.get('/', async (c) => {
       if (!l.lat || !l.lng) return
 
       const el = document.createElement('div')
-      el.className = 'park-pin'
+      el.className = 'park-pin ' + priPinClass(l.pri_score)
       el.dataset.id = l.id
       el.textContent = '$' + (l.price_hourly || 0).toFixed(0)
 
@@ -797,6 +881,7 @@ searchPage.get('/', async (c) => {
               <i class="fas fa-star text-amber-400 text-xs"></i>
               <span class="text-white text-sm font-semibold">\${(l.rating||0).toFixed(1)}</span>
               <span class="text-gray-400 text-xs">(\${l.review_count||0})</span>
+              \${l.pri_score != null ? \`<span class="ml-1 text-xs font-semibold" style="color:\${l.pri_score>=95?'#16a34a':l.pri_score>=85?'#2563eb':l.pri_score>=75?'#ca8a04':'#dc2626'}">• \${l.pri_score}%</span>\` : ''}
             </div>
           </div>
           \${tags.length > 0 ? '<div class="flex gap-1 flex-wrap mb-3">' + tags.slice(0,4).map(t => '<span class="text-xs bg-white/5 text-gray-400 px-2 py-0.5 rounded-full flex items-center gap-1"><i class=\\"fas ' + t.i + ' text-indigo-400 text-xs\\"></i>' + t.t + '</span>').join('') + '</div>' : ''}
@@ -928,13 +1013,106 @@ searchPage.get('/', async (c) => {
     document.getElementById('min-price').value = ''
     document.getElementById('max-price').value = ''
     document.getElementById('instant-only').checked = false
+    document.getElementById('trusted-zones').checked = false
+    document.getElementById('pri-range').value = 0
+    document.getElementById('pri-label').textContent = 'Any'
     document.getElementById('radius-range').value = 50
     document.getElementById('radius-label').textContent = '50 km'
     document.querySelectorAll('.vehicle-btn').forEach(b => b.classList.remove('border-indigo-500', 'bg-indigo-500/20'))
     selectedVehicles = []
     mapRadius = 50
+    if (trustedZonesEnabled) toggleTrustedZones(false)
     closeFilterModal()
     loadListings()
+  }
+
+  function toggleTrustedZones(enabled) {
+    trustedZonesEnabled = enabled
+    if (!map || typeof mapboxgl === 'undefined') return
+    if (enabled) {
+      // Build trusted zone clusters from listings with PRI >= 95
+      const highPri = allListings.filter(l => l.lat && l.lng && l.pri_score >= 95)
+      if (highPri.length === 0) return
+      // Remove old layer first
+      if (trustedZoneLayerAdded) {
+        try { map.removeLayer('trusted-zones-layer'); map.removeSource('trusted-zones') } catch(e) {}
+        trustedZoneLayerAdded = false
+      }
+      // Create GeoJSON points
+      const geojson = {
+        type: 'FeatureCollection',
+        features: highPri.map(l => ({
+          type: 'Feature',
+          geometry: { type: 'Point', coordinates: [l.lng, l.lat] },
+          properties: { pri: l.pri_score }
+        }))
+      }
+      map.addSource('trusted-zones', { type: 'geojson', data: geojson })
+      map.addLayer({
+        id: 'trusted-zones-layer',
+        type: 'circle',
+        source: 'trusted-zones',
+        paint: {
+          'circle-radius': 40,
+          'circle-color': '#16a34a',
+          'circle-opacity': 0.08,
+          'circle-stroke-width': 1,
+          'circle-stroke-color': '#16a34a',
+          'circle-stroke-opacity': 0.25
+        }
+      })
+      trustedZoneLayerAdded = true
+    } else {
+      if (trustedZoneLayerAdded) {
+        try { map.removeLayer('trusted-zones-layer'); map.removeSource('trusted-zones') } catch(e) {}
+        trustedZoneLayerAdded = false
+      }
+    }
+  }
+
+  async function loadTopHosts() {
+    const widget = document.getElementById('top-hosts-widget')
+    const list   = document.getElementById('top-hosts-list')
+    if (!widget || !list) return
+    if (mapCenter.lat === 0 && mapCenter.lng === 0) return
+    try {
+      const r = await fetch(\`/api/top-hosts?lat=\${mapCenter.lat}&lng=\${mapCenter.lng}&radius_km=\${mapRadius}\`)
+      const data = await r.json()
+      if (!data.hosts || data.hosts.length === 0) return
+      widget.classList.remove('hidden')
+      list.innerHTML = data.hosts.map(h => {
+        const badges = [
+          h.verified    ? \`<span title="Identity Verified" style="color:#2563eb">✓</span>\` : '',
+          h.secure      ? \`<span title="Secure Location"   style="color:#16a34a">🛡</span>\` : '',
+          h.performance ? \`<span title="High-Performance"  style="color:#d97706">⭐</span>\` : '',
+          h.founding    ? \`<span title="Founding Member"   style="color:#7c3aed">🏆</span>\` : '',
+        ].join('')
+        return \`<div class="flex items-center justify-between gap-2 py-1 border-b border-white/5 last:border-0">
+          <button onclick="filterByHost(\${h.id})" class="text-left flex-1 min-w-0">
+            <p class="text-white font-medium truncate">\${h.name}\${badges ? ' <span class="text-xs">' + badges + '</span>' : ''}</p>
+            <p class="text-gray-500 text-xs">\${h.listing_count} spots · ⭐\${h.avg_rating}</p>
+          </button>
+          \${h.avg_pri != null ? \`<span class="text-xs font-semibold flex-shrink-0" style="color:\${h.avg_pri>=95?'#16a34a':h.avg_pri>=85?'#2563eb':'#ca8a04'}">\${h.avg_pri}% PRI</span>\` : ''}
+        </div>\`
+      }).join('')
+    } catch(e) {}
+  }
+
+  function toggleTopHosts() {
+    const list    = document.getElementById('top-hosts-list')
+    const chevron = document.getElementById('top-hosts-chevron')
+    if (!list) return
+    topHostsCollapsed = !topHostsCollapsed
+    list.classList.toggle('hidden', topHostsCollapsed)
+    if (chevron) chevron.style.transform = topHostsCollapsed ? 'rotate(180deg)' : ''
+  }
+
+  function filterByHost(hostId) {
+    // Filter allListings to only show this host's listings
+    const filtered = allListings.filter(l => l.host && l.host.id == hostId)
+    if (filtered.length === 0) return
+    renderListingCards(filtered)
+    renderMapPins(filtered)
   }
   function toggleVehicle(btn, size) {
     btn.classList.toggle('border-indigo-500')

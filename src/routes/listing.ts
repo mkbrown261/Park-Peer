@@ -102,6 +102,119 @@ listingPage.get('/:id', async (c) => {
     }
   }
 
+  // ── Fetch PRI and host credentials (non-fatal) ─────────────────────────────
+  let priData: any = null
+  let hostCreds: any = null
+  if (db && l) {
+    try {
+      const [priRow, credsRow] = await Promise.all([
+        db.prepare('SELECT * FROM pri_metrics WHERE listing_id = ?').bind(id).first<any>(),
+        db.prepare('SELECT * FROM host_credentials WHERE host_id = ?').bind(l.host_id).first<any>(),
+      ])
+      if (priRow && (priRow.total_bookings || 0) >= 5) {
+        priData = {
+          score:           Math.round(priRow.pri_score),
+          bookings:        priRow.total_bookings,
+          cancels:         priRow.cancel_count,
+          confirm_hrs:     priRow.avg_confirm_hours,
+          response_mins:   priRow.avg_response_minutes,
+          cancel_score:    Math.round(priRow.cancellation_score),
+          confirm_score:   Math.round(priRow.confirmation_score),
+          response_score:  Math.round(priRow.responsiveness_score),
+          consistency:     Math.round(priRow.consistency_score),
+        }
+      }
+      if (credsRow) {
+        hostCreds = {
+          verified:    credsRow.tier1_verified === 1,
+          verified_at: credsRow.tier1_verified_at,
+          secure:      credsRow.tier2_secure === 1,
+          secure_at:   credsRow.tier2_secure_at,
+          performance: credsRow.tier3_performance === 1,
+          perf_at:     credsRow.tier3_performance_at,
+          founding:    credsRow.tier4_founding === 1,
+          founding_at: credsRow.tier4_founding_at,
+        }
+      }
+    } catch(e: any) { console.error('[listing/:id] pri/creds', e.message) }
+  }
+
+  // ── Build PRI HTML block ───────────────────────────────────────────────────
+  const priColor = priData
+    ? priData.score >= 95 ? '#16a34a' : priData.score >= 85 ? '#2563eb' : priData.score >= 75 ? '#ca8a04' : '#dc2626'
+    : '#6b7280'
+  const priLabel = priData
+    ? priData.score >= 95 ? 'Exceptional' : priData.score >= 85 ? 'Good' : priData.score >= 75 ? 'Average' : 'Below Average'
+    : ''
+
+  const priHTML = priData ? `
+    <div class="bg-charcoal-100 rounded-2xl p-6 border border-white/5">
+      <h2 class="text-lg font-bold text-white mb-4">Listing Reliability</h2>
+      <div class="flex items-center gap-3 mb-4">
+        <span class="text-3xl font-black" style="color:${priColor}">${priData.score}%</span>
+        <div>
+          <p class="text-white font-semibold">${priLabel} Reliability</p>
+          <p class="text-gray-500 text-xs">Based on ${priData.bookings} bookings</p>
+        </div>
+      </div>
+      <div class="w-full bg-charcoal-300 rounded-full h-2 mb-5">
+        <div class="h-2 rounded-full transition-all" style="width:${priData.score}%;background:${priColor}"></div>
+      </div>
+      <div class="grid grid-cols-3 gap-3 text-center text-xs">
+        <div class="bg-charcoal-200 rounded-xl p-3">
+          <p class="text-gray-400 mb-1">Cancellations</p>
+          <p class="font-bold text-white">${priData.cancels}</p>
+          <p class="text-gray-500 mt-0.5">${priData.cancel_score}% score</p>
+        </div>
+        <div class="bg-charcoal-200 rounded-xl p-3">
+          <p class="text-gray-400 mb-1">Avg Confirmation</p>
+          <p class="font-bold text-white">${priData.confirm_hrs.toFixed(1)} hrs</p>
+          <p class="text-gray-500 mt-0.5">${priData.confirm_score}% score</p>
+        </div>
+        <div class="bg-charcoal-200 rounded-xl p-3">
+          <p class="text-gray-400 mb-1">Consistency</p>
+          <p class="font-bold text-white">${priData.consistency}%</p>
+          <p class="text-gray-500 mt-0.5">rating variance</p>
+        </div>
+      </div>
+    </div>
+  ` : (l.total_bookings < 5 ? `
+    <div class="bg-charcoal-100 rounded-2xl p-5 border border-white/5">
+      <div class="flex items-center gap-3">
+        <div class="w-8 h-8 bg-indigo-500/10 rounded-xl flex items-center justify-center flex-shrink-0">
+          <i class="fas fa-star-half-stroke text-indigo-400 text-sm"></i>
+        </div>
+        <div>
+          <p class="text-white text-sm font-semibold">New Listing</p>
+          <p class="text-gray-500 text-xs">Reliability score unlocks after 5+ bookings</p>
+        </div>
+      </div>
+    </div>
+  ` : '')
+
+  // ── Build Host Credentials HTML ────────────────────────────────────────────
+  const credItems = hostCreds ? [
+    hostCreds.verified    ? { icon: '✓',  color: '#2563eb', label: 'Identity Verified',      sub: 'ID verification complete' } : null,
+    hostCreds.secure      ? { icon: '🛡', color: '#16a34a', label: 'Secure Location',         sub: 'Meets ParkPeer security standards' } : null,
+    hostCreds.performance ? { icon: '⭐', color: '#d97706', label: 'High-Performance Host',   sub: 'Reliability score 95%+' } : null,
+    hostCreds.founding    ? { icon: '🏆', color: '#7c3aed', label: 'Founding Member',         sub: 'Early ParkPeer host' } : null,
+  ].filter(Boolean) : []
+
+  const credsHTML = credItems.length > 0 ? `
+    <div class="mt-4 pt-4 border-t border-white/5">
+      <p class="text-xs text-gray-500 font-semibold uppercase tracking-wider mb-3">Host Credentials</p>
+      <div class="flex flex-wrap gap-2">
+        ${credItems.map((c: any) => `
+          <span class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border"
+            style="background:${c.color}15;border-color:${c.color}30;color:${c.color}" title="${c.sub}">
+            ${c.icon} ${c.label}
+          </span>
+        `).join('')}
+      </div>
+      <p class="text-xs text-gray-600 mt-2">These badges indicate verified, trusted hosts.</p>
+    </div>
+  ` : ''
+
   // 404 if no listing found
   if (!l) {
     return c.html(Layout('Listing Not Found', `
@@ -380,6 +493,9 @@ listingPage.get('/:id', async (c) => {
             </button>` : ''}
           </div>
 
+          <!-- Listing Reliability (PRI) -->
+          ${priHTML}
+
           <!-- Location Map -->
           <div class="bg-charcoal-100 rounded-2xl p-6 border border-white/5">
             <h2 class="text-lg font-bold text-white mb-4"><i class="fas fa-map text-indigo-400 mr-2"></i>Location</h2>
@@ -490,6 +606,7 @@ listingPage.get('/:id', async (c) => {
               <button class="mt-3 w-full py-2.5 bg-charcoal-200 border border-white/10 text-gray-300 hover:text-white rounded-xl text-sm font-medium transition-colors">
                 <i class="fas fa-message mr-2 text-indigo-400"></i>Contact Host
               </button>
+              ${credsHTML}
             </div>
           </div>
         </div>

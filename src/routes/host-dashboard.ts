@@ -46,6 +46,8 @@ hostDashboard.get('/', async (c) => {
   let hostAgreementVersion: string | null = null
   let agreementReacceptRequired = false
   const currentAgreementVersion = CURRENT_VERSIONS.host_agreement
+  // Host credentials
+  let hostCreds: any = null
 
   if (db && userId) {
     try {
@@ -149,15 +151,18 @@ hostDashboard.get('/', async (c) => {
       `).bind(userId).all<any>()
       myListings = listRows.results || []
 
-      // Pending booking requests for this host's listings
+      // Pending booking requests for this host's listings (include driver tier)
       const pendRows = await db.prepare(`
         SELECT b.id, b.start_time, b.end_time, b.total_charged, b.status,
                b.vehicle_description,
                l.title as space_title,
-               u.full_name as driver_name, u.email as driver_email
+               u.full_name as driver_name, u.email as driver_email,
+               u.id as driver_id,
+               uts.current_tier as driver_tier
         FROM bookings b
         JOIN listings l ON b.listing_id = l.id
         LEFT JOIN users u ON b.driver_id = u.id
+        LEFT JOIN user_tier_state uts ON uts.user_id = u.id AND uts.role = 'DRIVER'
         WHERE b.host_id = ? AND b.status = 'pending'
         ORDER BY b.created_at ASC
         LIMIT 6
@@ -187,6 +192,54 @@ hostDashboard.get('/', async (c) => {
       payoutPending = Math.round((payoutRow?.pending ?? 0) * 100) / 100
       const fee = Math.round(payoutPending * 0.15 * 100) / 100
       nextPayout = Math.round((payoutPending - fee) * 100) / 100
+
+      // ── Host Credentials ──────────────────────────────────────────────────
+      try {
+        const FOUNDING_DATE = new Date('2025-12-31T23:59:59Z')
+        const userRow = await db.prepare('SELECT id_verified, created_at FROM users WHERE id = ?').bind(userId).first<any>()
+        const isFounder = userRow?.created_at ? new Date(userRow.created_at) <= FOUNDING_DATE : false
+
+        // Best PRI across host's active listings
+        const bestPriRow = await db.prepare(
+          "SELECT MAX(pri_score) as best FROM listings WHERE host_id = ? AND status = 'active'"
+        ).bind(userId).first<any>()
+        const bestPri = bestPriRow?.best ?? 0
+        const isHighPerf = bestPri >= 95 ? 1 : 0
+
+        await db.prepare(`
+          INSERT INTO host_credentials (host_id, tier1_verified, tier1_verified_at,
+            tier3_performance, tier3_performance_at, tier4_founding, tier4_founding_at, updated_at)
+          VALUES (?, ?, CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END,
+                  ?, CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END,
+                  ?, CASE WHEN ? = 1 THEN ? ELSE NULL END, datetime('now'))
+          ON CONFLICT(host_id) DO UPDATE SET
+            tier1_verified = excluded.tier1_verified,
+            tier3_performance = excluded.tier3_performance,
+            tier3_performance_at = CASE
+              WHEN excluded.tier3_performance = 1 AND tier3_performance = 0 THEN datetime('now')
+              ELSE tier3_performance_at END,
+            tier4_founding = excluded.tier4_founding,
+            updated_at = datetime('now')
+        `).bind(
+          userId,
+          userRow?.id_verified ?? 0, userRow?.id_verified ?? 0,
+          isHighPerf, isHighPerf,
+          isFounder ? 1 : 0, isFounder ? 1 : 0, userRow?.created_at
+        ).run()
+
+        const credsRow = await db.prepare(
+          'SELECT * FROM host_credentials WHERE host_id = ?'
+        ).bind(userId).first<any>()
+        if (credsRow) {
+          hostCreds = {
+            verified:    credsRow.tier1_verified === 1,
+            secure:      credsRow.tier2_secure === 1,
+            performance: credsRow.tier3_performance === 1,
+            founding:    credsRow.tier4_founding === 1,
+            best_pri:    Math.round(bestPri || 0),
+          }
+        }
+      } catch(e: any) { console.error('[host-dashboard] credentials:', e.message) }
 
     } catch(e: any) { console.error('[host-dashboard]', e.message) }
   }
