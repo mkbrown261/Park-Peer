@@ -1717,7 +1717,9 @@ adminPanel.get('/user-control', async (c: any) => {
     }
 
     // ── Init ───────────────────────────────────────────────────────────────
-    document.addEventListener('DOMContentLoaded', () => ucLoad())
+    // Call directly — DOMContentLoaded may already have fired by the time
+    // this inline script (inside <main>) is parsed by the browser.
+    ucLoad()
   </script>
   `
   return c.html(AdminLayout('User Control', content))
@@ -1879,7 +1881,7 @@ adminPanel.get('/audit-log', async (c: any) => {
       } catch {}
     }
 
-    document.addEventListener('DOMContentLoaded', () => { alLoad(); loadRefundLog() })
+    alLoad(); loadRefundLog()
   </script>
   `
   return c.html(AdminLayout('Audit Log', content))
