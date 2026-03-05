@@ -10,6 +10,7 @@ import { hostDashboard } from './routes/host-dashboard'
 import { authPages } from './routes/auth'
 import { adminPanel } from './routes/admin'
 import { adminAuth } from './routes/admin-auth'
+import { adminApiRoutes } from './routes/admin-api'
 import { apiRoutes } from './routes/api'
 import { legalPages } from './routes/legal'
 import agreementRoutes from './routes/agreements'
@@ -55,6 +56,8 @@ app.route('/api/agreements', agreementRoutes)
 // Admin auth (login/logout) MUST be mounted BEFORE the protected admin panel
 app.route('/admin', adminAuth)
 app.route('/admin', adminPanel)
+// Admin API routes (protected by adminAuthMiddleware internally)
+app.route('/api/admin', adminApiRoutes)
 app.route('/api', apiRoutes)
 
 export default app

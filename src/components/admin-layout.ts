@@ -115,6 +115,13 @@ export const AdminLayout = (title: string, content: string) => `<!DOCTYPE html>
           <span class="flex-1">Fraud Alerts</span>
           <span id="badge-fraud" class="hidden w-5 h-5 badge-amber rounded-full text-xs font-bold flex items-center justify-center">0</span>
         </a>
+        <a href="/admin/user-control" class="admin-nav-item flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm text-gray-400 ${title === 'User Control' ? 'admin-nav-active' : ''}">
+          <i class="fas fa-user-xmark w-4 text-center text-red-500/80"></i>
+          <span class="flex-1">User Control</span>
+        </a>
+        <a href="/admin/audit-log" class="admin-nav-item flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm text-gray-400 ${title === 'Audit Log' ? 'admin-nav-active' : ''}">
+          <i class="fas fa-scroll w-4 text-center text-indigo-500/80"></i> Audit Log
+        </a>
         <a href="/admin/settings" class="admin-nav-item flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm text-gray-400 ${title === 'Settings' ? 'admin-nav-active' : ''}">
           <i class="fas fa-gear w-4 text-center text-indigo-500/80"></i> Settings
         </a>

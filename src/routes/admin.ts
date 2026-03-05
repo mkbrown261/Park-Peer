@@ -1042,3 +1042,837 @@ adminPanel.get('/settings', (c: any) => {
   `
   return c.html(AdminLayout('Settings', content))
 })
+
+// ════════════════════════════════════════════════════════════════════════════
+// GET /admin/user-control  — Full user management with delete & refund
+// ════════════════════════════════════════════════════════════════════════════
+adminPanel.get('/user-control', async (c: any) => {
+  const db: D1Database | undefined = c.env?.DB
+  let totalUsers = 0, totalDeleted = 0, totalRefunded = 0, totalSuspended = 0
+
+  if (db) {
+    try {
+      const stats = await Promise.all([
+        db.prepare(`SELECT COUNT(*) as n FROM users WHERE status NOT IN ('deleted','suspended')`).first<any>(),
+        db.prepare(`SELECT COUNT(*) as n FROM users WHERE status='suspended'`).first<any>(),
+        db.prepare(`SELECT COUNT(*) as n FROM user_deletions`).first<any>(),
+        db.prepare(`SELECT COALESCE(SUM(total_refunded),0) as n FROM user_deletions`).first<any>(),
+      ])
+      totalUsers     = stats[0]?.n ?? 0
+      totalSuspended = stats[1]?.n ?? 0
+      totalDeleted   = stats[2]?.n ?? 0
+      totalRefunded  = Math.round((stats[3]?.n ?? 0) * 100) / 100
+    } catch {}
+  }
+
+  const content = `
+  <!-- Header -->
+  <div class="flex items-center justify-between mb-6">
+    <div>
+      <p class="text-gray-400 text-sm">Delete accounts, issue refunds, and maintain compliance records.</p>
+      <p class="text-red-400/70 text-xs mt-1 flex items-center gap-1.5">
+        <i class="fas fa-triangle-exclamation text-xs"></i>
+        All actions are permanent and fully logged. Exercise with caution.
+      </p>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+    <div class="stat-card rounded-2xl p-5">
+      <div class="w-10 h-10 bg-indigo-500/10 rounded-xl flex items-center justify-center mb-3">
+        <i class="fas fa-users text-indigo-400"></i>
+      </div>
+      <p class="text-2xl font-black text-white">${totalUsers}</p>
+      <p class="text-gray-400 text-xs mt-1">Active Users</p>
+    </div>
+    <div class="stat-card rounded-2xl p-5">
+      <div class="w-10 h-10 bg-amber-500/10 rounded-xl flex items-center justify-center mb-3">
+        <i class="fas fa-user-lock text-amber-400"></i>
+      </div>
+      <p class="text-2xl font-black text-white">${totalSuspended}</p>
+      <p class="text-gray-400 text-xs mt-1">Suspended</p>
+    </div>
+    <div class="stat-card rounded-2xl p-5">
+      <div class="w-10 h-10 bg-red-500/10 rounded-xl flex items-center justify-center mb-3">
+        <i class="fas fa-user-slash text-red-400"></i>
+      </div>
+      <p class="text-2xl font-black text-white">${totalDeleted}</p>
+      <p class="text-gray-400 text-xs mt-1">Deleted (GDPR Record)</p>
+    </div>
+    <div class="stat-card rounded-2xl p-5">
+      <div class="w-10 h-10 bg-lime-500/10 rounded-xl flex items-center justify-center mb-3">
+        <i class="fas fa-rotate-left text-lime-400"></i>
+      </div>
+      <p class="text-2xl font-black text-white">$${totalRefunded.toFixed(2)}</p>
+      <p class="text-gray-400 text-xs mt-1">Total Refunded</p>
+    </div>
+  </div>
+
+  <!-- Search + Filter Bar -->
+  <div class="flex flex-wrap gap-3 mb-5">
+    <div class="relative flex-1 min-w-[220px]">
+      <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-xs pointer-events-none"></i>
+      <input type="text" id="uc-search" placeholder="Search by name, email, or ID..."
+        class="w-full bg-charcoal-100 border border-white/10 rounded-xl pl-9 pr-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500"
+        oninput="ucSearch()"/>
+    </div>
+    <select id="uc-role" onchange="ucSearch()"
+      class="bg-charcoal-100 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-gray-400 focus:outline-none focus:border-indigo-500">
+      <option value="">All Roles</option>
+      <option value="DRIVER">Drivers</option>
+      <option value="HOST">Hosts</option>
+      <option value="BOTH">Both</option>
+    </select>
+    <select id="uc-status" onchange="ucSearch()"
+      class="bg-charcoal-100 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-gray-400 focus:outline-none focus:border-indigo-500">
+      <option value="">All Statuses</option>
+      <option value="active">Active</option>
+      <option value="suspended">Suspended</option>
+    </select>
+    <button onclick="ucSearch()" class="btn-primary px-4 py-2.5 rounded-xl text-sm text-white font-semibold flex items-center gap-2">
+      <i class="fas fa-magnifying-glass text-xs"></i> Search
+    </button>
+  </div>
+
+  <!-- Users Table -->
+  <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-charcoal-200/60">
+          <tr>
+            ${['User', 'Role', 'Status', 'Joined', 'Active Listings', 'Active Bookings', 'Balance', 'Disputes', 'Actions'].map(h =>
+              `<th class="px-4 py-3 text-left text-xs text-gray-500 uppercase tracking-wider font-semibold whitespace-nowrap">${h}</th>`
+            ).join('')}
+          </tr>
+        </thead>
+        <tbody id="uc-table-body">
+          <tr><td colspan="9" class="text-center py-10 text-gray-600 text-sm">
+            <i class="fas fa-spinner fa-spin mr-2"></i> Loading users...
+          </td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="flex items-center justify-between px-5 py-3 border-t border-white/5">
+      <p class="text-gray-600 text-xs" id="uc-count">Loading...</p>
+      <div class="flex gap-2">
+        <button id="uc-prev" onclick="ucPage(-1)" class="px-3 py-1.5 bg-charcoal-200 text-gray-500 hover:text-white rounded-lg text-xs transition-colors disabled:opacity-40">← Prev</button>
+        <button id="uc-next" onclick="ucPage(1)"  class="px-3 py-1.5 bg-charcoal-200 text-gray-500 hover:text-white rounded-lg text-xs transition-colors disabled:opacity-40">Next →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Suspend / Unsuspend Modal ────────────────────────────────────────── -->
+  <div id="suspend-modal" class="fixed inset-0 z-50 hidden flex items-center justify-center p-4">
+    <div class="absolute inset-0 bg-black/80 backdrop-blur-sm" onclick="closeSuspendModal()"></div>
+    <div class="relative bg-charcoal-100 border border-amber-500/30 rounded-2xl p-6 w-full max-w-md shadow-2xl">
+      <div class="flex items-start gap-4 mb-5">
+        <div class="w-12 h-12 bg-amber-500/15 rounded-xl flex items-center justify-center flex-shrink-0">
+          <i id="suspend-icon" class="fas fa-user-lock text-amber-400 text-xl"></i>
+        </div>
+        <div>
+          <h3 id="suspend-title" class="font-black text-white text-lg">Suspend Account</h3>
+          <p id="suspend-subtitle" class="text-gray-400 text-sm mt-1">The user will lose access. You can unsuspend at any time.</p>
+        </div>
+      </div>
+      <div class="bg-charcoal-200 rounded-xl p-3 mb-4 border border-white/5">
+        <p class="text-white font-semibold text-sm" id="sus-user-name">—</p>
+      </div>
+      <div class="mb-5">
+        <label class="text-xs text-gray-400 font-semibold block mb-1.5">Reason <span class="text-red-400">*</span></label>
+        <textarea id="sus-reason" rows="2" placeholder="e.g. Policy violation, suspicious activity..."
+          class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-amber-500 resize-none"
+          oninput="document.getElementById('sus-confirm-btn').disabled = !this.value.trim()"></textarea>
+      </div>
+      <div class="flex gap-3">
+        <button onclick="closeSuspendModal()" class="flex-1 py-3 bg-charcoal-200 hover:bg-charcoal-300 text-white rounded-xl text-sm font-semibold transition-colors">Cancel</button>
+        <button id="sus-confirm-btn" onclick="confirmSuspend()" disabled
+          class="flex-1 py-3 bg-amber-600 hover:bg-amber-500 disabled:bg-amber-900/50 disabled:text-amber-700 text-white rounded-xl text-sm font-bold transition-colors flex items-center justify-center gap-2">
+          <i id="sus-btn-icon" class="fas fa-user-lock text-sm"></i>
+          <span id="sus-btn-text">Suspend Account</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Delete Confirmation Modal ──────────────────────────────────────── -->
+  <div id="delete-modal" class="fixed inset-0 z-50 hidden flex items-center justify-center p-4">
+    <div class="absolute inset-0 bg-black/80 backdrop-blur-sm" onclick="closeDeleteModal()"></div>
+    <div class="relative bg-charcoal-100 border border-red-500/30 rounded-2xl p-6 w-full max-w-lg shadow-2xl">
+      <!-- Header -->
+      <div class="flex items-start gap-4 mb-5">
+        <div class="w-12 h-12 bg-red-500/15 rounded-xl flex items-center justify-center flex-shrink-0">
+          <i class="fas fa-triangle-exclamation text-red-400 text-xl"></i>
+        </div>
+        <div>
+          <h3 class="font-black text-white text-lg">Permanently Delete Account</h3>
+          <p class="text-gray-400 text-sm mt-1">This action <strong class="text-red-400">cannot be undone</strong>. All data will be scrubbed and refunds issued.</p>
+        </div>
+      </div>
+
+      <!-- User preview -->
+      <div id="del-user-preview" class="bg-charcoal-200 rounded-xl p-4 mb-4 border border-white/5">
+        <p class="text-white font-semibold text-sm" id="del-user-name">—</p>
+        <p class="text-gray-400 text-xs mt-0.5" id="del-user-email">—</p>
+        <div class="flex gap-2 mt-2">
+          <span id="del-user-role" class="text-xs px-2 py-0.5 rounded-full badge-indigo font-semibold">—</span>
+          <span id="del-balance-badge" class="text-xs px-2 py-0.5 rounded-full badge-amber font-semibold hidden">Balance: $0.00</span>
+        </div>
+      </div>
+
+      <!-- Blockers warning -->
+      <div id="del-blockers" class="hidden bg-red-500/10 border border-red-500/20 rounded-xl p-4 mb-4">
+        <p class="text-red-400 text-sm font-semibold mb-2 flex items-center gap-2">
+          <i class="fas fa-shield-exclamation"></i> Deletion Blockers
+        </p>
+        <ul id="del-blockers-list" class="space-y-1 text-xs text-red-300/80 list-disc list-inside"></ul>
+        <label class="flex items-center gap-2 mt-3 cursor-pointer">
+          <input type="checkbox" id="del-force" class="rounded" onchange="toggleForceOverride()"/>
+          <span class="text-xs text-yellow-400 font-medium">Force override — cancel active bookings and bypass disputes</span>
+        </label>
+      </div>
+
+      <!-- Reason -->
+      <div class="mb-4">
+        <label class="text-xs text-gray-400 font-semibold block mb-1.5">Reason for Deletion <span class="text-red-400">*</span></label>
+        <textarea id="del-reason" rows="2" placeholder="e.g. Fraudulent activity, TOS violation, User request..."
+          class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-red-500 resize-none"></textarea>
+      </div>
+
+      <!-- Password re-entry -->
+      <div class="mb-5">
+        <label class="text-xs text-gray-400 font-semibold block mb-1.5">
+          <i class="fas fa-lock text-xs mr-1"></i>Confirm Your Admin Password <span class="text-red-400">*</span>
+        </label>
+        <input type="password" id="del-password" placeholder="Enter your admin password to confirm"
+          class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-red-500"/>
+        <p id="del-pw-error" class="hidden text-red-400 text-xs mt-1.5 flex items-center gap-1">
+          <i class="fas fa-xmark-circle text-xs"></i> <span id="del-pw-error-text">Incorrect password</span>
+        </p>
+      </div>
+
+      <!-- Action buttons -->
+      <div class="flex gap-3">
+        <button onclick="closeDeleteModal()" class="flex-1 py-3 bg-charcoal-200 hover:bg-charcoal-300 text-white rounded-xl text-sm font-semibold transition-colors">
+          Cancel
+        </button>
+        <button id="del-confirm-btn" onclick="confirmDelete()" disabled
+          class="flex-1 py-3 bg-red-600 hover:bg-red-500 disabled:bg-red-900/50 disabled:text-red-700 text-white rounded-xl text-sm font-bold transition-colors flex items-center justify-center gap-2">
+          <i class="fas fa-trash-can text-sm"></i> <span id="del-btn-text">Delete Account</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── User Detail Side Panel ──────────────────────────────────────────── -->
+  <div id="detail-panel" class="fixed right-0 top-0 bottom-0 w-full max-w-md bg-charcoal-100 border-l border-white/10 z-40 hidden overflow-y-auto shadow-2xl transform translate-x-full transition-transform duration-300">
+    <div class="sticky top-0 bg-charcoal-100 border-b border-white/5 px-5 py-4 flex items-center justify-between z-10">
+      <h3 class="font-bold text-white">User Detail</h3>
+      <button onclick="closeDetailPanel()" class="w-8 h-8 bg-charcoal-200 hover:bg-charcoal-300 rounded-lg flex items-center justify-center text-gray-400 hover:text-white transition-colors">
+        <i class="fas fa-xmark text-sm"></i>
+      </button>
+    </div>
+    <div id="detail-content" class="p-5 space-y-4">
+      <div class="text-center py-10 text-gray-600"><i class="fas fa-spinner fa-spin text-2xl"></i></div>
+    </div>
+  </div>
+  <div id="detail-overlay" class="fixed inset-0 bg-black/50 z-30 hidden" onclick="closeDetailPanel()"></div>
+
+  <!-- ── Toast ─────────────────────────────────────────────────────────── -->
+  <div id="uc-toast" class="fixed bottom-6 right-6 z-50 hidden max-w-sm">
+    <div id="uc-toast-inner" class="flex items-start gap-3 p-4 rounded-xl shadow-2xl border">
+      <i id="uc-toast-icon" class="text-lg mt-0.5 flex-shrink-0"></i>
+      <div class="min-w-0">
+        <p id="uc-toast-title" class="font-semibold text-sm text-white"></p>
+        <p id="uc-toast-msg" class="text-xs text-gray-300 mt-0.5"></p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ── State ──────────────────────────────────────────────────────────────
+    let ucOffset  = 0
+    const ucLimit = 25
+    let ucTotal   = 0
+    let currentDeleteUserId = null
+    let currentDeleteUserName = ''
+    let pendingBlockers = null
+
+    // ── Load users table ───────────────────────────────────────────────────
+    async function ucLoad() {
+      const q      = document.getElementById('uc-search').value.trim()
+      const role   = document.getElementById('uc-role').value
+      const status = document.getElementById('uc-status').value
+
+      const params = new URLSearchParams({ limit: ucLimit, offset: ucOffset })
+      if (q)      params.set('q', q)
+      if (role)   params.set('role', role)
+      if (status) params.set('status', status)
+
+      try {
+        const r = await fetch('/api/admin/users?' + params.toString())
+        if (!r.ok) throw new Error('Status ' + r.status)
+        const d = await r.json()
+        ucTotal = d.total
+        renderUcTable(d.users || [])
+        document.getElementById('uc-count').textContent =
+          'Showing ' + (ucOffset + 1) + '–' + Math.min(ucOffset + ucLimit, ucTotal) + ' of ' + ucTotal + ' users'
+        document.getElementById('uc-prev').disabled = ucOffset === 0
+        document.getElementById('uc-next').disabled = ucOffset + ucLimit >= ucTotal
+      } catch(e) {
+        document.getElementById('uc-table-body').innerHTML =
+          '<tr><td colspan="9" class="text-center py-8 text-red-400 text-sm">Failed to load users: ' + e.message + '</td></tr>'
+      }
+    }
+
+    function ucSearch() { ucOffset = 0; ucLoad() }
+    function ucPage(dir) {
+      ucOffset = Math.max(0, ucOffset + dir * ucLimit)
+      ucLoad()
+    }
+
+    function renderUcTable(users) {
+      const tbody = document.getElementById('uc-table-body')
+      if (!users.length) {
+        tbody.innerHTML = '<tr><td colspan="9" class="text-center py-10 text-gray-600 text-sm">No users found matching your search.</td></tr>'
+        return
+      }
+      tbody.innerHTML = users.map(u => {
+        const roleColor = u.role === 'ADMIN' ? 'badge-indigo' : u.role === 'HOST' ? 'badge-green' : 'badge-amber'
+        const statusColor = u.status === 'active' ? 'badge-green' : u.status === 'suspended' ? 'badge-red' : 'badge-gray'
+        const initials = (u.full_name || u.email || '?').substring(0,2).toUpperCase()
+        const hasDisputes = u.open_disputes > 0
+        const hasBlockers = u.open_disputes > 0 || u.active_bookings > 0
+        return '<tr class="border-b border-white/5 hover:bg-white/[.025] transition-colors table-row">' +
+          '<td class="px-4 py-3">' +
+            '<div class="flex items-center gap-2.5">' +
+              '<div class="w-8 h-8 gradient-bg rounded-full flex items-center justify-center text-xs font-bold text-white flex-shrink-0">' + initials + '</div>' +
+              '<div class="min-w-0">' +
+                '<p class="text-white text-xs font-semibold truncate max-w-[120px]">' + (u.full_name || '—') + '</p>' +
+                '<p class="text-gray-600 text-xs truncate max-w-[120px]">' + u.email + '</p>' +
+              '</div>' +
+            '</div>' +
+          '</td>' +
+          '<td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-semibold ' + roleColor + '">' + (u.role || '—') + '</span></td>' +
+          '<td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-semibold ' + statusColor + '">' + u.status + '</span></td>' +
+          '<td class="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">' + formatDate(u.created_at) + '</td>' +
+          '<td class="px-4 py-3 text-center text-xs ' + (u.active_listings > 0 ? 'text-indigo-400 font-semibold' : 'text-gray-600') + '">' + u.active_listings + '</td>' +
+          '<td class="px-4 py-3 text-center text-xs ' + (u.active_bookings > 0 ? 'text-amber-400 font-semibold' : 'text-gray-600') + '">' + u.active_bookings + '</td>' +
+          '<td class="px-4 py-3 text-xs ' + ((u.total_paid + u.total_earned) > 0 ? 'text-lime-400 font-semibold' : 'text-gray-600') + '">' +
+            (u.total_paid > 0 || u.total_earned > 0 ? '$' + (Math.max(u.total_paid, u.total_earned)).toFixed(2) : '—') +
+          '</td>' +
+          '<td class="px-4 py-3 text-center">' +
+            (hasDisputes ? '<span class="badge-red text-xs px-2 py-0.5 rounded-full font-semibold">' + u.open_disputes + ' open</span>' : '<span class="text-gray-700 text-xs">—</span>') +
+          '</td>' +
+          '<td class="px-4 py-3">' +
+            '<div class="flex items-center gap-2">' +
+              '<button onclick="openDetailPanel(' + u.id + ')" class="text-indigo-400 hover:text-indigo-300 text-xs font-medium transition-colors px-2 py-1 rounded hover:bg-indigo-500/10">Detail</button>' +
+              (u.role !== 'ADMIN' ? (
+                '<button onclick="openSuspendModal(' + u.id + ', \'' + escapeHtml(u.full_name||'Unknown') + '\', \'' + u.status + '\')" class="text-amber-400 hover:text-amber-300 text-xs font-medium transition-colors px-2 py-1 rounded hover:bg-amber-500/10">' + (u.status === 'suspended' ? 'Unsuspend' : 'Suspend') + '</button>' +
+                '<button onclick="openDeleteModal(' + u.id + ', \'' + escapeHtml(u.full_name||'Unknown') + '\', \'' + escapeHtml(u.email) + '\', \'' + u.role + '\')" class="text-red-400 hover:text-red-300 text-xs font-medium transition-colors px-2 py-1 rounded hover:bg-red-500/10 flex items-center gap-1"><i class=\\"fas fa-trash-can text-xs\\"></i> Delete</button>'
+              ) : '<span class="text-xs text-gray-600 italic">Admin</span>') +
+            '</div>' +
+          '</td>' +
+        '</tr>'
+      }).join('')
+    }
+
+    // ── Suspend Modal ──────────────────────────────────────────────────────
+    let currentSuspendUserId = null
+    let currentSuspendAction = 'suspend'
+
+    function openSuspendModal(userId, name, currentStatus) {
+      currentSuspendUserId = userId
+      currentSuspendAction = currentStatus === 'suspended' ? 'unsuspend' : 'suspend'
+      const isSuspend = currentSuspendAction === 'suspend'
+      document.getElementById('sus-user-name').textContent = name
+      document.getElementById('sus-reason').value = ''
+      document.getElementById('sus-confirm-btn').disabled = true
+      document.getElementById('sus-btn-text').textContent = isSuspend ? 'Suspend Account' : 'Unsuspend Account'
+      document.getElementById('sus-btn-icon').className = isSuspend ? 'fas fa-user-lock text-sm' : 'fas fa-user-check text-sm'
+      document.getElementById('suspend-title').textContent = isSuspend ? 'Suspend Account' : 'Unsuspend Account'
+      document.getElementById('suspend-subtitle').textContent = isSuspend
+        ? 'The user will lose access immediately. You can unsuspend at any time.'
+        : 'The user will regain full access. Make sure any issues have been resolved.'
+      document.getElementById('suspend-icon').className = isSuspend
+        ? 'fas fa-user-lock text-amber-400 text-xl'
+        : 'fas fa-user-check text-green-400 text-xl'
+      document.getElementById('suspend-modal').classList.remove('hidden')
+      document.getElementById('suspend-modal').classList.add('flex')
+    }
+
+    function closeSuspendModal() {
+      document.getElementById('suspend-modal').classList.add('hidden')
+      document.getElementById('suspend-modal').classList.remove('flex')
+      currentSuspendUserId = null
+    }
+
+    async function confirmSuspend() {
+      const reason = document.getElementById('sus-reason').value.trim()
+      if (!reason || !currentSuspendUserId) return
+      const btn = document.getElementById('sus-confirm-btn')
+      btn.disabled = true
+      document.getElementById('sus-btn-text').textContent = 'Processing...'
+      try {
+        const r = await fetch('/api/admin/users/' + currentSuspendUserId + '/suspend', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: currentSuspendAction, reason })
+        })
+        const d = await r.json()
+        if (d.success) {
+          closeSuspendModal()
+          const label = currentSuspendAction === 'suspend' ? 'User Suspended' : 'User Unsuspended'
+          showToast('success', label, 'Account status changed to ' + d.new_status + '.')
+          setTimeout(ucLoad, 400)
+        } else {
+          showToast('error', 'Action Failed', d.error || 'Unknown error')
+          btn.disabled = false
+          document.getElementById('sus-btn-text').textContent =
+            currentSuspendAction === 'suspend' ? 'Suspend Account' : 'Unsuspend Account'
+        }
+      } catch(e) {
+        showToast('error', 'Network Error', e.message)
+        btn.disabled = false
+        document.getElementById('sus-btn-text').textContent =
+          currentSuspendAction === 'suspend' ? 'Suspend Account' : 'Unsuspend Account'
+      }
+    }
+
+    // ── Delete Modal ───────────────────────────────────────────────────────
+    function openDeleteModal(userId, name, email, role) {
+      currentDeleteUserId = userId
+      currentDeleteUserName = name
+      document.getElementById('del-user-name').textContent = name
+      document.getElementById('del-user-email').textContent = email
+      document.getElementById('del-user-role').textContent = role
+      document.getElementById('del-reason').value = ''
+      document.getElementById('del-password').value = ''
+      document.getElementById('del-pw-error').classList.add('hidden')
+      document.getElementById('del-blockers').classList.add('hidden')
+      document.getElementById('del-force').checked = false
+      document.getElementById('del-balance-badge').classList.add('hidden')
+      document.getElementById('del-btn-text').textContent = 'Delete Account'
+      document.getElementById('del-confirm-btn').disabled = true
+      document.getElementById('delete-modal').classList.remove('hidden')
+      document.getElementById('delete-modal').classList.add('flex')
+
+      // Fetch user detail for balance + blockers
+      loadDeletePreview(userId)
+
+      // Enable button when both fields filled
+      ['del-reason','del-password'].forEach(id => {
+        document.getElementById(id).addEventListener('input', checkDeleteReady)
+      })
+    }
+
+    async function loadDeletePreview(userId) {
+      try {
+        const r = await fetch('/api/admin/users/' + userId)
+        const d = await r.json()
+        if (d.balance && d.balance.total > 0) {
+          const badge = document.getElementById('del-balance-badge')
+          badge.textContent = 'Balance: $' + d.balance.total.toFixed(2)
+          badge.classList.remove('hidden')
+        }
+        if (d.blockers && d.blockers.blocked) {
+          pendingBlockers = d.blockers
+          document.getElementById('del-blockers').classList.remove('hidden')
+          const list = document.getElementById('del-blockers-list')
+          list.innerHTML = d.blockers.reasons.map(r => '<li>' + r + '</li>').join('')
+        }
+      } catch {}
+    }
+
+    function checkDeleteReady() {
+      const reason = document.getElementById('del-reason').value.trim()
+      const pw     = document.getElementById('del-password').value.trim()
+      const force  = document.getElementById('del-force').checked
+      const hasBlockers = pendingBlockers && pendingBlockers.blocked
+      document.getElementById('del-confirm-btn').disabled =
+        !reason || !pw || (hasBlockers && !force)
+    }
+
+    function toggleForceOverride() { checkDeleteReady() }
+
+    function closeDeleteModal() {
+      document.getElementById('delete-modal').classList.add('hidden')
+      document.getElementById('delete-modal').classList.remove('flex')
+      currentDeleteUserId = null
+      pendingBlockers = null
+    }
+
+    async function confirmDelete() {
+      const reason   = document.getElementById('del-reason').value.trim()
+      const password = document.getElementById('del-password').value.trim()
+      const force    = document.getElementById('del-force').checked
+
+      if (!reason || !password) return
+
+      const btn = document.getElementById('del-confirm-btn')
+      btn.disabled = true
+      document.getElementById('del-btn-text').textContent = 'Verifying password...'
+      document.getElementById('del-pw-error').classList.add('hidden')
+
+      // Step 1: Verify admin password
+      try {
+        const vr = await fetch('/api/admin/verify-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password })
+        })
+        const vd = await vr.json()
+        if (!vd.verified) {
+          document.getElementById('del-pw-error-text').textContent = vd.error || 'Incorrect password'
+          document.getElementById('del-pw-error').classList.remove('hidden')
+          btn.disabled = false
+          document.getElementById('del-btn-text').textContent = 'Delete Account'
+          return
+        }
+      } catch(e) {
+        showToast('error', 'Verification Error', 'Could not verify password: ' + e.message)
+        btn.disabled = false
+        document.getElementById('del-btn-text').textContent = 'Delete Account'
+        return
+      }
+
+      // Step 2: Execute deletion
+      document.getElementById('del-btn-text').textContent = 'Deleting...'
+      try {
+        const dr = await fetch('/api/admin/users/' + currentDeleteUserId + '/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason, force })
+        })
+        const dd = await dr.json()
+
+        if (dd.success) {
+          closeDeleteModal()
+          const msg = dd.balance_refunded > 0
+            ? 'User deleted. $' + dd.balance_refunded.toFixed(2) + ' refunded (' + dd.refund_status + ').'
+            : 'User deleted. No balance to refund.'
+          showToast('success', 'Account Deleted', msg)
+          setTimeout(ucLoad, 600)
+        } else if (dd.error === 'Deletion blocked') {
+          // Show blockers in modal
+          pendingBlockers = dd.blockers
+          document.getElementById('del-blockers').classList.remove('hidden')
+          const list = document.getElementById('del-blockers-list')
+          list.innerHTML = dd.reasons.map(r => '<li>' + r + '</li>').join('')
+          btn.disabled = false
+          document.getElementById('del-btn-text').textContent = 'Delete Account'
+          checkDeleteReady()
+        } else {
+          showToast('error', 'Deletion Failed', dd.error || 'Unknown error')
+          btn.disabled = false
+          document.getElementById('del-btn-text').textContent = 'Delete Account'
+        }
+      } catch(e) {
+        showToast('error', 'Network Error', e.message)
+        btn.disabled = false
+        document.getElementById('del-btn-text').textContent = 'Delete Account'
+      }
+    }
+
+    // ── Detail Panel ───────────────────────────────────────────────────────
+    async function openDetailPanel(userId) {
+      document.getElementById('detail-panel').classList.remove('hidden', 'translate-x-full')
+      document.getElementById('detail-overlay').classList.remove('hidden')
+      document.getElementById('detail-content').innerHTML =
+        '<div class="text-center py-10 text-gray-600"><i class="fas fa-spinner fa-spin text-2xl"></i></div>'
+
+      try {
+        const r = await fetch('/api/admin/users/' + userId)
+        const d = await r.json()
+        renderDetailPanel(d)
+      } catch(e) {
+        document.getElementById('detail-content').innerHTML =
+          '<p class="text-red-400 text-sm text-center py-10">Failed to load: ' + e.message + '</p>'
+      }
+    }
+
+    function closeDetailPanel() {
+      document.getElementById('detail-panel').classList.add('translate-x-full')
+      setTimeout(() => {
+        document.getElementById('detail-panel').classList.add('hidden')
+        document.getElementById('detail-overlay').classList.add('hidden')
+      }, 300)
+    }
+
+    function renderDetailPanel(d) {
+      const u = d.user || {}
+      const bal = d.balance || {}
+      const blk = d.blockers || {}
+      const pmts = d.payments || []
+      const lst  = d.listings || []
+      const bks  = d.bookings || []
+
+      const html =
+        '<div class="flex items-center gap-3 p-4 bg-charcoal-200 rounded-xl">' +
+          '<div class="w-12 h-12 gradient-bg rounded-full flex items-center justify-center font-black text-white text-lg">' +
+            (u.full_name||'?').substring(0,2).toUpperCase() +
+          '</div>' +
+          '<div class="flex-1 min-w-0">' +
+            '<p class="font-bold text-white">' + (u.full_name||'—') + '</p>' +
+            '<p class="text-gray-400 text-xs mt-0.5 truncate">' + u.email + '</p>' +
+            '<div class="flex gap-1.5 mt-1.5">' +
+              '<span class="text-xs px-2 py-0.5 badge-indigo rounded-full font-semibold">' + u.role + '</span>' +
+              '<span class="text-xs px-2 py-0.5 ' + (u.status==='active'?'badge-green':'badge-red') + ' rounded-full font-semibold">' + u.status + '</span>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+
+        // Balance section
+        '<div class="bg-charcoal-200 rounded-xl p-4 border border-lime-500/20">' +
+          '<p class="text-xs text-gray-400 font-semibold uppercase tracking-wider mb-3 flex items-center gap-2">' +
+            '<i class="fas fa-scale-balanced text-lime-400 text-xs"></i> Balance & Refund Preview' +
+          '</p>' +
+          '<p class="text-2xl font-black text-lime-400">$' + (bal.total||0).toFixed(2) + '</p>' +
+          '<p class="text-xs text-gray-500 mt-0.5">Refundable amount</p>' +
+          (bal.breakdown && bal.breakdown.length ? '<div class="mt-3 space-y-1.5">' +
+            bal.breakdown.map(b =>
+              '<div class="flex items-center justify-between text-xs"><span class="text-gray-400">' + b.label + '</span><span class="text-white font-semibold">$' + (b.amount||0).toFixed(2) + '</span></div>'
+            ).join('') +
+          '</div>' : '') +
+        '</div>' +
+
+        // Blockers
+        (blk.blocked ? '<div class="bg-red-500/10 border border-red-500/20 rounded-xl p-4">' +
+          '<p class="text-red-400 text-xs font-semibold mb-2 flex items-center gap-1.5"><i class="fas fa-shield-exclamation text-xs"></i> Deletion Blockers</p>' +
+          '<ul class="space-y-1">' + blk.reasons.map(r => '<li class="text-red-300/80 text-xs">• ' + r + '</li>').join('') + '</ul>' +
+        '</div>' : '') +
+
+        // Stripe info
+        (u.stripe_customer_id ? '<div class="flex items-center gap-2 p-3 bg-charcoal-200 rounded-xl">' +
+          '<i class="fab fa-stripe text-indigo-400"></i>' +
+          '<div><p class="text-xs text-gray-400">Stripe Customer</p><p class="text-xs font-mono text-white">' + u.stripe_customer_id + '</p></div>' +
+        '</div>' : '') +
+
+        // Listings
+        (lst.length ? '<div>' +
+          '<p class="text-xs text-gray-400 font-semibold uppercase tracking-wider mb-2 flex items-center gap-1.5"><i class="fas fa-parking text-xs text-indigo-400"></i> Listings (' + lst.length + ')</p>' +
+          '<div class="space-y-1.5">' + lst.slice(0,5).map(l =>
+            '<div class="flex items-center justify-between p-2.5 bg-charcoal-200 rounded-xl text-xs">' +
+              '<span class="text-white truncate max-w-[200px]">' + l.title + '</span>' +
+              '<span class="' + (l.status==='active'?'text-lime-400':'text-gray-600') + ' font-semibold ml-2">' + l.status + '</span>' +
+            '</div>'
+          ).join('') +
+          '</div></div>' : '') +
+
+        // Recent Payments
+        (pmts.length ? '<div>' +
+          '<p class="text-xs text-gray-400 font-semibold uppercase tracking-wider mb-2 flex items-center gap-1.5"><i class="fas fa-receipt text-xs text-indigo-400"></i> Recent Payments (' + pmts.length + ')</p>' +
+          '<div class="space-y-1.5">' + pmts.slice(0,5).map(p =>
+            '<div class="flex items-center justify-between p-2.5 bg-charcoal-200 rounded-xl text-xs">' +
+              '<span class="text-gray-400">' + formatDate(p.created_at) + '</span>' +
+              '<span class="' + (p.status==='succeeded'?'text-lime-400':p.status==='refunded'?'text-blue-400':'text-yellow-400') + ' font-semibold">$' + (p.amount||0).toFixed(2) + ' · ' + p.status + '</span>' +
+            '</div>'
+          ).join('') +
+          '</div></div>' : '') +
+
+        // Delete action
+        '<div class="pt-2 border-t border-white/5">' +
+          (u.role !== 'ADMIN' ?
+            '<button onclick="openDeleteModal(' + u.id + ', \'' + escapeHtml(u.full_name||'Unknown') + '\', \'' + escapeHtml(u.email) + '\', \'' + u.role + '\')" class="w-full py-3 bg-red-600/20 hover:bg-red-600/30 border border-red-500/30 text-red-400 hover:text-red-300 rounded-xl text-sm font-bold transition-colors flex items-center justify-center gap-2"><i class=\\"fas fa-trash-can\\"></i> Delete This Account</button>'
+            : '<p class="text-center text-gray-600 text-xs py-2">Admin accounts cannot be deleted via this panel.</p>'
+          ) +
+        '</div>'
+
+      document.getElementById('detail-content').innerHTML = html
+    }
+
+    // ── Toast ──────────────────────────────────────────────────────────────
+    function showToast(type, title, msg) {
+      const t   = document.getElementById('uc-toast')
+      const ti  = document.getElementById('uc-toast-inner')
+      const ico = document.getElementById('uc-toast-icon')
+      document.getElementById('uc-toast-title').textContent = title
+      document.getElementById('uc-toast-msg').textContent   = msg
+      if (type === 'success') {
+        ti.className  = 'flex items-start gap-3 p-4 rounded-xl shadow-2xl border bg-charcoal-100 border-lime-500/30'
+        ico.className = 'fas fa-check-circle text-lime-400 text-lg mt-0.5 flex-shrink-0'
+      } else {
+        ti.className  = 'flex items-start gap-3 p-4 rounded-xl shadow-2xl border bg-charcoal-100 border-red-500/30'
+        ico.className = 'fas fa-xmark-circle text-red-400 text-lg mt-0.5 flex-shrink-0'
+      }
+      t.classList.remove('hidden')
+      setTimeout(() => t.classList.add('hidden'), 5000)
+    }
+
+    // ── Helpers ────────────────────────────────────────────────────────────
+    function formatDate(dt) {
+      if (!dt) return '—'
+      try { return new Date(dt).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' }) } catch { return dt }
+    }
+    function escapeHtml(s) {
+      return String(s||'').replace(/'/g,"\\'").replace(/"/g,'&quot;')
+    }
+
+    // ── Init ───────────────────────────────────────────────────────────────
+    document.addEventListener('DOMContentLoaded', () => ucLoad())
+  </script>
+  `
+  return c.html(AdminLayout('User Control', content))
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// GET /admin/audit-log  — Paginated audit log viewer
+// ════════════════════════════════════════════════════════════════════════════
+adminPanel.get('/audit-log', async (c: any) => {
+  const content = `
+  <div class="flex items-center justify-between mb-6">
+    <p class="text-gray-400 text-sm">Immutable record of all admin actions. Every deletion, refund, and override is logged here.</p>
+  </div>
+
+  <!-- Filter bar -->
+  <div class="flex flex-wrap gap-3 mb-5">
+    <select id="al-action" onchange="alLoad()"
+      class="bg-charcoal-100 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-gray-400 focus:outline-none focus:border-indigo-500">
+      <option value="">All Actions</option>
+      <option value="delete_user">Delete User</option>
+      <option value="issue_refund">Issue Refund</option>
+      <option value="suspend_user">Suspend User</option>
+      <option value="cancel_booking">Cancel Booking</option>
+    </select>
+    <button onclick="alLoad()" class="btn-primary px-4 py-2.5 rounded-xl text-sm text-white font-semibold flex items-center gap-2">
+      <i class="fas fa-arrows-rotate text-xs"></i> Refresh
+    </button>
+  </div>
+
+  <!-- Log Table -->
+  <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-charcoal-200/60">
+          <tr>
+            ${['#', 'Timestamp', 'Admin', 'Action', 'Target', 'Role', 'Reason', 'IP'].map(h =>
+              '<th class="px-4 py-3 text-left text-xs text-gray-500 uppercase tracking-wider font-semibold whitespace-nowrap">' + h + '</th>'
+            ).join('')}
+          </tr>
+        </thead>
+        <tbody id="al-table-body">
+          <tr><td colspan="8" class="text-center py-10 text-gray-600 text-sm">
+            <i class="fas fa-spinner fa-spin mr-2"></i> Loading audit log...
+          </td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="flex items-center justify-between px-5 py-3 border-t border-white/5">
+      <p class="text-gray-600 text-xs" id="al-count">Loading...</p>
+      <div class="flex gap-2">
+        <button id="al-prev" onclick="alPage(-1)" class="px-3 py-1.5 bg-charcoal-200 text-gray-500 hover:text-white rounded-lg text-xs transition-colors">← Prev</button>
+        <button id="al-next" onclick="alPage(1)"  class="px-3 py-1.5 bg-charcoal-200 text-gray-500 hover:text-white rounded-lg text-xs transition-colors">Next →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Refund Log Section -->
+  <div class="mt-8">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="font-bold text-white flex items-center gap-2">
+        <i class="fas fa-rotate-left text-indigo-400"></i> Refund Log
+      </h3>
+    </div>
+    <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="bg-charcoal-200/60">
+            <tr>
+              ${['#', 'Date', 'User Email', 'Type', 'Amount', 'Status', 'Stripe Refund ID', 'Note'].map(h =>
+                '<th class="px-4 py-3 text-left text-xs text-gray-500 uppercase tracking-wider font-semibold whitespace-nowrap">' + h + '</th>'
+              ).join('')}
+            </tr>
+          </thead>
+          <tbody id="rl-table-body">
+            <tr><td colspan="8" class="text-center py-6 text-gray-600 text-xs">Loading refund log...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let alOffset = 0
+    const alLimit = 50
+    let alTotal = 0
+
+    async function alLoad() {
+      const action = document.getElementById('al-action').value
+      const params = new URLSearchParams({ limit: alLimit, offset: alOffset })
+      if (action) params.set('action', action)
+      try {
+        const r = await fetch('/api/admin/audit-log?' + params.toString())
+        const d = await r.json()
+        alTotal = d.total
+        renderAuditTable(d.entries || [])
+        document.getElementById('al-count').textContent =
+          'Showing ' + (alOffset + 1) + '–' + Math.min(alOffset + alLimit, alTotal) + ' of ' + alTotal + ' entries'
+        document.getElementById('al-prev').disabled = alOffset === 0
+        document.getElementById('al-next').disabled = alOffset + alLimit >= alTotal
+      } catch(e) {
+        document.getElementById('al-table-body').innerHTML =
+          '<tr><td colspan="8" class="text-center py-8 text-red-400 text-xs">Failed to load: ' + e.message + '</td></tr>'
+      }
+    }
+
+    function alPage(dir) { alOffset = Math.max(0, alOffset + dir * alLimit); alLoad() }
+
+    function renderAuditTable(entries) {
+      const tbody = document.getElementById('al-table-body')
+      if (!entries.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="text-center py-10 text-gray-600 text-sm">No audit entries yet.</td></tr>'
+        return
+      }
+      const actionColors = {
+        delete_user: 'badge-red', issue_refund: 'badge-green', suspend_user: 'badge-amber',
+        cancel_booking: 'badge-amber', deactivate_listing: 'badge-gray', override: 'badge-indigo'
+      }
+      tbody.innerHTML = entries.map(e => {
+        const color = actionColors[e.action] || 'badge-gray'
+        const date = e.created_at ? new Date(e.created_at).toLocaleString('en-US', {month:'short',day:'numeric',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '—'
+        return '<tr class="border-b border-white/5 hover:bg-white/[.02] transition-colors">' +
+          '<td class="px-4 py-3 text-gray-600 text-xs font-mono">' + e.id + '</td>' +
+          '<td class="px-4 py-3 text-gray-400 text-xs whitespace-nowrap">' + date + '</td>' +
+          '<td class="px-4 py-3 text-xs"><p class="text-white font-medium">' + (e.admin_email||'—') + '</p></td>' +
+          '<td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-semibold ' + color + '">' + e.action.replace(/_/g,' ') + '</span></td>' +
+          '<td class="px-4 py-3 text-xs"><p class="text-white">' + (e.target_email||'ID: '+e.target_id) + '</p><p class="text-gray-600">' + e.target_type + ' #' + e.target_id + '</p></td>' +
+          '<td class="px-4 py-3 text-gray-400 text-xs">' + (e.target_role||'—') + '</td>' +
+          '<td class="px-4 py-3 text-gray-400 text-xs max-w-[160px] truncate" title="' + (e.reason||'') + '">' + (e.reason||'—') + '</td>' +
+          '<td class="px-4 py-3 text-gray-600 text-xs font-mono">' + (e.ip_address||'—') + '</td>' +
+        '</tr>'
+      }).join('')
+    }
+
+    async function loadRefundLog() {
+      try {
+        const r = await fetch('/api/admin/refund-log?limit=50')
+        const d = await r.json()
+        const tbody = document.getElementById('rl-table-body')
+        const entries = d.entries || []
+        if (!entries.length) {
+          tbody.innerHTML = '<tr><td colspan="8" class="text-center py-6 text-gray-600 text-xs">No refunds issued yet.</td></tr>'
+          return
+        }
+        const statusColors = { succeeded:'badge-green', failed:'badge-red', manual_required:'badge-amber', pending:'badge-amber', skipped:'badge-gray' }
+        tbody.innerHTML = entries.map(e => {
+          const color = statusColors[e.status] || 'badge-gray'
+          const date = e.refunded_at ? new Date(e.refunded_at).toLocaleString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '—'
+          return '<tr class="border-b border-white/5 hover:bg-white/[.02] transition-colors">' +
+            '<td class="px-4 py-3 text-gray-600 text-xs font-mono">' + e.id + '</td>' +
+            '<td class="px-4 py-3 text-gray-400 text-xs">' + date + '</td>' +
+            '<td class="px-4 py-3 text-white text-xs">' + (e.user_email||'—') + '</td>' +
+            '<td class="px-4 py-3 text-gray-400 text-xs">' + (e.refund_type||'—') + '</td>' +
+            '<td class="px-4 py-3 text-lime-400 text-xs font-semibold">$' + (e.amount||0).toFixed(2) + '</td>' +
+            '<td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-semibold ' + color + '">' + e.status + '</span></td>' +
+            '<td class="px-4 py-3 text-gray-500 text-xs font-mono">' + (e.stripe_refund_id||'—') + '</td>' +
+            '<td class="px-4 py-3 text-gray-500 text-xs max-w-[120px] truncate">' + (e.manual_note||e.failure_reason||'—') + '</td>' +
+          '</tr>'
+        }).join('')
+      } catch {}
+    }
+
+    document.addEventListener('DOMContentLoaded', () => { alLoad(); loadRefundLog() })
+  </script>
+  `
+  return c.html(AdminLayout('Audit Log', content))
+})
