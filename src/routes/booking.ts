@@ -1,9 +1,12 @@
 import { Hono } from 'hono'
 import { Layout } from '../components/layout'
+import { verifyUserToken } from '../middleware/security'
 
-export const bookingPage = new Hono()
+type Bindings = { USER_TOKEN_SECRET: string }
 
-bookingPage.get('/:id', (c) => {
+export const bookingPage = new Hono<{ Bindings: Bindings }>()
+
+bookingPage.get('/:id', async (c) => {
   const id = c.req.param('id')
   const content = `
   <div class="pt-16 min-h-screen">
@@ -498,5 +501,8 @@ bookingPage.get('/:id', (c) => {
     loadListing();
   </script>
   `
-  return c.html(Layout('Checkout', content))
+  const _session = await verifyUserToken(c, c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod').catch(() => null)
+  const navSession = _session ? { name: _session.name || _session.email || '', role: _session.role || '' } : null
+
+  return c.html(Layout('Checkout', content, '', navSession))
 })

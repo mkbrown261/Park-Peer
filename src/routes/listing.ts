@@ -1,13 +1,18 @@
 import { Hono } from 'hono'
 import { Layout } from '../components/layout'
+import { verifyUserToken } from '../middleware/security'
 
-type Bindings = { DB: D1Database }
+type Bindings = { DB: D1Database; USER_TOKEN_SECRET: string }
 
 export const listingPage = new Hono<{ Bindings: Bindings }>()
 
 listingPage.get('/:id', async (c) => {
   const id = c.req.param('id')
   const db = c.env?.DB
+
+  // ── Optional session (navbar shows signed-in user) ────────────────────────
+  const _session = await verifyUserToken(c, c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod').catch(() => null)
+  const navSession = _session ? { name: _session.name || _session.email || '', role: _session.role || '' } : null
 
   // ── Fetch real listing from D1 ─────────────────────────────────────────────
   let l: any = null
@@ -110,7 +115,7 @@ listingPage.get('/:id', async (c) => {
           </a>
         </div>
       </div>
-    `), 404)
+    `, '', navSession), 404)
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
@@ -523,7 +528,7 @@ listingPage.get('/:id', async (c) => {
     if (departEl) departEl.addEventListener('change', updatePrice);
   </script>
   `
-  return c.html(Layout(l.title, content))
+  return c.html(Layout(l.title, content, '', navSession))
 })
 
 function generateMiniCalendar(blocked: number[] = []) {

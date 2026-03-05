@@ -1,9 +1,12 @@
 import { Hono } from 'hono'
 import { Layout } from '../components/layout'
+import { verifyUserToken } from '../middleware/security'
 
-export const searchPage = new Hono()
+type Bindings = { USER_TOKEN_SECRET: string }
 
-searchPage.get('/', (c) => {
+export const searchPage = new Hono<{ Bindings: Bindings }>()
+
+searchPage.get('/', async (c) => {
   const q    = c.req.query('q') || ''
   const city = c.req.query('city') || ''
 
@@ -960,5 +963,8 @@ searchPage.get('/', (c) => {
   </script>
   `
 
-  return c.html(Layout('Find Parking Near You', content))
+  const _session = await verifyUserToken(c, c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod').catch(() => null)
+  const navSession = _session ? { name: _session.name || _session.email || '', role: _session.role || '' } : null
+
+  return c.html(Layout('Find Parking Near You', content, '', navSession))
 })
