@@ -560,16 +560,37 @@ apiRoutes.get('/geocode/autocomplete', requireUserAuth(), async (c) => {
       `&country=${encodeURIComponent(country)}` +
       `&types=address` +
       `&autocomplete=true` +
-      `&fuzzyMatch=true` +
       `&limit=${limit}`
 
-    const res  = await fetch(url)
-    if (!res.ok) {
-      const errText = await res.text()
-      console.error('[GET /api/geocode/autocomplete] Mapbox error:', res.status, errText.substring(0, 200))
-      return c.json({ error: 'Geocoding service error', features: [] }, 502)
+    let res: Response
+    try {
+      res = await fetch(url)
+    } catch (networkErr: any) {
+      console.error('[GET /api/geocode/autocomplete] Network error reaching Mapbox:', networkErr.message)
+      return c.json({ error: 'Cannot reach geocoding service. Please try again.', features: [] }, 502)
     }
-    const data: any = await res.json()
+
+    if (!res.ok) {
+      let errBody = ''
+      try { errBody = await res.text() } catch {}
+      console.error(`[GET /api/geocode/autocomplete] Mapbox HTTP ${res.status}:`, errBody.substring(0, 300))
+
+      if (res.status === 401) {
+        return c.json({ error: 'Geocoding token invalid or expired. Contact support.', features: [] }, 503)
+      }
+      if (res.status === 422) {
+        return c.json({ error: 'Invalid geocoding request parameters.', features: [] }, 400)
+      }
+      return c.json({ error: `Geocoding service returned ${res.status}`, features: [] }, 502)
+    }
+
+    let data: any
+    try {
+      data = await res.json()
+    } catch (parseErr: any) {
+      console.error('[GET /api/geocode/autocomplete] JSON parse error:', parseErr.message)
+      return c.json({ error: 'Invalid response from geocoding service.', features: [] }, 502)
+    }
 
     console.log(`[GET /api/geocode/autocomplete] q="${q}" raw_count=${data.features?.length ?? 0}`)
 
@@ -617,8 +638,8 @@ apiRoutes.get('/geocode/autocomplete', requireUserAuth(), async (c) => {
     console.log(`[GET /api/geocode/autocomplete] q="${q}" returned=${features.length}`)
     return c.json({ features })
   } catch (e: any) {
-    console.error('[GET /api/geocode/autocomplete]', e.message)
-    return c.json({ error: 'Geocoding service unavailable', features: [] }, 502)
+    console.error('[GET /api/geocode/autocomplete] Unexpected error:', e.message)
+    return c.json({ error: 'Geocoding service unavailable: ' + (e.message || 'unknown error'), features: [] }, 502)
   }
 })
 
