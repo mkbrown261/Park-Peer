@@ -215,40 +215,27 @@ searchPage.get('/', async (c) => {
         </button>
       </div>
 
-      <!-- Walk Score Best Parking Suggestion Chip -->
+      <!-- Walk Score Compact Chips (best-walk hint + active route) -->
+      <!-- best-walk-chip: transient toast shown after scores load -->
       <div id="best-walk-chip" class="hidden absolute top-14 left-1/2 -translate-x-1/2 z-20 pointer-events-none">
-        <div class="flex items-center gap-2 bg-lime-500 text-black px-4 py-2 rounded-full shadow-xl text-xs font-bold whitespace-nowrap">
+        <div class="ws-chip ws-chip-best">
           <i class="fas fa-person-walking"></i>
-          <span id="best-walk-chip-text">Best parking is nearby</span>
+          <span id="best-walk-chip-text">Best parking nearby</span>
         </div>
       </div>
 
-      <!-- Walk Route Info Panel -->
-      <div id="walk-route-panel" class="hidden absolute bottom-20 left-4 z-20 w-64">
-        <div class="glass rounded-2xl border border-lime-500/30 overflow-hidden">
-          <div class="px-4 py-3 bg-lime-500/10 border-b border-lime-500/20 flex items-center justify-between">
-            <div class="flex items-center gap-2">
-              <i class="fas fa-person-walking text-lime-400 text-sm"></i>
-              <span class="text-white text-xs font-bold">Walking Route</span>
-            </div>
-            <button onclick="clearWalkRoute()" class="text-gray-500 hover:text-white text-xs transition-colors">
-              <i class="fas fa-times"></i>
-            </button>
-          </div>
-          <div class="px-4 py-3">
-            <div class="flex items-center justify-between mb-2">
-              <div class="text-center">
-                <p class="text-2xl font-black text-white" id="route-panel-time">–</p>
-                <p class="text-gray-500 text-xs">walk time</p>
-              </div>
-              <div class="w-px h-10 bg-white/10"></div>
-              <div class="text-center">
-                <p class="text-xl font-black text-lime-400" id="route-panel-dist">–</p>
-                <p class="text-gray-500 text-xs">distance</p>
-              </div>
-            </div>
-            <div class="text-xs text-gray-500 truncate" id="route-panel-dest"></div>
-          </div>
+      <!-- walk-route-panel: compact chip shown when a pin is selected -->
+      <div id="walk-route-panel" class="hidden absolute bottom-24 left-1/2 -translate-x-1/2 z-20">
+        <div class="ws-chip ws-chip-route">
+          <i class="fas fa-person-walking ws-chip-icon"></i>
+          <span class="ws-chip-time" id="route-panel-time">–</span>
+          <span class="ws-chip-sep">·</span>
+          <span class="ws-chip-dist" id="route-panel-dist">–</span>
+          <span class="ws-chip-sep ws-chip-sep-dest">→</span>
+          <span class="ws-chip-dest" id="route-panel-dest"></span>
+          <button onclick="clearWalkRoute()" class="ws-chip-close" aria-label="Close route">
+            <i class="fas fa-times"></i>
+          </button>
         </div>
       </div>
 
@@ -548,6 +535,70 @@ searchPage.get('/', async (c) => {
     #dest-suggestions button:hover { background: rgba(99,102,241,0.08); }
     /* Walk route dashed line animation */
     @keyframes dashOffset { to { stroke-dashoffset: -20; } }
+
+    /* ── Walk Score Compact Chips ──────────────────────────── */
+    .ws-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 13px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 1;
+      white-space: nowrap;
+      max-width: 280px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.45), 0 1px 4px rgba(0,0,0,0.3);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      transition: opacity 0.2s;
+    }
+    /* Best-walk toast chip */
+    .ws-chip-best {
+      background: rgba(34,197,94,0.92);
+      color: #000;
+      font-weight: 700;
+      pointer-events: none;
+    }
+    /* Active route chip */
+    .ws-chip-route {
+      background: rgba(18,18,18,0.88);
+      border: 1px solid rgba(34,197,94,0.35);
+      color: #fff;
+      pointer-events: auto;
+    }
+    .ws-chip-icon { color: #4ade80; font-size: 11px; }
+    .ws-chip-time { font-weight: 800; font-size: 13px; color: #fff; }
+    .ws-chip-sep  { color: rgba(255,255,255,0.3); font-size: 10px; }
+    .ws-chip-sep-dest { color: rgba(34,197,94,0.7); font-size: 10px; }
+    .ws-chip-dist { color: #4ade80; font-weight: 700; }
+    .ws-chip-dest {
+      color: rgba(255,255,255,0.6);
+      font-size: 11px;
+      font-weight: 400;
+      max-width: 100px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .ws-chip-close {
+      margin-left: 2px;
+      color: rgba(255,255,255,0.35);
+      font-size: 10px;
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 0 2px;
+      line-height: 1;
+      transition: color 0.15s;
+    }
+    .ws-chip-close:hover { color: #fff; }
+    /* Mobile: keep chips centered, reduce max-width */
+    @media (max-width: 767px) {
+      .ws-chip { font-size: 11px; padding: 6px 11px; max-width: 240px; }
+      .ws-chip-time { font-size: 12px; }
+      .ws-chip-dest { max-width: 70px; }
+      #walk-route-panel { bottom: 5rem; }
+    }
   </style>
 
   <script>
@@ -1611,7 +1662,7 @@ searchPage.get('/', async (c) => {
     if (!chip || !WS.closestId || !WS.destCoords) return
     const score = WS.scores.get(WS.closestId)
     if (!score) return
-    txt.textContent = 'Best parking is ' + fmtDur(score.durationS) + ' walk away'
+    txt.textContent = 'Best parking · ' + fmtDur(score.durationS) + ' walk'
     chip.classList.remove('hidden')
     // Hide chip after 5s
     clearTimeout(chip._hideTimer)
@@ -1693,10 +1744,12 @@ searchPage.get('/', async (c) => {
     map.addLayer({ id: 'walk-route-line', type: 'line', source: 'walk-route',
       paint: { 'line-color': '#22c55e', 'line-width': 3.5, 'line-opacity': 0.95,
                'line-dasharray': [2, 1.5] } })
-    // Update route panel
+    // Update compact route chip
     document.getElementById('route-panel-time').textContent = fmtDur(score.durationS)
     document.getElementById('route-panel-dist').textContent = fmtDist(score.distanceM)
-    document.getElementById('route-panel-dest').textContent = '→ ' + (WS.destName || 'Destination')
+    // Destination label: show first segment only (before first comma) to keep chip compact
+    const destLabel = (WS.destName || 'Destination').split(',')[0].trim()
+    document.getElementById('route-panel-dest').textContent = destLabel
     document.getElementById('walk-route-panel').classList.remove('hidden')
   }
 
