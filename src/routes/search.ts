@@ -405,6 +405,9 @@ searchPage.get('/', async (c) => {
     .mapboxgl-ctrl-group button { color: #fff !important; }
     /* ── Critical: prevent Mapbox marker wrapper from stretching ── */
     .mapboxgl-marker { width: fit-content !important; max-width: fit-content !important; }
+    /* ── Route info pill anchor marker must never steal hover events from pins ── */
+    #route-info-pill-anchor,
+    #route-info-pill-anchor * { pointer-events: none !important; }
     .active-map-btn { background: rgba(91,46,255,0.3) !important; border: 1px solid rgba(91,46,255,0.5) !important; }
     .listing-card { cursor: pointer; transition: all 0.2s; }
     .listing-card:hover { border-color: rgba(91,46,255,0.4) !important; transform: translateY(-1px); }
@@ -435,8 +438,8 @@ searchPage.get('/', async (c) => {
       /* FIX 1: transform-origin center so scale doesn't shift position */
       transform-origin: center center;
     }
-    /* FIX 1: scale only — no margin/padding/position changes on hover */
-    .park-pin:hover { transform: scale(1.1); }
+    /* scale only on hover — skip if animation is already running */
+    .park-pin:hover:not(.pin-active-pulse) { transform: scale(1.1); }
     .park-pin.active { background: #C6FF00 !important; color: #121212 !important; transform: scale(1.15); border-color: #C6FF00; box-shadow: 0 0 0 3px rgba(198,255,0,0.3), 0 2px 8px rgba(0,0,0,0.4); }
     .park-pin.pri-green  { background: #16a34a; }
     .park-pin.pri-blue   { background: #2563eb; }
@@ -483,11 +486,10 @@ searchPage.get('/', async (c) => {
       max-width: 80px;
       min-width: 44px;
       box-sizing: border-box;
-      /* FIX 1: walk-pin hover = scale only, color comes from ws-* tier class */
-      transform-origin: center center;
+        transform-origin: center center;
     }
-    /* FIX 1: walk-pin hover only scales — does not change background to lime green */
-    .park-pin.walk-pin:hover { transform: scale(1.1) !important; }
+    /* walk-pin hover only scales — does not change background to lime green */
+    .park-pin.walk-pin:hover:not(.pin-active-pulse) { transform: scale(1.1) !important; }
     .park-pin.walk-pin.active { transform: scale(1.15) !important; box-shadow: 0 0 0 3px rgba(198,255,0,0.3), 0 2px 8px rgba(0,0,0,0.4) !important; }
     .ws-time {
       font-size: 11px;
@@ -520,12 +522,12 @@ searchPage.get('/', async (c) => {
     .park-pin.ws-red    { background: #991b1b; border-color: #ef4444; color: #fff; }
     /* Best walk glow */
     .park-pin.ws-best {
-      box-shadow: 0 0 0 3px rgba(34,197,94,0.5), 0 0 16px rgba(34,197,94,0.4) !important;
+      box-shadow: 0 0 0 3px rgba(34,197,94,0.5), 0 0 16px rgba(34,197,94,0.4), 0 2px 8px rgba(0,0,0,0.4) !important;
       border-color: #22c55e !important;
       transform: scale(1.12);
       z-index: 10;
     }
-    .park-pin.ws-best:hover, .park-pin.ws-best.active {
+    .park-pin.ws-best:hover:not(.pin-active-pulse), .park-pin.ws-best.active {
       transform: scale(1.22) !important;
     }
     /* Walk card badge */
@@ -650,8 +652,8 @@ searchPage.get('/', async (c) => {
     }
     /* ── 4. Route pill entrance ── */
     @keyframes ripIn {
-      from { opacity: 0; transform: translateX(-50%) translateY(8px); }
-      to   { opacity: 1; transform: translateX(-50%) translateY(0);   }
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0);   }
     }
     /* ── 5. Route chip flash on select ── */
     @keyframes chipSelectFlash {
@@ -660,12 +662,11 @@ searchPage.get('/', async (c) => {
       100% { box-shadow: 0 6px 20px rgba(0,0,0,0.5), 0 0 0 0   rgba(34,197,94,0);   }
     }
 
-    /* Park pin pulse */
+    /* Park pin pulse — animate ::before ring only; pin body stays stable */
     .park-pin.pin-active-pulse {
-      animation: pinBeat 1.5s ease-in-out infinite;
-      will-change: transform;
       position: relative;
       z-index: 5;
+      /* No transform animation on the pin body — hover:scale still works cleanly */
     }
     .park-pin.pin-active-pulse::before {
       content: '';
@@ -678,8 +679,11 @@ searchPage.get('/', async (c) => {
       pointer-events: none;
     }
 
-    /* FIX 2: Route pill entrance animation */
-    #route-info-pill:not(.hidden) {
+    /* Route pill: the container uses Tailwind -translate-x-1/2 for centering.
+       NEVER animate the container element directly — the keyframe transform would
+       override Tailwind's translateX(-50%) and snap the pill to the left edge.
+       Animate only the .rip-inner child. */
+    #route-info-pill:not(.hidden) .rip-inner:not(.rip-flash) {
       animation: ripIn 0.22s ease-out both;
     }
 
@@ -691,9 +695,8 @@ searchPage.get('/', async (c) => {
 
     /* Reduced motion */
     @media (prefers-reduced-motion: reduce) {
-      .park-pin.pin-active-pulse,
       .park-pin.pin-active-pulse::before { animation: none !important; }
-      #route-info-pill:not(.hidden)      { animation: none !important; }
+      #route-info-pill:not(.hidden) .rip-inner { animation: none !important; }
       .rip-inner.rip-flash               { animation: none !important; }
     }
   </style>
@@ -850,20 +853,34 @@ searchPage.get('/', async (c) => {
       '</div>'
 
     // Anchor 48px above the pin (offset keeps it from overlapping the marker head)
+    // CRITICAL: The Mapbox wrapper div must also have pointer-events:none so it
+    // cannot intercept hover events on pins beneath it (which would cause jitter).
     RA.labelMarker = new mapboxgl.Marker({ element: ripEl, anchor: 'bottom', offset: [0, -52] })
       .setLngLat([lng, lat])
       .addTo(map)
+    // Force pointer-events:none on the Mapbox-generated wrapper div as well
+    if (RA.labelMarker.getElement && RA.labelMarker.getElement().parentElement) {
+      RA.labelMarker.getElement().parentElement.style.pointerEvents = 'none'
+    }
 
     // Also update the bottom-center CSS pill (kept for mobile where map is small)
     _updateBottomPill(score, listing)
-    document.getElementById('route-info-pill').classList.remove('hidden')
-    // Re-trigger entrance animation
-    const inner = document.querySelector('#route-info-pill .rip-inner')
-    if (inner) {
-      inner.classList.remove('rip-flash')
-      void inner.offsetWidth
-      inner.classList.add('rip-flash')
-      setTimeout(() => inner.classList.remove('rip-flash'), 600)
+    const pill = document.getElementById('route-info-pill')
+    const inner = pill ? pill.querySelector('.rip-inner') : null
+
+    if (pill) {
+      pill.classList.remove('hidden')
+      // Entrance animation: briefly remove rip-inner from DOM flow to replay ripIn
+      if (inner) {
+        inner.classList.remove('rip-flash')
+        void inner.offsetWidth  // force reflow so animation replays
+        // rip-flash is only for re-tap; first show just relies on ripIn from CSS selector
+        // For re-tap (route already visible), play the flash
+        if (RA.activeListingId && RA.activeListingId === listingId) {
+          inner.classList.add('rip-flash')
+          setTimeout(() => inner.classList.remove('rip-flash'), 600)
+        }
+      }
     }
   }
 
