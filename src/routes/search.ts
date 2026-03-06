@@ -225,26 +225,20 @@ searchPage.get('/', async (c) => {
       </div>
 
       <!-- walk-route-panel: compact chip shown when a pin is selected -->
-      <div id="walk-route-panel" class="hidden absolute bottom-24 left-1/2 -translate-x-1/2 z-20">
-        <div class="ws-chip ws-chip-route">
-          <i class="fas fa-person-walking ws-chip-icon"></i>
-          <span class="ws-chip-time" id="route-panel-time">–</span>
-          <span class="ws-chip-sep">·</span>
-          <span class="ws-chip-dist" id="route-panel-dist">–</span>
-          <span class="ws-chip-sep ws-chip-sep-dest">→</span>
-          <span class="ws-chip-dest" id="route-panel-dest"></span>
-          <button onclick="clearWalkRoute()" class="ws-chip-close" aria-label="Close route">
+      <!-- FIX 2: UNIFIED route info pill — replaces walk-route-panel + route-info-label -->
+      <!-- Only ONE pill exists. It is a CSS-positioned overlay (bottom-center).        -->
+      <!-- A separate Mapbox-anchored marker (#route-pin-label) handles map position.   -->
+      <div id="route-info-pill" class="hidden absolute bottom-24 left-1/2 -translate-x-1/2 z-20 pointer-events-auto">
+        <div class="rip-inner">
+          <i class="fas fa-person-walking rip-icon"></i>
+          <span id="rip-time">–</span>
+          <span class="rip-sep">·</span>
+          <span id="rip-dist">–</span>
+          <span class="rip-sep">·</span>
+          <span id="rip-price" class="rip-price"></span>
+          <button id="rip-close" onclick="clearWalkRoute()" class="rip-close" aria-label="Close route">
             <i class="fas fa-times"></i>
           </button>
-        </div>
-      </div>
-
-      <!-- Route info label: floating near active pin, shows time + dist + price -->
-      <div id="route-info-label" class="hidden">
-        <div class="route-label-card">
-          <span class="route-label-time" id="ril-time">–</span>
-          <span class="route-label-dist" id="ril-dist">–</span>
-          <span class="route-label-price" id="ril-price"></span>
         </div>
       </div>
 
@@ -426,15 +420,24 @@ searchPage.get('/', async (c) => {
       box-shadow: 0 2px 8px rgba(0,0,0,0.4);
       cursor: pointer;
       white-space: nowrap;
-      transition: all 0.15s;
+      /* FIX 1: Only transition GPU-composited properties — no 'all' which causes layout thrash */
+      transition: transform 0.15s ease, background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
       font-family: 'Inter', sans-serif;
       /* Prevent marker from stretching to map width */
       display: inline-flex;
+      align-items: center;
+      justify-content: center;
       width: fit-content;
       max-width: 120px;
       box-sizing: border-box;
+      /* FIX 1: Use will-change so browser pre-composites the layer */
+      will-change: transform;
+      /* FIX 1: transform-origin center so scale doesn't shift position */
+      transform-origin: center center;
     }
-    .park-pin:hover, .park-pin.active { background: #C6FF00 !important; color: #121212 !important; transform: scale(1.15); border-color: #C6FF00; }
+    /* FIX 1: scale only — no margin/padding/position changes on hover */
+    .park-pin:hover { transform: scale(1.1); }
+    .park-pin.active { background: #C6FF00 !important; color: #121212 !important; transform: scale(1.15); border-color: #C6FF00; box-shadow: 0 0 0 3px rgba(198,255,0,0.3), 0 2px 8px rgba(0,0,0,0.4); }
     .park-pin.pri-green  { background: #16a34a; }
     .park-pin.pri-blue   { background: #2563eb; }
     .park-pin.pri-yellow { background: #ca8a04; }
@@ -473,13 +476,19 @@ searchPage.get('/', async (c) => {
       display: inline-flex;
       flex-direction: column;
       align-items: center;
+      justify-content: center;
       padding: 4px 9px 3px;
       gap: 0;
       width: fit-content;
       max-width: 80px;
       min-width: 44px;
       box-sizing: border-box;
+      /* FIX 1: walk-pin hover = scale only, color comes from ws-* tier class */
+      transform-origin: center center;
     }
+    /* FIX 1: walk-pin hover only scales — does not change background to lime green */
+    .park-pin.walk-pin:hover { transform: scale(1.1) !important; }
+    .park-pin.walk-pin.active { transform: scale(1.15) !important; box-shadow: 0 0 0 3px rgba(198,255,0,0.3), 0 2px 8px rgba(0,0,0,0.4) !important; }
     .ws-time {
       font-size: 11px;
       font-weight: 900;
@@ -555,52 +564,56 @@ searchPage.get('/', async (c) => {
     /* Walk route dashed line animation */
     @keyframes dashOffset { to { stroke-dashoffset: -20; } }
 
-    /* ── Walk Score Compact Chips ──────────────────────────── */
-    .ws-chip {
+    /* ── Best-walk toast chip (auto-dismiss, not interactive) ── */
+    .ws-chip-best {
       display: inline-flex;
       align-items: center;
       gap: 6px;
       padding: 7px 13px;
       border-radius: 999px;
       font-size: 12px;
+      font-weight: 700;
+      line-height: 1;
+      white-space: nowrap;
+      background: rgba(34,197,94,0.92);
+      color: #000;
+      pointer-events: none;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.45);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+    }
+
+    /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+       FIX 2: UNIFIED ROUTE INFO PILL  — single component
+       Replaces old walk-route-panel + route-info-label
+       ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+    #route-info-pill { pointer-events: auto; }
+    #route-info-pill.hidden { display: none !important; }
+    .rip-inner {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 8px 14px;
+      border-radius: 999px;
+      background: rgba(12,12,12,0.90);
+      border: 1px solid rgba(34,197,94,0.4);
+      color: #fff;
+      font-size: 12px;
       font-weight: 600;
       line-height: 1;
       white-space: nowrap;
-      max-width: 280px;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.45), 0 1px 4px rgba(0,0,0,0.3);
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-      transition: opacity 0.2s;
+      max-width: 320px;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.5), 0 0 0 1px rgba(34,197,94,0.12);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
     }
-    /* Best-walk toast chip */
-    .ws-chip-best {
-      background: rgba(34,197,94,0.92);
-      color: #000;
-      font-weight: 700;
-      pointer-events: none;
-    }
-    /* Active route chip */
-    .ws-chip-route {
-      background: rgba(18,18,18,0.88);
-      border: 1px solid rgba(34,197,94,0.35);
-      color: #fff;
-      pointer-events: auto;
-    }
-    .ws-chip-icon { color: #4ade80; font-size: 11px; }
-    .ws-chip-time { font-weight: 800; font-size: 13px; color: #fff; }
-    .ws-chip-sep  { color: rgba(255,255,255,0.3); font-size: 10px; }
-    .ws-chip-sep-dest { color: rgba(34,197,94,0.7); font-size: 10px; }
-    .ws-chip-dist { color: #4ade80; font-weight: 700; }
-    .ws-chip-dest {
-      color: rgba(255,255,255,0.6);
-      font-size: 11px;
-      font-weight: 400;
-      max-width: 100px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .ws-chip-close {
-      margin-left: 2px;
+    .rip-icon { color: #4ade80; font-size: 11px; flex-shrink: 0; }
+    #rip-time { font-weight: 800; font-size: 13px; color: #fff; }
+    .rip-sep  { color: rgba(255,255,255,0.25); font-size: 10px; }
+    #rip-dist { color: #4ade80; font-weight: 700; font-size: 12px; }
+    .rip-price { color: #c4b5fd; font-weight: 700; font-size: 11px; }
+    .rip-close {
+      margin-left: 4px;
       color: rgba(255,255,255,0.35);
       font-size: 10px;
       background: none;
@@ -609,52 +622,45 @@ searchPage.get('/', async (c) => {
       padding: 0 2px;
       line-height: 1;
       transition: color 0.15s;
+      flex-shrink: 0;
     }
-    .ws-chip-close:hover { color: #fff; }
-    /* Mobile: keep chips centered, reduce max-width */
+    .rip-close:hover { color: #fff; }
     @media (max-width: 767px) {
-      .ws-chip { font-size: 11px; padding: 6px 11px; max-width: 240px; }
-      .ws-chip-time { font-size: 12px; }
-      .ws-chip-dest { max-width: 70px; }
-      #walk-route-panel { bottom: 5rem; }
-      #route-info-label { bottom: 5.5rem; }
+      #route-info-pill { bottom: 5rem !important; }
+      .rip-inner { font-size: 11px; padding: 7px 12px; max-width: 88vw; }
+      #rip-time { font-size: 12px; }
     }
 
     /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
        ROUTE ANIMATION SYSTEM
        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
-    /* ── 1. Route line glow pulse (CSS-driven opacity cycle) ── */
-    @keyframes routeGlowPulse {
-      0%   { opacity: 0.18; }
-      50%  { opacity: 0.38; }
-      100% { opacity: 0.18; }
-    }
-    /* ── 2. Pin pulse ring (radiates outward from active pin) ── */
+    /* ── 1. Route line glow pulse ── */
+    /* ── 2. Pin pulse ring ── */
     @keyframes pinPulseRing {
       0%   { transform: scale(1);   opacity: 0.7; }
       70%  { transform: scale(2.4); opacity: 0;   }
       100% { transform: scale(2.4); opacity: 0;   }
     }
-    /* ── 3. Pin body beat (subtle scale) ── */
+    /* ── 3. Pin body beat ── */
     @keyframes pinBeat {
       0%,100% { transform: scale(1);    }
       40%     { transform: scale(1.18); }
       70%     { transform: scale(0.97); }
     }
-    /* ── 4. Route info label entrance ── */
-    @keyframes routeLabelIn {
-      from { opacity: 0; transform: translateX(-50%) translateY(10px); }
-      to   { opacity: 1; transform: translateX(-50%) translateY(0);    }
+    /* ── 4. Route pill entrance ── */
+    @keyframes ripIn {
+      from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+      to   { opacity: 1; transform: translateX(-50%) translateY(0);   }
     }
-    /* ── 5. Route chip active state highlight ── */
+    /* ── 5. Route chip flash on select ── */
     @keyframes chipSelectFlash {
-      0%   { box-shadow: 0 0 0 0 rgba(34,197,94,0.6); }
-      50%  { box-shadow: 0 0 0 6px rgba(34,197,94,0); }
-      100% { box-shadow: 0 0 0 0 rgba(34,197,94,0);   }
+      0%   { box-shadow: 0 6px 20px rgba(0,0,0,0.5), 0 0 0 0   rgba(34,197,94,0.7); }
+      50%  { box-shadow: 0 6px 20px rgba(0,0,0,0.5), 0 0 0 8px rgba(34,197,94,0);   }
+      100% { box-shadow: 0 6px 20px rgba(0,0,0,0.5), 0 0 0 0   rgba(34,197,94,0);   }
     }
 
-    /* Park pin pulse wrapper – the ring lives as a ::before */
+    /* Park pin pulse */
     .park-pin.pin-active-pulse {
       animation: pinBeat 1.5s ease-in-out infinite;
       will-change: transform;
@@ -672,66 +678,23 @@ searchPage.get('/', async (c) => {
       pointer-events: none;
     }
 
-    /* Route info label – floating near parking pin */
-    #route-info-label {
-      position: absolute;
-      bottom: 6.5rem;
-      left: 50%;
-      transform: translateX(-50%) translateY(0);
-      z-index: 25;
-      pointer-events: none;
-      animation: routeLabelIn 0.22s ease-out both;
-    }
-    #route-info-label.hidden { display: none; }
-    .route-label-card {
-      display: inline-flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 1px;
-      padding: 7px 13px;
-      border-radius: 14px;
-      background: rgba(10,10,10,0.82);
-      border: 1px solid rgba(34,197,94,0.28);
-      color: #fff;
-      font-size: 12px;
-      font-weight: 500;
-      line-height: 1.35;
-      white-space: nowrap;
-      box-shadow: 0 6px 24px rgba(0,0,0,0.5), 0 0 0 1px rgba(34,197,94,0.1);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-    }
-    .route-label-time {
-      font-size: 14px;
-      font-weight: 800;
-      color: #4ade80;
-      letter-spacing: -0.01em;
-    }
-    .route-label-dist {
-      color: #9ca3af;
-      font-size: 11px;
-    }
-    .route-label-price {
-      color: #c4b5fd;
-      font-size: 11px;
-      font-weight: 700;
+    /* FIX 2: Route pill entrance animation */
+    #route-info-pill:not(.hidden) {
+      animation: ripIn 0.22s ease-out both;
     }
 
-    /* Active ws-chip flash on selection */
-    .ws-chip-route.chip-selected {
+    /* Active pill flash on re-select */
+    .rip-inner.rip-flash {
       animation: chipSelectFlash 0.5s ease-out both;
       border-color: rgba(34,197,94,0.7) !important;
     }
 
-    /* Reduced motion: kill all decorative animations */
+    /* Reduced motion */
     @media (prefers-reduced-motion: reduce) {
       .park-pin.pin-active-pulse,
-      .park-pin.pin-active-pulse::before {
-        animation: none !important;
-      }
-      @keyframes routeGlowPulse { 0%,100% { opacity: 0.25; } }
-      .ws-chip-route.chip-selected { animation: none !important; }
-      #route-info-label { animation: none !important; }
+      .park-pin.pin-active-pulse::before { animation: none !important; }
+      #route-info-pill:not(.hidden)      { animation: none !important; }
+      .rip-inner.rip-flash               { animation: none !important; }
     }
   </style>
 
@@ -784,6 +747,7 @@ searchPage.get('/', async (c) => {
   const RA = {
     activeListingId : null,   // currently highlighted listing id
     glowTimer       : null,   // setInterval for Mapbox glow pulse
+    labelMarker     : null,   // mapboxgl.Marker anchoring the route info pill to a spot
     reducedMotion   : window.matchMedia('(prefers-reduced-motion: reduce)').matches
   }
 
@@ -793,11 +757,9 @@ searchPage.get('/', async (c) => {
   const RA_GLOW_COLOR     = '#22c55e'
 
   // ── 1. ROUTE GLOW ─────────────────────────────────────────
-  // Activates animated glow + thickness on Mapbox layers
   function raActivateGlow() {
     if (!map) return
     try {
-      // Transition paint properties for a smooth entrance (200ms)
       if (map.getLayer('walk-route-line')) {
         map.setPaintProperty('walk-route-line', 'line-width',   6)
         map.setPaintProperty('walk-route-line', 'line-opacity', 1)
@@ -808,16 +770,13 @@ searchPage.get('/', async (c) => {
         map.setPaintProperty('walk-route-glow', 'line-opacity', 0.28)
         map.setPaintProperty('walk-route-glow', 'line-blur',    10)
       }
-
-      // CSS-driven glow pulse (every ~2 s) unless reduced motion
       clearInterval(RA.glowTimer)
       if (!RA.reducedMotion) {
         let tick = 0
         RA.glowTimer = setInterval(() => {
           if (!map || !map.getLayer('walk-route-glow')) { clearInterval(RA.glowTimer); return }
           tick++
-          const opacity = (tick % 2 === 0) ? 0.28 : 0.14
-          map.setPaintProperty('walk-route-glow', 'line-opacity', opacity)
+          map.setPaintProperty('walk-route-glow', 'line-opacity', (tick % 2 === 0) ? 0.28 : 0.14)
         }, 1000)
       }
     } catch(e) {}
@@ -844,8 +803,7 @@ searchPage.get('/', async (c) => {
   function raStartPinPulse(listingId) {
     if (RA.reducedMotion) return
     const m = activeMarkers.find(m => m.id == listingId)
-    if (!m) return
-    m.el.classList.add('pin-active-pulse')
+    if (m) m.el.classList.add('pin-active-pulse')
   }
 
   function raStopPinPulse(listingId) {
@@ -857,59 +815,100 @@ searchPage.get('/', async (c) => {
     activeMarkers.forEach(m => m.el.classList.remove('pin-active-pulse'))
   }
 
-  // ── 3. ROUTE INFO LABEL ───────────────────────────────────
-  // Shows a floating pill near the bottom with time, distance, price
-  function raShowRouteLabel(score, listing) {
-    const el = document.getElementById('route-info-label')
-    if (!el) return
-    document.getElementById('ril-time').textContent  = fmtDur(score.durationS)
-    document.getElementById('ril-dist').textContent  = fmtDist(score.distanceM)
+  // ── 3. UNIFIED ROUTE INFO PILL ────────────────────────────
+  // FIX 2 + FIX 4: Single pill, anchored via Mapbox Marker to the parking spot LngLat.
+  // The pill element itself is the Mapbox marker's custom element — it follows the map.
+  function raShowRoutePill(score, listing) {
+    // Remove any previous anchored label marker
+    raHideRoutePill()
+
+    if (!map || typeof mapboxgl === 'undefined' || !listing) return
+
+    const lng = listing.lng
+    const lat = listing.lat
+    if (!lng || !lat) return
+
+    // Debug: verify coordinates are stable (never change during interaction)
+    console.debug('[route-label] anchoring pill to listing id=' + listing.id +
+      ' lng=' + lng.toFixed(5) + ' lat=' + lat.toFixed(5))
+
+    // Build the pill as a Mapbox Marker element so it tracks the map viewport
+    const ripEl = document.createElement('div')
+    ripEl.id = 'route-info-pill-anchor'
+    ripEl.style.cssText = 'pointer-events:none;width:fit-content;transform:translateX(-50%);'
+
     const price = listing ? ('$' + (listing.price_hourly || 0).toFixed(0) + '/hr') : ''
-    document.getElementById('ril-price').textContent = price
-    // Re-trigger animation by removing + re-adding class
-    el.classList.remove('hidden')
-    // Force reflow to restart CSS animation
-    void el.offsetWidth
-    el.style.animation = 'none'
-    void el.offsetWidth
-    el.style.animation = ''
+    const priceHtml = price ? '<span class="rip-sep">·</span><span class="rip-price">' + price + '</span>' : ''
+
+    ripEl.innerHTML =
+      '<div class="rip-inner" style="pointer-events:none;">' +
+        '<i class="fas fa-person-walking rip-icon"></i>' +
+        '<span id="rip-time-anchor">' + fmtDur(score.durationS) + '</span>' +
+        '<span class="rip-sep">·</span>' +
+        '<span id="rip-dist-anchor">' + fmtDist(score.distanceM) + '</span>' +
+        priceHtml +
+      '</div>'
+
+    // Anchor 48px above the pin (offset keeps it from overlapping the marker head)
+    RA.labelMarker = new mapboxgl.Marker({ element: ripEl, anchor: 'bottom', offset: [0, -52] })
+      .setLngLat([lng, lat])
+      .addTo(map)
+
+    // Also update the bottom-center CSS pill (kept for mobile where map is small)
+    _updateBottomPill(score, listing)
+    document.getElementById('route-info-pill').classList.remove('hidden')
+    // Re-trigger entrance animation
+    const inner = document.querySelector('#route-info-pill .rip-inner')
+    if (inner) {
+      inner.classList.remove('rip-flash')
+      void inner.offsetWidth
+      inner.classList.add('rip-flash')
+      setTimeout(() => inner.classList.remove('rip-flash'), 600)
+    }
   }
 
-  function raHideRouteLabel() {
-    const el = document.getElementById('route-info-label')
-    if (el) el.classList.add('hidden')
+  function _updateBottomPill(score, listing) {
+    const pill = document.getElementById('route-info-pill')
+    if (!pill) return
+    const timeEl  = document.getElementById('rip-time')
+    const distEl  = document.getElementById('rip-dist')
+    const priceEl = document.getElementById('rip-price')
+    if (timeEl)  timeEl.textContent  = fmtDur(score.durationS)
+    if (distEl)  distEl.textContent  = fmtDist(score.distanceM)
+    if (priceEl) priceEl.textContent = listing ? ('$' + (listing.price_hourly || 0).toFixed(0) + '/hr') : ''
   }
 
-  // ── 4. CHIP FLASH ─────────────────────────────────────────
-  function raFlashChip() {
-    const chip = document.querySelector('.ws-chip-route')
-    if (!chip) return
-    chip.classList.remove('chip-selected')
-    void chip.offsetWidth  // reflow
-    chip.classList.add('chip-selected')
-    setTimeout(() => chip.classList.remove('chip-selected'), 600)
+  function raHideRoutePill() {
+    if (RA.labelMarker) { RA.labelMarker.remove(); RA.labelMarker = null }
+    const pill = document.getElementById('route-info-pill')
+    if (pill) pill.classList.add('hidden')
   }
 
-  // ── 5. ORCHESTRATOR: activate/deactivate ──────────────────
-  // Call this whenever a route becomes the "selected" route.
+  // ── 4. ORCHESTRATOR ───────────────────────────────────────
   function raActivateRoute(listingId, score, listing) {
-    // Deactivate previous if different
     if (RA.activeListingId && RA.activeListingId !== listingId) {
       raStopPinPulse(RA.activeListingId)
     }
     RA.activeListingId = listingId
 
-    // GPU-accelerated animations (will-change set via CSS)
+    // Debug: log route destination for stability verification
+    if (WS.destCoords) {
+      console.debug('[route] activated listing=' + listingId +
+        ' destLng=' + WS.destCoords.lng.toFixed(5) +
+        ' destLat=' + WS.destCoords.lat.toFixed(5) +
+        ' dur=' + Math.round(score.durationS) + 's' +
+        ' dist=' + Math.round(score.distanceM) + 'm')
+    }
+
     raActivateGlow()
     raStartPinPulse(listingId)
-    raShowRouteLabel(score, listing)
-    raFlashChip()
+    raShowRoutePill(score, listing)
   }
 
   function raDeactivateRoute() {
     raDeactivateGlow()
     raStopAllPinPulses()
-    raHideRouteLabel()
+    raHideRoutePill()
     RA.activeListingId = null
   }
 
@@ -1010,12 +1009,12 @@ searchPage.get('/', async (c) => {
     const qVal = urlQ.get('q') || urlQ.get('city') || ''
     if (qVal) document.getElementById('search-input').value = qVal
 
-    // ── Route chip tap: re-trigger animations if chip is tapped while route showing ──
-    const routeChipEl = document.getElementById('walk-route-panel')
-    if (routeChipEl) {
-      routeChipEl.addEventListener('click', (e) => {
+    // ── Route pill tap: re-trigger animations if tapped while route showing ──
+    const routePillEl = document.getElementById('route-info-pill')
+    if (routePillEl) {
+      routePillEl.addEventListener('click', (e) => {
         // Don't re-trigger if the close button was clicked
-        if (e.target.closest('.ws-chip-close')) return
+        if (e.target.closest('#rip-close')) return
         if (WS.activeRoute) {
           const listing = allListings.find(l => l.id == WS.activeRoute.listingId)
           raActivateRoute(WS.activeRoute.listingId, WS.activeRoute, listing)
@@ -1357,36 +1356,42 @@ searchPage.get('/', async (c) => {
       if (!l.lat || !l.lng) return
 
       const el = document.createElement('div')
-      // Store meta on element for walk badge updates
+      // Store meta on element for walk badge updates (never overwritten)
       el._priceHr  = l.price_hourly || 0
       el._priScore = l.pri_score
-      // Force width so Mapbox marker wrapper never stretches to full map width
-      el.style.cssText = 'width:fit-content;max-width:90px;display:inline-flex;box-sizing:border-box;'
+      el._lng      = l.lng   // FIX 3 debug: freeze coords on element
+      el._lat      = l.lat
 
+      // Base inline style — set ONCE here, updateWalkBadge only touches className + textContent
       const score   = WS.scores.get(l.id)
       const isBest  = (l.id == WS.closestId)
 
       if (score && WS.destCoords) {
+        // Walk-pin mode: column layout with time + price spans (built once, updated via textContent)
         const cls = wsColor(score.durationS)
         el.className = 'park-pin walk-pin ' + priPinClass(l.pri_score) + ' ' + cls + (isBest ? ' ws-best' : '')
-        el.style.cssText = 'width:fit-content;max-width:90px;display:inline-flex;flex-direction:column;align-items:center;box-sizing:border-box;'
-        el.innerHTML =
-          '<span class="ws-time">' + fmtDur(score.durationS) + '</span>' +
-          '<span class="ws-price">$' + (l.price_hourly || 0).toFixed(0) + '</span>' +
-          (isBest ? '<span class="ws-best-badge">BEST</span>' : '')
+        el.style.cssText = 'width:fit-content;max-width:90px;display:inline-flex;flex-direction:column;align-items:center;box-sizing:border-box;will-change:transform;transform-origin:center center;'
+        // Build spans once — updateWalkBadge will only do textContent from here on
+        const ts = document.createElement('span'); ts.className = 'ws-time'; ts.textContent = fmtDur(score.durationS)
+        const ps = document.createElement('span'); ps.className = 'ws-price'; ps.textContent = '$' + (l.price_hourly || 0).toFixed(0)
+        const bs = document.createElement('span'); bs.className = 'ws-best-badge'; bs.textContent = 'BEST'; bs.style.display = isBest ? '' : 'none'
+        el.appendChild(ts); el.appendChild(ps); el.appendChild(bs)
       } else {
+        // Plain price-pin mode
         el.className = 'park-pin ' + priPinClass(l.pri_score)
-        el.dataset.id = l.id
+        el.style.cssText = 'width:fit-content;max-width:90px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;will-change:transform;transform-origin:center center;'
         el.textContent = '$' + (l.price_hourly || 0).toFixed(0)
       }
       el.dataset.id = l.id
 
       try {
+        // FIX 3: Marker is created with frozen LngLat — never re-created on interaction
         const marker = new mapboxgl.Marker({ element: el, anchor: 'bottom' })
           .setLngLat([l.lng, l.lat])
           .addTo(map)
+        console.debug('[pin] created id=' + l.id + ' lng=' + l.lng.toFixed(5) + ' lat=' + l.lat.toFixed(5))
         el.addEventListener('click', (e) => { e.stopPropagation(); showPinPopup(l, marker) })
-        activeMarkers.push({ marker, id: l.id, el })
+        activeMarkers.push({ marker, id: l.id, el, lng: l.lng, lat: l.lat })
       } catch(e) {
         console.error('[map] failed to add pin for listing', l.id, e)
       }
@@ -1766,8 +1771,9 @@ searchPage.get('/', async (c) => {
     }
     clearDestMarker()
     clearWalkRoute()
-    // Re-render markers without walk badges
-    _renderPinsNow(allListings)
+    // FIX 5: Do NOT call _renderPinsNow directly here — applySortAndRender
+    // calls renderMapPins → clearMarkers + _renderPinsNow in the right order.
+    // Double-calling _renderPinsNow was causing stacked markers and displacement.
     applySortAndRender()
   }
 
@@ -1933,15 +1939,32 @@ searchPage.get('/', async (c) => {
     const cls = wsColor(dur)
     const label = fmtDur(dur)
     const isBest = (listingId == WS.closestId)
-    // Rebuild pin element
-    m.el.className = 'park-pin walk-pin ' + priPinClass(m.el._priScore) + ' ' + cls + (isBest ? ' ws-best' : '')
-    m.el.style.cssText = 'width:fit-content;max-width:90px;display:inline-flex;flex-direction:column;align-items:center;box-sizing:border-box;'
-    m.el.innerHTML =
-      '<span class="ws-time">' + label + '</span>' +
-      '<span class="ws-price">$' + (m.el._priceHr || 0).toFixed(0) + '</span>'
-    if (isBest) {
-      m.el.innerHTML += '<span class="ws-best-badge">BEST</span>'
+
+    // FIX 3 & 5: Update className only — do NOT rebuild innerHTML.
+    // Rebuilding innerHTML detaches Mapbox's internal anchor reference and
+    // causes markers to drift or disappear entirely.
+    const el = m.el
+    const wasWalkPin = el.classList.contains('walk-pin')
+
+    if (!wasWalkPin) {
+      // First time converting from a plain price-pin to a walk-pin:
+      // Build the inner spans once, then never touch innerHTML again.
+      el.innerHTML =
+        '<span class="ws-time"></span>' +
+        '<span class="ws-price"></span>' +
+        '<span class="ws-best-badge" style="display:none">BEST</span>'
     }
+
+    // Now only touch className + textContent — ZERO layout recalc on marker position
+    el.className = 'park-pin walk-pin ' + priPinClass(el._priScore) + ' ' + cls + (isBest ? ' ws-best' : '')
+    el.style.cssText = 'width:fit-content;max-width:90px;display:inline-flex;flex-direction:column;align-items:center;box-sizing:border-box;will-change:transform;transform-origin:center center;'
+
+    const timeSpan = el.querySelector('.ws-time')
+    const priceSpan = el.querySelector('.ws-price')
+    const bestSpan = el.querySelector('.ws-best-badge')
+    if (timeSpan)  timeSpan.textContent  = label
+    if (priceSpan) priceSpan.textContent = '$' + (el._priceHr || 0).toFixed(0)
+    if (bestSpan)  bestSpan.style.display = isBest ? '' : 'none'
   }
 
   function updateBestWalkChip() {
@@ -2032,13 +2055,11 @@ searchPage.get('/', async (c) => {
     map.addLayer({ id: 'walk-route-line', type: 'line', source: 'walk-route',
       paint: { 'line-color': RA_INACTIVE_COLOR, 'line-width': 3.5, 'line-opacity': 0.4,
                'line-dasharray': [2, 1.5] } })
-    // Update compact route chip
-    document.getElementById('route-panel-time').textContent = fmtDur(score.durationS)
-    document.getElementById('route-panel-dist').textContent = fmtDist(score.distanceM)
-    // Destination label: show first segment only (before first comma) to keep chip compact
-    const destLabel = (WS.destName || 'Destination').split(',')[0].trim()
-    document.getElementById('route-panel-dest').textContent = destLabel
-    document.getElementById('walk-route-panel').classList.remove('hidden')
+
+    // FIX 2: Update the ONE unified bottom pill (no old walk-route-panel IDs)
+    // raShowRoutePill (called below) also places a map-anchored label above the pin.
+    _updateBottomPill(score, allListings.find(l => l.id == listingId))
+    document.getElementById('route-info-pill').classList.remove('hidden')
 
     // ── Trigger Route Animation Engine ──────────────────────
     const listing = allListings.find(l => l.id == listingId)
@@ -2048,14 +2069,15 @@ searchPage.get('/', async (c) => {
 
   function clearWalkRoute() {
     if (!map) return
-    // Stop all animations first
+    // Stop all animations + remove map-anchored label marker
     raDeactivateRoute()
     try {
       if (map.getLayer('walk-route-glow')) map.removeLayer('walk-route-glow')
       if (map.getLayer('walk-route-line')) map.removeLayer('walk-route-line')
       if (map.getSource('walk-route'))     map.removeSource('walk-route')
     } catch(e) {}
-    document.getElementById('walk-route-panel').classList.add('hidden')
+    // FIX 2: hide unified pill (raDeactivateRoute already calls raHideRoutePill)
+    document.getElementById('route-info-pill').classList.add('hidden')
     WS.activeRoute = null
   }
 
