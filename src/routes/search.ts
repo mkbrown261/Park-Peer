@@ -1986,11 +1986,17 @@ searchPage.get('/', async (c) => {
     if (!WS.destCoords || !map || typeof mapboxgl === 'undefined') return
     const score = WS.scores.get(listingId)
     if (!score) {
-      // Fetch on demand
+      // No score at all — fetch route + score on demand
       fetchWalkRouteOnDemand(listingId)
       return
     }
+    // Always show the pill immediately (even with haversine-only score)
+    // Then fetch the real geometry in the background if we don't have it yet
     _renderWalkRoute(listingId, score)
+    if (!score.geometry) {
+      // score exists but no geometry (haversine seed) — fetch real route quietly
+      fetchWalkRouteOnDemand(listingId)
+    }
   }
 
   async function fetchWalkRouteOnDemand(listingId) {
@@ -2014,8 +2020,16 @@ searchPage.get('/', async (c) => {
   }
 
   function _renderWalkRoute(listingId, score) {
-    if (!map || !score.geometry) return
+    if (!map) return
     clearWalkRoute()
+    // If no geometry yet (haversine seed), still show the pill with time/dist
+    // The route line will be drawn once fetchWalkRouteOnDemand returns
+    if (!score.geometry) {
+      WS.activeRoute = { listingId, ...score }
+      const listing = allListings.find(l => l.id == listingId)
+      requestAnimationFrame(() => raActivateRoute(listingId, score, listing))
+      return
+    }
     WS.activeRoute = { listingId, ...score }
     // Add route source + layers (start inactive — raActivateRoute will brighten them)
     try {
