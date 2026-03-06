@@ -178,3 +178,27 @@ npx wrangler pages deploy dist --project-name parkpeer
 
 ---
 *Built with Hono + Cloudflare Pages — Deploy to the edge globally in seconds.*
+
+## 🔧 Recent Fixes (2026-03-06)
+
+### Map / UI
+- **Popup no longer blocks the walking route pill** — popup offset increased to 72px when a walk route is active; the `#route-info-pill` drops to `1.5rem` from the bottom while the popup is open (`pill-popup-open` class), giving the popup full clearance above the route line
+- **Smart auto-pan** — measures actual pin screen position vs pill top and pans by exactly the gap needed (not a fixed constant), so the popup always stays above the pill with ≥16px breathing room
+- **Viewport restored on close** — `map.easeTo({offset:[0,0]})` on popup close undoes the temporary pan
+
+### Security
+- **XSS: `loadTopHosts`** — all host name / count / rating / id fields now escaped via `escHtml()` before `innerHTML`
+- **XSS: Admin audit log table** — all DB-sourced fields (email, action, reason, IP address) escaped via `escapeHtml()` before render
+- **XSS: Admin refund log table** — all fields escaped
+- **XSS: Admin user detail panel** — `full_name`, `email`, `role`, `status` escaped; `e.message` no longer shown in error HTML
+- **XSS: Admin blocker reasons list** — escaped before `innerHTML`
+- **`escapeHtml()` fixed** — was missing `&`, `<`, `>` escaping; now full 5-char escape
+- **Error detail leak** — `detail: e.message` stripped from ALL 500 responses in `api.ts` (9 routes) and all `admin-api.ts` routes
+- **PII in logs** — geocode query strings replaced with `query_len`; geocode coordinates removed from warning log; listing POST body replaced with title-only log; Twilio SMS Body content redacted
+
+### Performance
+- **Migration 0011** — 6 new compound indexes: `(listing_id, status)` booking guard, `stripe_payment_intent_id` on payments/bookings, `(status, type)` listings, availability blocks, notifications composite; applied to both local and production D1
+
+### Code Quality
+- Removed 2x `console.debug` statements left from walk-route debugging
+- Cleaned debug comment on `el._lng` coordinate freeze
