@@ -367,9 +367,11 @@ bookingPage.get('/:id', async (c) => {
                 </div>
                 <div class="relative">
                   <input type="email" id="contact-email" placeholder="you@example.com"
-                    autocomplete="email"
+                    autocomplete="email" maxlength="254"
+                    list="email-suggestions"
                     oninput="onEmailInput()"
                     class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 pr-24"/>
+                  <datalist id="email-suggestions"></datalist>
                   <button id="email-verify-btn" onclick="startEmailVerify()" type="button"
                     class="absolute right-2 top-1/2 -translate-y-1/2 text-xs font-semibold px-2.5 py-1 rounded-lg bg-indigo-600/80 text-white hover:bg-indigo-500 transition-colors hidden">
                     Verify →
@@ -388,7 +390,7 @@ bookingPage.get('/:id', async (c) => {
                 </div>
                 <div class="relative">
                   <input type="tel" id="contact-phone" placeholder="+1 (555) 000-0000"
-                    autocomplete="tel"
+                    autocomplete="tel" maxlength="20"
                     oninput="onPhoneInput()"
                     class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 pr-24"/>
                   <button id="phone-verify-btn" onclick="startPhoneVerify()" type="button"
@@ -1762,7 +1764,33 @@ bookingPage.get('/:id', async (c) => {
   let otpResendTimer   = null;    // setInterval handle
   let otpResendSeconds = 0;
 
-  // ── Email input — real-time format hint ──────────────────────────────────
+  // ── Email input — real-time validation + domain autocomplete ────────────
+  const COMMON_DOMAINS = [
+    'gmail.com','yahoo.com','outlook.com','hotmail.com','icloud.com',
+    'me.com','mac.com','aol.com','live.com','msn.com','protonmail.com',
+    'proton.me','googlemail.com','ymail.com'
+  ];
+  // Common typos map → corrected domain
+  const DOMAIN_TYPOS = {
+    'gmial.com':'gmail.com','gmaill.com':'gmail.com','gmai.com':'gmail.com',
+    'gmail.co':'gmail.com','gmail.con':'gmail.com','gmail.cpm':'gmail.com',
+    'yahooo.com':'yahoo.com','yahoo.co':'yahoo.com','yahoo.con':'yahoo.com',
+    'outlok.com':'outlook.com','outloook.com':'outlook.com','outlookk.com':'outlook.com',
+    'hotmial.com':'hotmail.com','hotmall.com':'hotmail.com','hotmaill.com':'hotmail.com',
+    'iclould.com':'icloud.com','icolud.com':'icloud.com',
+  };
+
+  function updateEmailSuggestions(localPart) {
+    const dl = document.getElementById('email-suggestions');
+    if (!dl) return;
+    dl.innerHTML = '';
+    COMMON_DOMAINS.forEach(d => {
+      const opt = document.createElement('option');
+      opt.value = localPart + '@' + d;
+      dl.appendChild(opt);
+    });
+  }
+
   function onEmailInput() {
     const inp  = document.getElementById('contact-email');
     const hint = document.getElementById('email-hint');
@@ -1771,46 +1799,83 @@ bookingPage.get('/:id', async (c) => {
     const val  = inp.value.trim();
     const re   = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
+    // Reset hint + border each time to avoid sticky errors
+    hint.textContent = '';
+    hint.classList.add('hidden');
+    inp.style.borderColor = '';
+    btn.classList.add('hidden');
+
     // If user edits after verification, reset
     if (emailVerified) {
       emailVerified = false;
       badge.classList.add('hidden');
-      inp.style.borderColor = '';
     }
 
-    if (val.length === 0) {
-      hint.classList.add('hidden');
-      btn.classList.add('hidden');
-      inp.style.borderColor = '';
-      return;
+    if (val.length === 0) return;
+
+    // Update domain autocomplete suggestions when user types @
+    const atIdx = val.indexOf('@');
+    if (atIdx > 0) {
+      const localPart = val.slice(0, atIdx);
+      const typed = val.slice(atIdx + 1).toLowerCase();
+      // Populate datalist with matching domains
+      const dl = document.getElementById('email-suggestions');
+      if (dl) {
+        dl.innerHTML = '';
+        COMMON_DOMAINS
+          .filter(d => d.startsWith(typed))
+          .forEach(d => {
+            const opt = document.createElement('option');
+            opt.value = localPart + '@' + d;
+            dl.appendChild(opt);
+          });
+      }
+      // Typo detection
+      if (DOMAIN_TYPOS[typed]) {
+        const fix = DOMAIN_TYPOS[typed];
+        hint.innerHTML = 'Did you mean <strong>' + localPart + '@' + fix + '</strong>? '
+          + '<a href="#" onclick="document.getElementById(\'contact-email\').value=\'' + localPart + '@' + fix + '\';onEmailInput();return false;" '
+          + 'class="underline">Use this</a>';
+        hint.className = 'text-xs mt-1 text-amber-400';
+        hint.classList.remove('hidden');
+        inp.style.borderColor = 'rgba(251,191,36,.4)';
+        return;
+      }
+    } else {
+      // No @ yet — populate all common domain suggestions
+      updateEmailSuggestions(val);
     }
+
     if (re.test(val) && val.length <= 254) {
-      hint.textContent = '';
       hint.classList.add('hidden');
       btn.classList.remove('hidden');
       inp.style.borderColor = 'rgba(99,102,241,.6)';
     } else {
-      // Progressive hint: suggest @domain if no @
+      // Progressive hint
       if (!val.includes('@')) {
-        hint.textContent = 'Include your email domain, e.g. name@example.com';
+        hint.textContent = 'Continue typing your email address (e.g. name@gmail.com)';
+        hint.className = 'text-xs mt-1 text-gray-500';
       } else if (val.split('@').length > 2) {
-        hint.textContent = 'Email address should have only one @';
+        hint.textContent = 'Email address can only have one @';
+        hint.className = 'text-xs mt-1 text-red-400';
+        inp.style.borderColor = 'rgba(239,68,68,.4)';
       } else {
         const domain = val.split('@')[1] || '';
         if (!domain.includes('.')) {
-          hint.textContent = 'Add a domain extension, e.g. .com or .org';
+          hint.textContent = 'Add the domain extension, e.g. @gmail.com';
+          hint.className = 'text-xs mt-1 text-amber-400';
+          inp.style.borderColor = 'rgba(251,191,36,.4)';
         } else {
           hint.textContent = 'Check your email address format';
+          hint.className = 'text-xs mt-1 text-amber-400';
+          inp.style.borderColor = 'rgba(251,191,36,.4)';
         }
       }
-      hint.className = 'text-xs mt-1 text-amber-400';
       hint.classList.remove('hidden');
-      btn.classList.add('hidden');
-      inp.style.borderColor = 'rgba(251,191,36,.5)';
     }
   }
 
-  // ── Phone input — auto-format US numbers ─────────────────────────────────
+  // ── Phone input — real-time format + inline validation ───────────────────
   function onPhoneInput() {
     const inp   = document.getElementById('contact-phone');
     const hint  = document.getElementById('phone-hint');
@@ -1818,13 +1883,14 @@ bookingPage.get('/:id', async (c) => {
     const badge = document.getElementById('phone-verify-badge');
     let raw = inp.value;
 
-    // If user edits after verification, reset
+    // If user edits after verification, reset verified state
     if (phoneVerified) {
       phoneVerified = false;
       badge.classList.add('hidden');
       inp.style.borderColor = '';
     }
 
+    // Empty — hide everything
     if (raw.length === 0) {
       hint.classList.add('hidden');
       btn.classList.add('hidden');
@@ -1832,47 +1898,75 @@ bookingPage.get('/:id', async (c) => {
       return;
     }
 
-    // Auto-format: (555) 123-4567 for US numbers
-    const digits = raw.replace(/\D/g,'');
-    let formatted = raw;
-    if (digits.length <= 10 && !raw.startsWith('+')) {
+    // ── Auto-format US numbers ──────────────────────────────────────────────
+    // Only auto-format domestic (no + prefix) with ≤10 digits
+    const digits = raw.replace(/\D/g, '');
+    if (!raw.startsWith('+') && digits.length <= 10) {
+      let formatted = raw;
       if (digits.length >= 6) {
         formatted = '(' + digits.slice(0,3) + ') ' + digits.slice(3,6) + '-' + digits.slice(6,10);
       } else if (digits.length >= 3) {
         formatted = '(' + digits.slice(0,3) + ') ' + digits.slice(3);
+      } else {
+        formatted = digits; // 1-2 digits: just show raw digits
       }
-      // Preserve cursor by only updating if changed
       if (formatted !== raw) {
-        const pos = inp.selectionStart;
         inp.value = formatted;
-        // Keep cursor after last typed digit
         try { inp.setSelectionRange(formatted.length, formatted.length); } catch(e) {}
         raw = formatted;
       }
     }
 
-    // Validate
-    const cleanDigits = raw.replace(/\D/g,'');
-    const isUS10 = cleanDigits.length === 10;
-    const isIntl = raw.startsWith('+') && cleanDigits.length >= 7 && cleanDigits.length <= 15;
-    const isUS11 = cleanDigits.length === 11 && cleanDigits[0] === '1';
+    // ── Validate ────────────────────────────────────────────────────────────
+    const cleanDigits = raw.replace(/\D/g, '');
+    const len        = cleanDigits.length;
+    const isUS10  = len === 10 && !raw.startsWith('+');
+    const isUS11  = len === 11 && cleanDigits[0] === '1';
+    const isIntl  = raw.startsWith('+') && len >= 7 && len <= 15;
+    const isValid = isUS10 || isUS11 || isIntl;
 
-    if (isUS10 || isIntl || isUS11) {
-      hint.classList.add('hidden');
+    // Always reset hint/border first, then set correct state
+    hint.classList.add('hidden');
+    hint.textContent = '';
+
+    if (isValid) {
       btn.classList.remove('hidden');
-      inp.style.borderColor = 'rgba(99,102,241,.6)';
+      inp.style.borderColor = 'rgba(99,102,241,.6)'; // indigo glow
     } else {
-      if (cleanDigits.length > 0 && cleanDigits.length < 10) {
-        hint.textContent = (10 - cleanDigits.length) + ' more digit' + (10 - cleanDigits.length === 1 ? '' : 's') + ' needed (or use +country-code for international)';
-        hint.className = 'text-xs mt-1 text-amber-400';
-        hint.classList.remove('hidden');
-      } else if (cleanDigits.length > 15) {
-        hint.textContent = 'Phone number is too long';
+      btn.classList.add('hidden');
+
+      if (len === 0) {
+        inp.style.borderColor = '';
+      } else if (len > 15) {
+        // Too long — hard error
+        hint.textContent = 'Phone number is too long (max 15 digits)';
         hint.className = 'text-xs mt-1 text-red-400';
         hint.classList.remove('hidden');
+        inp.style.borderColor = 'rgba(239,68,68,.5)'; // red
+      } else if (!raw.startsWith('+') && len > 0 && len < 10) {
+        // US domestic incomplete — soft hint
+        const need = 10 - len;
+        hint.textContent = need + ' more digit' + (need === 1 ? '' : 's') + ' needed (or start with + for international)';
+        hint.className = 'text-xs mt-1 text-amber-400';
+        hint.classList.remove('hidden');
+        inp.style.borderColor = 'rgba(251,191,36,.4)'; // amber
+      } else if (raw.startsWith('+') && len < 7) {
+        // International incomplete
+        hint.textContent = 'Enter country code + number (e.g. +44 7911 123456)';
+        hint.className = 'text-xs mt-1 text-amber-400';
+        hint.classList.remove('hidden');
+        inp.style.borderColor = 'rgba(251,191,36,.4)';
+      } else if (!raw.startsWith('+') && len === 10) {
+        // Shouldn't reach here (handled above) but guard anyway
+        btn.classList.remove('hidden');
+        inp.style.borderColor = 'rgba(99,102,241,.6)';
+      } else {
+        // Ambiguous length (11-15 digits, no +, not US 1-xxx)
+        hint.textContent = 'Add + before country code for international numbers';
+        hint.className = 'text-xs mt-1 text-amber-400';
+        hint.classList.remove('hidden');
+        inp.style.borderColor = 'rgba(251,191,36,.4)';
       }
-      btn.classList.add('hidden');
-      inp.style.borderColor = cleanDigits.length > 0 ? 'rgba(251,191,36,.5)' : '';
     }
   }
 

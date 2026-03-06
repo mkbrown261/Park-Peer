@@ -16,12 +16,13 @@
 //   total        = subtotal + platform_fee           = round(subtotal × 1.15, 2)
 //
 // ── Stripe Connect + Cash-out flow ───────────────────────────────────────────
-//   1. create-intent  → PaymentIntent with application_fee_amount = fee_cents
-//                       (captures full total to platform account)
+//   1. create-intent  → PaymentIntent for full total (NO application_fee_amount)
+//                       with transfer_group for reconciliation
 //   2. payments/confirm → verify PI succeeded, record booking
-//   3. dispatchHostPayout() → POST /v1/transfers to host's connected account
-//                            (stripe_account_id from payout_info)
-//   4. Webhook transfer.paid → mark stripe_transfer_id on payments row
+//   3. dispatchHostPayout() → POST /v1/transfers (host_payout_cents) to host's
+//                            connected account using same transfer_group
+//   4. Platform retains its fee (total - host_payout) automatically
+//   5. Webhook transfer.paid → mark stripe_transfer_id on payments row
 //
 // ── Host Cash-out (Connect Express Onboarding) ───────────────────────────────
 //   A. createConnectAccount()  → POST /v1/accounts (type=express)
@@ -89,25 +90,24 @@ async function stripeRequest(
 
 // ── Create Payment Intent ────────────────────────────────────────────────────
 // amountCents        = total charge to driver (subtotal + platform fee)
-// applicationFeeCents = platform_fee in cents (stays with platform account)
-// hostStripeAccountId = host's connected Stripe account (receives host_payout
-//                       automatically via Stripe's fee/transfer mechanics, OR
-//                       we do a manual transfer post-capture if not using
-//                       on_behalf_of).
+// hostStripeAccountId = host's connected Stripe account (for transfer_group tagging)
 //
-// Strategy: Separate Charges + Manual Transfers
-//   - Charge the full amount to the platform account
-//   - application_fee_amount keeps the fee on the platform
-//   - After confirm, call createTransfer() to push host_payout to host account
+// Strategy: Separate Charges + Manual Transfers (NO on_behalf_of / NO application_fee_amount)
+//   - Charge the full amount to the PLATFORM account (normal PI, no Stripe-Account header)
+//   - application_fee_amount is ONLY valid for destination/direct charges — we do NOT use it
+//   - Platform retains the full charge; after payment succeeds we manually call
+//     createTransfer() to push host_payout (85% of subtotal) to the host's connected account
+//   - transfer_group ties the charge to subsequent transfers for reconciliation
 //
+// NOTE: Do NOT pass applicationFeeCents to this function — fee is kept by NOT transferring it.
 export async function createPaymentIntent(
   env: Env,
   amountCents: number,
   currency: string = 'usd',
   metadata: Record<string, string> = {},
   idempotencyKey?: string,
-  applicationFeeCents?: number,   // platform fee in cents (stays with platform)
-  hostStripeAccountId?: string    // host connected account (for transfer_group)
+  _applicationFeeCents?: number,  // DEPRECATED — kept for backward compat, ignored
+  hostStripeAccountId?: string    // host connected account (for transfer_group only)
 ): Promise<{ clientSecret: string; paymentIntentId: string }> {
   const flatMeta: Record<string, string> = {}
   for (const [k, v] of Object.entries(metadata)) {
@@ -121,17 +121,17 @@ export async function createPaymentIntent(
     ...flatMeta
   }
 
-  // Stamp platform fee so it stays on the platform account.
-  // The remaining (host_payout) will be transferred out to the host
-  // via a manual Transfer after the charge succeeds.
-  if (applicationFeeCents && applicationFeeCents > 0) {
-    piBody['application_fee_amount'] = applicationFeeCents
-  }
+  // NOTE: We intentionally do NOT set application_fee_amount here.
+  // application_fee_amount requires either:
+  //   (a) Destination charge: transfer_data[destination] = connected_account_id
+  //   (b) Direct charge:      Stripe-Account header = connected_account_id
+  // We use Separate Charges + Transfers, so the platform charges the driver directly
+  // and manually transfers host_payout afterwards via POST /v1/transfers.
 
-  // Transfer group ties the PI charge to any subsequent transfers
-  // (enables Stripe's reconciliation and dispute management)
+  // Transfer group ties this PI to any subsequent Transfer objects
+  // so Stripe can link charges → transfers for disputes and reconciliation.
   if (hostStripeAccountId) {
-    piBody['transfer_group'] = `booking-${metadata['checkout_token'] || idempotencyKey || 'unknown'}`
+    piBody['transfer_group'] = `booking-${metadata['checkout_token'] || idempotencyKey || Date.now()}`
   }
 
   const pi = await stripeRequest(

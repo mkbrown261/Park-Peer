@@ -1074,31 +1074,33 @@ apiRoutes.post('/payments/create-intent', async (c) => {
   const total       = totalCents       / 100
 
   try {
-    // FIX #3: Pass application_fee_amount so platform keeps its 15%.
-    //         Pass hostAccountId for transfer_group tagging.
+    // Separate Charges + Transfers model:
+    // Charge full total to platform account (no application_fee_amount).
+    // After PI succeeds, dispatchHostPayout() manually transfers host_payout
+    // to the host's connected account. Platform retains its fee automatically.
     const { clientSecret, paymentIntentId } = await createPaymentIntent(
       env as any,
       totalCents,
       'usd',
       {
-        listing_id:       String(listing_id),
-        booking_id:       booking_id ? String(booking_id) : '',
-        hold_id:          hold_id    ? String(hold_id)    : '',
-        session_token:    session_token  || '',
-        checkout_token:   checkout_token || '',
-        driver_email:     driver_email   || '',
-        vehicle_plate:    vehicle_plate  || '',
+        listing_id:         String(listing_id),
+        booking_id:         booking_id ? String(booking_id) : '',
+        hold_id:            hold_id    ? String(hold_id)    : '',
+        session_token:      session_token  || '',
+        checkout_token:     checkout_token || '',
+        driver_email:       driver_email   || '',
+        vehicle_plate:      vehicle_plate  || '',
         start_datetime,
         end_datetime,
-        platform:         'parkpeer',
-        subtotal_cents:   String(subtotalCents),
+        platform:           'parkpeer',
+        subtotal_cents:     String(subtotalCents),
         platform_fee_cents: String(platformFeeCents),
         host_payout_cents:  String(hostPayoutCents),
-        host_account_id:  hostAccountId || '',
+        host_account_id:    hostAccountId || '',
       },
-      checkout_token || undefined,    // Stripe Idempotency-Key
-      platformFeeCents,               // application_fee_amount: stays with platform
-      hostAccountId || undefined      // host connected account for transfer_group
+      checkout_token || undefined,   // Idempotency-Key
+      undefined,                     // application_fee_amount — NOT used (separate charges)
+      hostAccountId || undefined     // host connected account → sets transfer_group
     )
 
     // ── Stamp PI onto booking row (if booking already created) ───────
