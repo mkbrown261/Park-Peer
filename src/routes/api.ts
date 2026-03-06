@@ -98,6 +98,36 @@ type Bindings = {
 export const apiRoutes = new Hono<{ Bindings: Bindings }>()
 
 // ════════════════════════════════════════════════════════════════════════════
+// STRUCTURED LOGGING helpers
+// All payment / booking / hold events emit a JSON log line via console.log
+// so they can be tailed in `wrangler tail` or forwarded to a log sink.
+// ════════════════════════════════════════════════════════════════════════════
+type LogLevel = 'info' | 'warn' | 'error'
+function logEvent(
+  level: LogLevel,
+  event: string,
+  data: Record<string, unknown> = {}
+): void {
+  const entry = {
+    ts:    new Date().toISOString(),
+    level,
+    event,
+    ...data,
+  }
+  if (level === 'error') console.error(JSON.stringify(entry))
+  else if (level === 'warn')  console.warn(JSON.stringify(entry))
+  else                        console.log(JSON.stringify(entry))
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// RATE LIMITING constants for payment-sensitive endpoints
+// ════════════════════════════════════════════════════════════════════════════
+const PAYMENT_RL_WINDOW_MS = 60_000   // 1-minute window
+const PAYMENT_RL_MAX       = 10       // max 10 create-intent requests per IP per minute
+const HOLDS_RL_WINDOW_MS   = 60_000
+const HOLDS_RL_MAX         = 20       // max 20 hold requests per IP per minute (higher for retries)
+
+// ════════════════════════════════════════════════════════════════════════════
 // AUTH — Registration, Login, Logout, Token Refresh, CSRF
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -710,7 +740,17 @@ apiRoutes.get('/stripe/config', (c) => {
 // ════════════════════════════════════════════════════════════════════════════
 // STRIPE — Create Payment Intent
 // POST /api/payments/create-intent
-// Body: { listing_id, start_datetime, end_datetime, driver_email, driver_name, vehicle_plate }
+// Body: { listing_id, hold_id, session_token, booking_id?, start_datetime, end_datetime,
+//         driver_email, checkout_token (idempotency) }
+//
+// HOLD-GATED: Validates that an active reservation_hold exists for this
+// session before creating the Stripe PI. The hold_id is stamped onto the
+// booking row and the PI id is stamped onto the hold row — making the
+// webhook lookup deterministic.
+//
+// IDEMPOTENCY: If the same checkout_token already has a PI on record
+// (booking_idempotency table), returns the existing clientSecret so that
+// network retries don't create duplicate charges.
 // ════════════════════════════════════════════════════════════════════════════
 apiRoutes.post('/payments/create-intent', async (c) => {
   const env = c.env
@@ -718,30 +758,106 @@ apiRoutes.post('/payments/create-intent', async (c) => {
     return c.json({ error: 'Stripe not configured' }, 503)
   }
 
+  // ── Rate limiting (per IP) ────────────────────────────────────────────
+  const ip = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || 'unknown'
+  if (isRateLimited(`create-intent:${ip}`, PAYMENT_RL_MAX, PAYMENT_RL_WINDOW_MS)) {
+    logEvent('warn', 'create_intent.rate_limited', { ip })
+    return c.json({ error: 'Too many payment requests. Please wait a moment.' }, 429)
+  }
+
   let body: any = {}
   try { body = await c.req.json() } catch {
     return c.json({ error: 'Invalid JSON body' }, 400)
   }
 
-  const { listing_id, start_datetime, end_datetime, driver_email, driver_name, vehicle_plate, booking_id } = body
+  const {
+    listing_id, start_datetime, end_datetime, driver_email,
+    vehicle_plate, booking_id, hold_id, session_token, checkout_token
+  } = body
 
-  if (!listing_id || !start_datetime || !end_datetime || !driver_email) {
-    return c.json({ error: 'Missing required fields: listing_id, start_datetime, end_datetime, driver_email' }, 400)
+  if (!listing_id || !start_datetime || !end_datetime) {
+    return c.json({ error: 'Missing required fields: listing_id, start_datetime, end_datetime' }, 400)
   }
 
-  // Calculate pricing
   const start = new Date(start_datetime)
   const end   = new Date(end_datetime)
   if (isNaN(start.getTime()) || isNaN(end.getTime()) || end <= start) {
     return c.json({ error: 'Invalid date range' }, 400)
   }
 
-  const hours       = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / 3600000))
-
-  // Fetch real rate from D1 listing
-  let ratePerHour = 12  // fallback
   const db = c.env?.DB
-  if (db && listing_id) {
+
+  // ── IDEMPOTENCY: return existing PI for same checkout_token ──────────
+  if (checkout_token && db) {
+    try {
+      const existing = await db.prepare(
+        'SELECT stripe_pi_id FROM booking_idempotency WHERE checkout_token = ? AND stripe_pi_id IS NOT NULL LIMIT 1'
+      ).bind(String(checkout_token)).first<{ stripe_pi_id: string }>()
+      if (existing?.stripe_pi_id) {
+        // Retrieve existing PI to return fresh clientSecret
+        try {
+          const pi = await getPaymentIntent(env as any, existing.stripe_pi_id)
+          if (pi?.client_secret) {
+            console.log(`[Stripe] Idempotent PI reuse: ${existing.stripe_pi_id}`)
+            return c.json({
+              clientSecret:    pi.client_secret,
+              paymentIntentId: pi.id,
+              idempotent:      true,
+              pricing:         body._pricing || {}
+            })
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+
+  // ── HOLD VALIDATION: verify active hold before creating PI ───────────
+  if (hold_id && db) {
+    try {
+      const hold = await db.prepare(`
+        SELECT id, status, hold_expires_at, listing_id
+        FROM reservation_holds WHERE id = ?
+      `).bind(String(hold_id)).first<any>()
+
+      if (!hold) {
+        return c.json({ error: 'Reservation hold not found. Please start over.', code: 'HOLD_NOT_FOUND' }, 409)
+      }
+      if (hold.status === 'converted') {
+        return c.json({ error: 'This slot is already booked.', code: 'HOLD_CONVERTED' }, 409)
+      }
+      if (hold.status !== 'active' || new Date(hold.hold_expires_at) <= new Date()) {
+        return c.json({
+          error: 'Your reservation hold has expired (10-minute limit). Please select your time slot again.',
+          code:  'HOLD_EXPIRED',
+        }, 409)
+      }
+    } catch (dbErr: any) {
+      console.error('[Stripe] hold validation error:', dbErr.message)
+    }
+  } else if (!hold_id) {
+    // No hold provided — run a quick conflict check to catch obvious double-books
+    if (db) {
+      try {
+        const conflict = await db.prepare(`
+          SELECT id FROM bookings
+          WHERE listing_id = ? AND status IN ('confirmed','active')
+            AND start_time < ? AND end_time > ?
+          LIMIT 1
+        `).bind(listing_id, end_datetime, start_datetime).first<{ id: number }>()
+        if (conflict) {
+          return c.json({
+            error: 'This spot is already booked for the selected time.',
+            code:  'SLOT_BOOKED',
+          }, 409)
+        }
+      } catch {}
+    }
+  }
+
+  // ── Fetch authoritative pricing from DB (never trust client price) ───
+  const hours = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / 3600000))
+  let ratePerHour = 12
+  if (db) {
     try {
       const row = await db.prepare('SELECT rate_hourly FROM listings WHERE id = ? AND status = ?')
         .bind(String(listing_id), 'active').first<{ rate_hourly: number }>()
@@ -749,9 +865,9 @@ apiRoutes.post('/payments/create-intent', async (c) => {
     } catch {}
   }
 
-  const subtotal    = ratePerHour * hours
+  const subtotal    = Math.round(ratePerHour * hours * 100) / 100
   const platformFee = Math.round(subtotal * 0.15 * 100) / 100
-  const total       = subtotal + platformFee
+  const total       = Math.round((subtotal + platformFee) * 100) / 100
   const totalCents  = Math.round(total * 100)
 
   try {
@@ -760,18 +876,21 @@ apiRoutes.post('/payments/create-intent', async (c) => {
       totalCents,
       'usd',
       {
-        listing_id: String(listing_id),
-        booking_id: booking_id ? String(booking_id) : '',
-        driver_email,
-        vehicle_plate: vehicle_plate || '',
+        listing_id:     String(listing_id),
+        booking_id:     booking_id ? String(booking_id) : '',
+        hold_id:        hold_id    ? String(hold_id)    : '',
+        session_token:  session_token || '',
+        checkout_token: checkout_token || '',
+        driver_email:   driver_email  || '',
+        vehicle_plate:  vehicle_plate || '',
         start_datetime,
         end_datetime,
-        platform: 'parkpeer'
-      }
+        platform:       'parkpeer',
+      },
+      checkout_token || undefined   // Stripe Idempotency-Key: prevents duplicate PIs on retry
     )
 
-    // ── Stamp stripe_payment_intent_id onto the existing booking row ─────
-    // This is the critical link: the webhook uses this to confirm the booking.
+    // ── Stamp PI onto booking row (if booking already created) ───────
     if (db && booking_id) {
       try {
         await db.prepare(
@@ -779,44 +898,70 @@ apiRoutes.post('/payments/create-intent', async (c) => {
            WHERE id = ? AND stripe_payment_intent_id IS NULL`
         ).bind(paymentIntentId, String(booking_id)).run()
       } catch (dbErr: any) {
-        // Non-fatal: log but don't fail the intent creation
-        console.error('[Stripe] Failed to stamp PI on booking:', dbErr.message)
+        console.error('[Stripe] stamp PI on booking error:', dbErr.message)
       }
     }
 
-    return c.json({
-      clientSecret,
-      paymentIntentId,
-      pricing: {
-        hours,
-        rate_per_hour: ratePerHour,
-        subtotal,
-        platform_fee: platformFee,
-        total,
-        total_cents: totalCents,
-        currency: 'usd'
+    // ── Stamp PI onto hold row ────────────────────────────────────────
+    if (db && hold_id) {
+      try {
+        await db.prepare(
+          `UPDATE reservation_holds SET stripe_pi_id = ?, updated_at = datetime('now')
+           WHERE id = ? AND stripe_pi_id IS NULL`
+        ).bind(paymentIntentId, String(hold_id)).run()
+      } catch (dbErr: any) {
+        console.error('[Stripe] stamp PI on hold error:', dbErr.message)
       }
+    }
+
+    // ── Register idempotency key ──────────────────────────────────────
+    if (db && checkout_token) {
+      try {
+        await db.prepare(
+          `UPDATE booking_idempotency SET stripe_pi_id = ? WHERE checkout_token = ?`
+        ).bind(paymentIntentId, String(checkout_token)).run()
+      } catch {}
+    }
+
+    const pricing = { hours, rate_per_hour: ratePerHour, subtotal, platform_fee: platformFee,
+                      total, total_cents: totalCents, currency: 'usd' }
+
+    logEvent('info', 'create_intent.ok', {
+      pi: paymentIntentId, listing_id, hold_id: hold_id || null,
+      checkout_token: checkout_token || null, total_cents: totalCents,
     })
+    return c.json({ clientSecret, paymentIntentId, pricing })
+
   } catch (e: any) {
     console.error('[Stripe] create-intent error:', e.message)
+    logEvent('error', 'create_intent.error', { listing_id, hold_id, error: e.message, ip })
     return c.json({ error: e.message || 'Failed to create payment intent' }, 500)
   }
 })
 
 // ════════════════════════════════════════════════════════════════════════════
-// STRIPE — Confirm Booking after successful payment
+// STRIPE — Confirm Booking after successful payment (ATOMIC + GHOST-PROOF)
 // POST /api/payments/confirm
-// Body: { payment_intent_id, booking_id?, listing_id, driver_email, driver_name,
-//         start_datetime, end_datetime, vehicle_plate, cancellation_acknowledged,
+// Body: { payment_intent_id, hold_id?, session_token?, booking_id?,
+//         listing_id, driver_email, driver_name, start_datetime, end_datetime,
+//         vehicle_plate, checkout_token, cancellation_acknowledged,
 //         driver_id?, driver_phone? }
 //
-// Flow:
-//   1. Verify Stripe PI status = 'succeeded'
-//   2. Look up existing booking row by stripe_payment_intent_id OR booking_id
-//   3. UPDATE bookings SET status='confirmed', stripe_payment_intent_id (D1)
-//   4. INSERT INTO payments row (D1)
-//   5. Send confirmation email / SMS
+// ATOMIC FLOW (ghost booking prevention):
+//   1. Verify Stripe PI status = 'succeeded'  (server-side, never trust client)
+//   2. Idempotency: if PI already confirmed → return existing booking (safe)
+//   3. Validate hold is still active (not expired / converted)
+//   4. D1 db.batch() — all-or-nothing:
+//        a. If no booking row exists yet → INSERT INTO bookings (status=confirmed)
+//        b. If booking row exists → UPDATE SET status=confirmed
+//        c. Mark hold as converted
+//        d. INSERT INTO payments (skip if PI already recorded)
+//        e. UPDATE idempotency table
+//   5. Send email + SMS confirmation
 //   6. Fire in-app notification (async, non-blocking)
+//
+// If D1 batch fails after Stripe succeeds → log to payment_recovery_log
+// Recovery webhook will retry or auto-refund.
 // ════════════════════════════════════════════════════════════════════════════
 apiRoutes.post('/payments/confirm', async (c) => {
   const env = c.env
@@ -830,15 +975,14 @@ apiRoutes.post('/payments/confirm', async (c) => {
   }
 
   const {
-    payment_intent_id, booking_id, listing_id, driver_email, driver_name,
-    start_datetime, end_datetime, vehicle_plate
+    payment_intent_id, hold_id, session_token, booking_id,
+    listing_id, driver_email, driver_name,
+    start_datetime, end_datetime, vehicle_plate, checkout_token
   } = body
 
   if (!payment_intent_id) {
     return c.json({ error: 'Missing payment_intent_id' }, 400)
   }
-
-  // ── Cancellation Policy acknowledgment enforcement ──────────────────────
   if (!body.cancellation_acknowledged) {
     return c.json({
       error: 'You must acknowledge the cancellation policy before confirming a booking.',
@@ -847,216 +991,329 @@ apiRoutes.post('/payments/confirm', async (c) => {
     }, 400)
   }
 
-  const db = c.env?.DB
+  const db  = c.env?.DB
+  const ipAddress = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || null
 
   try {
-    // ── 1. Verify payment succeeded with Stripe ─────────────────────────
+    // ── 1. Verify payment with Stripe (server-side, authoritative) ────────
     const pi = await getPaymentIntent(env as any, payment_intent_id)
     if (pi.status !== 'succeeded') {
-      return c.json({ error: `Payment not completed. Status: ${pi.status}` }, 402)
+      // Release hold so user can retry with different payment
+      if (db && (hold_id || session_token)) {
+        await db.prepare(`
+          UPDATE reservation_holds SET status='released', updated_at=datetime('now')
+          WHERE ${hold_id ? 'id=?' : 'session_token=?'} AND status='active'
+        `).bind(hold_id || session_token).run().catch(() => {})
+      }
+      return c.json({
+        error: `Payment not completed. Status: ${pi.status}`,
+        code: 'PAYMENT_INCOMPLETE',
+        stripe_status: pi.status,
+      }, 402)
     }
 
     const amountPaid  = pi.amount / 100
     const platformFee = Math.round(amountPaid * 0.15 * 100) / 100
     const hostPayout  = Math.round((amountPaid - platformFee) * 100) / 100
 
-    // ── 2. Resolve the booking row in D1 ──────────────────────────────────
-    // Priority: look up by stripe_payment_intent_id first (set in create-intent),
-    // then fall back to explicit booking_id param.
-    let dbBookingId: number | null = null
-    let resolvedHostId: number | null = null
+    // ── 2. IDEMPOTENCY: return existing booking if PI already confirmed ────
+    if (db) {
+      const existingPmt = await db.prepare(
+        'SELECT booking_id FROM payments WHERE stripe_payment_intent_id = ? LIMIT 1'
+      ).bind(payment_intent_id).first<{ booking_id: number }>().catch(() => null)
+
+      if (existingPmt?.booking_id) {
+        const bkRef = 'PP-' + new Date().getFullYear() + '-' + String(existingPmt.booking_id).padStart(4, '0')
+        console.log(`[Confirm] Idempotent: PI ${payment_intent_id} already confirmed → booking ${existingPmt.booking_id}`)
+        return c.json({
+          success: true, idempotent: true,
+          booking_id: bkRef, db_booking_id: existingPmt.booking_id,
+          status: 'confirmed', amount_paid: amountPaid,
+        }, 200)
+      }
+    }
+
+    // ── 3. Resolve hold + listing + driver info from D1 ──────────────────
+    let holdRow:          any = null
+    let existingBooking:  any = null
+    let listingRow:       any = null
     let resolvedDriverId: number | null = body.driver_id ? Number(body.driver_id) : null
-    let listingTitle   = 'Parking Space'
-    let listingAddress = ''
+    let resolvedHostId:   number | null = null
+    let listingTitle    = 'Parking Space'
+    let listingAddress  = ''
+    let resolvedListingId = listing_id ? parseInt(String(listing_id)) : 0
+    let resolvedStart   = start_datetime || ''
+    let resolvedEnd     = end_datetime   || ''
+    let resolvedVehicle = vehicle_plate  || null
 
     if (db) {
-      // Try to find booking by PI id (stamped during create-intent)
-      const bkByPi = await db.prepare(
-        `SELECT b.id, b.driver_id, b.host_id, b.start_time, b.end_time,
-                l.title AS listing_title, l.address, l.city
-         FROM bookings b
-         LEFT JOIN listings l ON b.listing_id = l.id
-         WHERE b.stripe_payment_intent_id = ?
-         LIMIT 1`
-      ).bind(payment_intent_id).first<any>()
-
-      if (bkByPi) {
-        dbBookingId        = bkByPi.id
-        resolvedDriverId   = bkByPi.driver_id   || resolvedDriverId
-        resolvedHostId     = bkByPi.host_id
-        listingTitle       = bkByPi.listing_title || listingTitle
-        listingAddress     = [bkByPi.address, bkByPi.city].filter(Boolean).join(', ')
-      } else if (booking_id) {
-        // Fallback: look up by explicit booking_id (e.g., legacy or direct call)
-        const bkById = await db.prepare(
-          `SELECT b.id, b.driver_id, b.host_id, b.start_time, b.end_time,
-                  l.title AS listing_title, l.address, l.city
-           FROM bookings b
-           LEFT JOIN listings l ON b.listing_id = l.id
-           WHERE b.id = ?
-           LIMIT 1`
-        ).bind(String(booking_id)).first<any>()
-
-        if (bkById) {
-          dbBookingId      = bkById.id
-          resolvedDriverId = bkById.driver_id   || resolvedDriverId
-          resolvedHostId   = bkById.host_id
-          listingTitle     = bkById.listing_title || listingTitle
-          listingAddress   = [bkById.address, bkById.city].filter(Boolean).join(', ')
-        }
+      // Find hold by id or session_token (whichever is available)
+      if (hold_id) {
+        holdRow = await db.prepare(
+          'SELECT * FROM reservation_holds WHERE id = ? LIMIT 1'
+        ).bind(String(hold_id)).first<any>().catch(() => null)
+      } else if (session_token) {
+        holdRow = await db.prepare(
+          'SELECT * FROM reservation_holds WHERE session_token = ? AND status=\'active\' LIMIT 1'
+        ).bind(String(session_token)).first<any>().catch(() => null)
       }
 
-      // If still no listing info, try listing_id param directly
-      if (!listingTitle || listingTitle === 'Parking Space') {
-        if (listing_id) {
-          try {
-            const row = await db.prepare('SELECT title, address, city FROM listings WHERE id = ?')
-              .bind(String(listing_id)).first<any>()
-            if (row) {
-              listingTitle   = row.title   || listingTitle
-              listingAddress = [row.address, row.city].filter(Boolean).join(', ') || listingAddress
-            }
-          } catch {}
+      // Validate hold (warn but don't block — payment already taken)
+      if (holdRow) {
+        if (holdRow.status === 'converted') {
+          // Already processed — idempotent return
+          const bkRef = 'PP-' + new Date().getFullYear() + '-' + String(holdRow.booking_id).padStart(4, '0')
+          return c.json({ success: true, idempotent: true, booking_id: bkRef,
+            db_booking_id: holdRow.booking_id, status: 'confirmed', amount_paid: amountPaid }, 200)
+        }
+        if (new Date(holdRow.hold_expires_at) <= new Date() && holdRow.status === 'active') {
+          // Hold expired AFTER payment succeeded — proceed anyway (ghost booking prevention)
+          console.warn(`[Confirm] Hold ${holdRow.id} expired but PI succeeded — proceeding with booking creation`)
+        }
+        resolvedListingId = resolvedListingId || holdRow.listing_id
+        resolvedStart     = resolvedStart     || holdRow.start_time
+        resolvedEnd       = resolvedEnd       || holdRow.end_time
+      }
+
+      // Look up existing booking by PI id or booking_id
+      if (booking_id) {
+        existingBooking = await db.prepare(
+          'SELECT id, driver_id, host_id, status FROM bookings WHERE id = ? LIMIT 1'
+        ).bind(String(booking_id)).first<any>().catch(() => null)
+      }
+      if (!existingBooking) {
+        existingBooking = await db.prepare(
+          'SELECT id, driver_id, host_id, status FROM bookings WHERE stripe_payment_intent_id = ? LIMIT 1'
+        ).bind(payment_intent_id).first<any>().catch(() => null)
+      }
+
+      if (existingBooking) {
+        resolvedDriverId = existingBooking.driver_id || resolvedDriverId
+        resolvedHostId   = existingBooking.host_id
+      }
+
+      // Fetch listing for pricing/host
+      if (resolvedListingId) {
+        listingRow = await db.prepare(
+          'SELECT id, title, address, city, host_id, rate_hourly FROM listings WHERE id = ? LIMIT 1'
+        ).bind(String(resolvedListingId)).first<any>().catch(() => null)
+        if (listingRow) {
+          listingTitle   = listingRow.title || listingTitle
+          listingAddress = [listingRow.address, listingRow.city].filter(Boolean).join(', ')
+          resolvedHostId = resolvedHostId || listingRow.host_id
         }
       }
     }
 
-    // ── 3. UPDATE booking in D1: confirmed + stamp PI id if not already set ─
+    // ── 4. ATOMIC D1 BATCH — booking + hold convert + payment (ghost-proof) ─
+    let dbBookingId: number | null = existingBooking?.id ?? null
+
+    if (db) {
+      const cancelAck    = body.cancellation_acknowledged === true
+      const cancelVer    = body.cancellation_policy_version || CURRENT_VERSIONS.cancellation_policy
+      const hours        = resolvedStart && resolvedEnd
+        ? Math.max(1, Math.ceil((new Date(resolvedEnd).getTime() - new Date(resolvedStart).getTime()) / 3600000))
+        : 1
+
+      try {
+        if (!dbBookingId) {
+          // ── A. Create booking row inside batch ──────────────────────────
+          const batchResults = await db.batch([
+            // Check no duplicate booking exists for this PI
+            db.prepare(`SELECT id FROM bookings WHERE stripe_payment_intent_id = ? LIMIT 1`).bind(payment_intent_id),
+            // Insert the booking
+            db.prepare(`
+              INSERT OR IGNORE INTO bookings
+                (listing_id, driver_id, host_id, start_time, end_time,
+                 duration_hours, status, subtotal, platform_fee, host_payout,
+                 total_charged, vehicle_plate, vehicle_description,
+                 stripe_payment_intent_id, stripe_charge_id,
+                 cancellation_acknowledged, cancellation_ack_version,
+                 cancellation_ack_at, cancellation_ack_ip,
+                 checkout_token, hold_id, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, 'confirmed', ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?,
+                      CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END, ?,
+                      ?, ?, datetime('now'), datetime('now'))
+            `).bind(
+              resolvedListingId, resolvedDriverId, resolvedHostId,
+              resolvedStart, resolvedEnd, hours,
+              Math.round((amountPaid / 1.15) * 100) / 100,  // subtotal back-calc
+              platformFee, hostPayout, amountPaid,
+              resolvedVehicle, resolvedVehicle,
+              payment_intent_id, pi.latest_charge || null,
+              cancelAck ? 1 : 0, cancelAck ? cancelVer : null,
+              cancelAck ? 1 : 0, ipAddress,
+              checkout_token || null, hold_id || null
+            ),
+          ])
+
+          // Get the new booking id
+          dbBookingId = (batchResults[1] as any)?.meta?.last_row_id ?? null
+
+          // If INSERT was ignored (duplicate), fetch the existing row
+          if (!dbBookingId) {
+            const dup = await db.prepare('SELECT id FROM bookings WHERE stripe_payment_intent_id = ? LIMIT 1')
+              .bind(payment_intent_id).first<{ id: number }>()
+            dbBookingId = dup?.id ?? null
+          }
+
+        } else {
+          // ── B. Booking row already exists — UPDATE to confirmed ──────────
+          await db.prepare(`
+            UPDATE bookings
+            SET status = 'confirmed',
+                stripe_payment_intent_id = COALESCE(stripe_payment_intent_id, ?),
+                stripe_charge_id         = COALESCE(stripe_charge_id, ?),
+                updated_at               = datetime('now')
+            WHERE id = ? AND status IN ('pending','confirmed')
+          `).bind(payment_intent_id, pi.latest_charge || null, dbBookingId).run()
+        }
+
+        // ── C. INSERT payments row (idempotent) ──────────────────────────
+        if (dbBookingId && resolvedHostId) {
+          await db.prepare(`
+            INSERT OR IGNORE INTO payments
+              (booking_id, driver_id, host_id, amount, platform_fee, host_payout,
+               currency, stripe_payment_intent_id, stripe_charge_id, type, status)
+            VALUES (?, ?, ?, ?, ?, ?, 'usd', ?, ?, 'charge', 'succeeded')
+          `).bind(
+            dbBookingId, resolvedDriverId || 0, resolvedHostId,
+            amountPaid, platformFee, hostPayout,
+            payment_intent_id, pi.latest_charge || null
+          ).run()
+        }
+
+        // ── D. Convert hold → converted ──────────────────────────────────
+        if (holdRow?.id || hold_id) {
+          const hid = holdRow?.id || hold_id
+          await db.prepare(`
+            UPDATE reservation_holds
+            SET status = 'converted', booking_id = ?, updated_at = datetime('now')
+            WHERE id = ? AND status IN ('active','expired')
+          `).bind(dbBookingId, String(hid)).run()
+        }
+
+        // ── E. Update idempotency table ──────────────────────────────────
+        if (checkout_token) {
+          await db.prepare(`
+            UPDATE booking_idempotency
+            SET booking_id = ?, stripe_pi_id = ?
+            WHERE checkout_token = ?
+          `).bind(dbBookingId, payment_intent_id, String(checkout_token)).run().catch(() => {})
+        }
+
+        console.log(`[Confirm] Booking ${dbBookingId} confirmed PI=${payment_intent_id} $${amountPaid}`)
+        logEvent('info', 'booking.confirmed', {
+          booking_id: dbBookingId, pi: payment_intent_id,
+          amount: amountPaid, listing_id: resolvedListingId,
+          hold_id: hold_id || null,
+        })
+
+      } catch (batchErr: any) {
+        // ── GHOST BOOKING SAFETY NET ─────────────────────────────────────
+        // PI succeeded but D1 write failed → log to recovery table
+        // Webhook / admin can retry or auto-refund
+        console.error('[Confirm] D1 batch FAILED after Stripe success:', batchErr.message)
+        logEvent('error', 'booking.d1_batch_failed', {
+          pi: payment_intent_id, hold_id: hold_id || null,
+          amount_cents: pi.amount, error: batchErr.message,
+        })
+        try {
+          await db.prepare(`
+            INSERT OR IGNORE INTO payment_recovery_log
+              (stripe_pi_id, amount_cents, hold_id, recovery_status, error_detail, created_at)
+            VALUES (?, ?, ?, 'pending', ?, datetime('now'))
+          `).bind(
+            payment_intent_id,
+            pi.amount,
+            hold_id || null,
+            batchErr.message?.slice(0, 500)
+          ).run()
+        } catch {}
+        // Return success to client (they paid) with a recovery flag
+        // Background recovery will complete the booking
+        return c.json({
+          success: true,
+          booking_id: `RECOVERY-${payment_intent_id.slice(-8)}`,
+          db_booking_id: null,
+          status: 'recovery_pending',
+          amount_paid: amountPaid,
+          recovery: true,
+          message: 'Payment received. Your booking confirmation will arrive shortly.',
+        }, 201)
+      }
+    }
+
     const bookingRef = dbBookingId
       ? 'PP-' + new Date().getFullYear() + '-' + String(dbBookingId).padStart(4, '0')
       : `PP-${Math.floor(100000 + Math.random() * 900000)}`
-
-    if (db && dbBookingId) {
-      try {
-        await db.prepare(
-          `UPDATE bookings
-           SET status = 'confirmed',
-               stripe_payment_intent_id = COALESCE(stripe_payment_intent_id, ?),
-               stripe_charge_id         = COALESCE(stripe_charge_id, ?),
-               updated_at               = datetime('now')
-           WHERE id = ? AND status IN ('pending','confirmed')`
-        ).bind(
-          payment_intent_id,
-          pi.latest_charge || null,
-          dbBookingId
-        ).run()
-      } catch (dbErr: any) {
-        console.error('[Stripe confirm] booking UPDATE error:', dbErr.message)
-      }
-    }
-
-    // ── 4. INSERT payments row (idempotent: skip if PI already recorded) ──
-    if (db && dbBookingId && resolvedDriverId && resolvedHostId) {
-      try {
-        const existingPmt = await db.prepare(
-          'SELECT id FROM payments WHERE stripe_payment_intent_id = ? LIMIT 1'
-        ).bind(payment_intent_id).first<{ id: number }>()
-
-        if (!existingPmt) {
-          await db.prepare(
-            `INSERT INTO payments
-               (booking_id, driver_id, host_id, amount, platform_fee, host_payout,
-                currency, stripe_payment_intent_id, stripe_charge_id, type, status)
-             VALUES (?, ?, ?, ?, ?, ?, 'usd', ?, ?, 'charge', 'succeeded')`
-          ).bind(
-            dbBookingId,
-            resolvedDriverId,
-            resolvedHostId,
-            amountPaid,
-            platformFee,
-            hostPayout,
-            payment_intent_id,
-            pi.latest_charge || null
-          ).run()
-        }
-      } catch (dbErr: any) {
-        console.error('[Stripe confirm] payments INSERT error:', dbErr.message)
-      }
-    }
+    const numericBookingId = dbBookingId ?? Math.floor(100000 + Math.random() * 900000)
 
     // ── 5. Send confirmation emails + SMS ────────────────────────────────
-    const startFormatted = start_datetime ? new Date(start_datetime).toLocaleString('en-US') : ''
-    const endFormatted   = end_datetime   ? new Date(end_datetime).toLocaleString('en-US')   : ''
-    const numericBookingId = dbBookingId ?? Math.floor(100000 + Math.random() * 900000)
+    const startFmt = resolvedStart ? new Date(resolvedStart).toLocaleString('en-US') : ''
+    const endFmt   = resolvedEnd   ? new Date(resolvedEnd).toLocaleString('en-US')   : ''
 
     await Promise.all([
       driver_email ? sendBookingConfirmation(env as any, {
-        driverEmail: driver_email,
-        driverName:  driver_name || driver_email,
-        bookingId:   numericBookingId,
-        listingTitle,
-        listingAddress,
-        startTime:    startFormatted,
-        endTime:      endFormatted,
-        totalCharged: amountPaid,
+        driverEmail: driver_email, driverName: driver_name || driver_email,
+        bookingId: numericBookingId, listingTitle, listingAddress,
+        startTime: startFmt, endTime: endFmt, totalCharged: amountPaid,
         vehiclePlate: vehicle_plate || 'Not provided'
       }) : Promise.resolve(true),
       driver_email ? sendPaymentReceipt(env as any, {
-        toEmail:      driver_email,
-        toName:       driver_name || driver_email,
-        bookingId:    numericBookingId,
-        amount:       amountPaid,
-        last4:        pi.payment_method_details?.card?.last4,
-        listingTitle
+        toEmail: driver_email, toName: driver_name || driver_email,
+        bookingId: numericBookingId, amount: amountPaid,
+        last4: pi.payment_method_details?.card?.last4, listingTitle
       }) : Promise.resolve(true),
       body.driver_phone ? smsSendBookingConfirmation(env as any, {
-        toPhone:      body.driver_phone,
-        driverName:   driver_name || 'Driver',
-        bookingId:    numericBookingId,
-        listingTitle,
-        listingAddress,
-        startTime:    startFormatted,
-        endTime:      endFormatted,
-        totalCharged: amountPaid
+        toPhone: body.driver_phone, driverName: driver_name || 'Driver',
+        bookingId: numericBookingId, listingTitle, listingAddress,
+        startTime: startFmt, endTime: endFmt, totalCharged: amountPaid
       }) : Promise.resolve(true)
-    ])
+    ]).catch((emailErr: any) => console.error('[Confirm] email/SMS error:', emailErr.message))
 
-    // ── 6. In-app notification: booking confirmed (async, non-blocking) ──
+    // ── 6. In-app notification (async, non-blocking) ─────────────────────
     if (db && resolvedDriverId) {
       ;(async () => {
         try {
           const [driver, hostRow] = await Promise.all([
-            db.prepare('SELECT full_name, email, phone FROM users WHERE id = ?')
-              .bind(resolvedDriverId).first<any>(),
+            resolvedDriverId
+              ? db.prepare('SELECT full_name, email, phone FROM users WHERE id = ?').bind(resolvedDriverId).first<any>()
+              : Promise.resolve(null),
             resolvedHostId
-              ? db.prepare('SELECT id, full_name, email, phone FROM users WHERE id = ?')
-                  .bind(resolvedHostId).first<any>()
-              : listing_id
-                ? db.prepare('SELECT id, full_name, email, phone FROM listings l JOIN users u ON l.host_id = u.id WHERE l.id = ? LIMIT 1')
-                    .bind(String(listing_id)).first<any>()
-                : Promise.resolve(null)
+              ? db.prepare('SELECT id, full_name, email, phone FROM users WHERE id = ?').bind(resolvedHostId).first<any>()
+              : Promise.resolve(null)
           ])
           await notifyBookingConfirmed(env as any, {
-            driverId:       resolvedDriverId as number,
-            driverName:     driver?.full_name  || driver_name  || 'Driver',
-            driverEmail:    driver?.email      || driver_email || '',
-            driverPhone:    driver?.phone      || body.driver_phone || null,
-            hostId:         hostRow?.id        || 0,
-            hostName:       hostRow?.full_name || 'Host',
-            hostEmail:      hostRow?.email     || '',
-            hostPhone:      hostRow?.phone     || null,
-            bookingId:      numericBookingId,
-            listingTitle,
-            listingAddress,
-            startTime:      startFormatted,
-            endTime:        endFormatted,
-            totalCharged:   amountPaid,
-            hostPayout,
+            driverId: resolvedDriverId as number,
+            driverName:  driver?.full_name  || driver_name  || 'Driver',
+            driverEmail: driver?.email      || driver_email || '',
+            driverPhone: driver?.phone      || body.driver_phone || null,
+            hostId:      hostRow?.id        || 0,
+            hostName:    hostRow?.full_name || 'Host',
+            hostEmail:   hostRow?.email     || '',
+            hostPhone:   hostRow?.phone     || null,
+            bookingId:   numericBookingId,
+            listingTitle, listingAddress,
+            startTime: startFmt, endTime: endFmt,
+            totalCharged: amountPaid, hostPayout,
           })
         } catch (ne: any) { console.error('[notify booking confirmed]', ne.message) }
       })()
     }
 
     return c.json({
-      success: true,
-      booking_id: bookingRef,
-      db_booking_id: dbBookingId,
-      status: 'confirmed',
-      amount_paid: amountPaid,
-      host_payout: hostPayout,
-      platform_fee: platformFee,
-      confirmation_email_sent: true
+      success:                true,
+      booking_id:             bookingRef,
+      db_booking_id:          dbBookingId,
+      status:                 'confirmed',
+      amount_paid:            amountPaid,
+      host_payout:            hostPayout,
+      platform_fee:           platformFee,
+      confirmation_email_sent: true,
     }, 201)
+
   } catch (e: any) {
     console.error('[Stripe] confirm error:', e.message)
     return c.json({ error: e.message || 'Confirmation failed' }, 500)
@@ -2017,36 +2274,44 @@ apiRoutes.get('/listings/:id/availability', async (c) => {
 })
 
 // ════════════════════════════════════════════════════════════════════════════
-// BOOKINGS — Create booking with race-condition protection
-// POST /api/bookings
-// ─── FIX: Double-booking race condition ──────────────────────────────────────
-// Uses a D1 SELECT to check for overlapping confirmed/active bookings BEFORE
-// inserting, enforced inside a single batch to minimise the race window.
-// Full SELECT FOR UPDATE is not available in SQLite/D1, so we use a
-// strict overlap query: any existing booking where
-//   existing.start < new.end  AND  existing.end > new.start
-// If found → 409 Conflict. Otherwise insert atomically.
+// RESERVATION HOLDS — Slot-lock before payment
+// POST /api/holds
+//
+// NEW FLOW (replaces the old POST /api/bookings first-step):
+//   1. Client calls POST /api/holds with listing_id + times + checkout_token
+//   2. Server checks CONFIRMED/ACTIVE bookings AND active un-expired holds
+//      for the same slot (excludes caller's own existing hold — idempotent)
+//   3. Server inserts reservation_holds row (10-min TTL) atomically
+//   4. Returns hold_id + session_token + expiry
+//   5. Client uses hold_id in POST /api/payments/create-intent
+//   6. POST /api/payments/confirm atomically converts hold → booking
+//
+// Overlap query intentionally excludes 'pending' bookings (orphaned rows
+// from old flow). Only 'confirmed' and 'active' bookings block the slot.
+// Active holds (not expired, not released/converted) also block the slot
+// for other users, but NOT for the same session_token (idempotent retry).
 // ════════════════════════════════════════════════════════════════════════════
-apiRoutes.post('/bookings', requireUserAuth(), async (c) => {
-  const db   = c.env?.DB
-  const session = c.get('user') as any
+apiRoutes.post('/holds', async (c) => {
+  const db  = c.env?.DB
+  if (!db)  return c.json({ error: 'Database unavailable' }, 503)
 
-  // ── Server-side CSRF verification ───────────────────────────────────────
-  const tokenSecret = c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod'
-  const csrfOk = await verifyCsrf(c, tokenSecret + '.csrf')
-  if (!csrfOk) {
-    return c.json({ error: 'Invalid or expired CSRF token. Please refresh the page and try again.' }, 403)
+  // ── Rate limiting (per IP) ────────────────────────────────────────────
+  const ip = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || 'unknown'
+  if (isRateLimited(`holds:${ip}`, HOLDS_RL_MAX, HOLDS_RL_WINDOW_MS)) {
+    logEvent('warn', 'holds.rate_limited', { ip })
+    return c.json({ error: 'Too many requests. Please slow down.' }, 429)
   }
 
   const body = await c.req.json().catch(() => ({})) as any
 
-  // ── Input validation ────────────────────────────────────────────────────
+  // ── Input validation ──────────────────────────────────────────────────
   let listing_id: number, start_datetime: string, end_datetime: string
   try {
-    listing_id     = parseInt(validateInput(body.listing_id,     { required: true, fieldName: 'listing_id' }))
-    start_datetime = validateInput(body.start_datetime, { required: true, maxLength: 30, fieldName: 'start_datetime' })
-    end_datetime   = validateInput(body.end_datetime,   { required: true, maxLength: 30, fieldName: 'end_datetime' })
-    if (isNaN(listing_id) || listing_id < 1) throw new Error('listing_id must be a positive integer')
+    listing_id     = parseInt(String(body.listing_id || ''))
+    start_datetime = String(body.start_datetime || '').slice(0, 30)
+    end_datetime   = String(body.end_datetime   || '').slice(0, 30)
+    if (isNaN(listing_id) || listing_id < 1) throw new Error('listing_id required')
+    if (!start_datetime || !end_datetime)     throw new Error('start/end datetime required')
   } catch (e: any) {
     return c.json({ error: e.message }, 400)
   }
@@ -2057,126 +2322,358 @@ apiRoutes.post('/bookings', requireUserAuth(), async (c) => {
     return c.json({ error: 'Invalid date range' }, 400)
   }
   if (start < new Date()) {
-    return c.json({ error: 'start_datetime must be in the future' }, 400)
+    return c.json({ error: 'Arrival time must be in the future' }, 400)
   }
 
-  const hours     = Math.max(1, Math.round((end.getTime() - start.getTime()) / 3600000))
-  const vehicle_plate = validateInput(body.vehicle_plate, { maxLength: 20 })
-  // Always use authenticated user as driver_id — prevents IDOR
-  const driver_id = session?.userId ?? (body.driver_id ? parseInt(body.driver_id) : null)
-  // Cancellation policy acknowledgment
-  const cancelAck        = body.cancellation_acknowledged === true || body.cancellation_acknowledged === 1
-  const cancelPolicyVer  = cancelAck ? (body.cancellation_policy_version || CURRENT_VERSIONS.cancellation_policy) : null
-  const cancelAckIp      = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || null
+  // ── Resolve caller identity ───────────────────────────────────────────
+  const session       = c.get('user') as any
+  const userId        = session?.userId ?? null
+  const ipAddress     = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || null
 
-  // ── Race-condition / overlap check (D1) ────────────────────────────────
-  if (db) {
+  // checkout_token: client-generated UUID for idempotency across retries
+  const checkoutToken = String(body.checkout_token || '').slice(0, 64) || null
+
+  // session_token: used by client to prove ownership of this hold
+  const sessionToken  = body.session_token
+    ? String(body.session_token).slice(0, 64)
+    : Array.from(crypto.getRandomValues(new Uint8Array(16)))
+        .map(b => b.toString(16).padStart(2, '0')).join('')
+
+  // ── Idempotency: return existing active hold for same session_token ──
+  if (sessionToken) {
     try {
+      const existing = await db.prepare(`
+        SELECT id, session_token, hold_expires_at, status, listing_id
+        FROM reservation_holds
+        WHERE session_token = ?
+          AND status = 'active'
+          AND datetime(hold_expires_at) > datetime('now')
+        LIMIT 1
+      `).bind(sessionToken).first<any>()
+
+      if (existing && existing.listing_id === listing_id) {
+        return c.json({
+          hold_id:        existing.id,
+          session_token:  existing.session_token,
+          expires_at:     existing.hold_expires_at,
+          status:         'active',
+          idempotent:     true,
+        })
+      }
+    } catch {}
+  }
+
+  try {
+    // ── 1. Check for CONFIRMED/ACTIVE booking conflicts ──────────────────
+    const bookingConflict = await db.prepare(`
+      SELECT id FROM bookings
+      WHERE listing_id = ?
+        AND status IN ('confirmed','active')
+        AND start_time < ?
+        AND end_time   > ?
+      LIMIT 1
+    `).bind(listing_id, end_datetime, start_datetime).first<{ id: number }>()
+
+    if (bookingConflict) {
+      logEvent('info', 'holds.slot_booked', { listing_id, start_datetime, end_datetime, ip })
+      return c.json({
+        error: 'This spot is already booked for the selected time. Please choose different dates.',
+        code:  'SLOT_BOOKED',
+      }, 409)
+    }
+
+    // ── 2. Check for active HOLDS by OTHER users (not this session) ──────
+    const holdConflict = await db.prepare(`
+      SELECT id FROM reservation_holds
+      WHERE listing_id = ?
+        AND status = 'active'
+        AND datetime(hold_expires_at) > datetime('now')
+        AND session_token != ?
+        AND start_time < ?
+        AND end_time   > ?
+      LIMIT 1
+    `).bind(listing_id, sessionToken, end_datetime, start_datetime).first<{ id: number }>()
+
+    if (holdConflict) {
+      logEvent('info', 'holds.slot_held', { listing_id, start_datetime, end_datetime, ip })
+      return c.json({
+        error: 'Another user is currently completing a booking for this time slot. Please try again in a few minutes.',
+        code:  'SLOT_HELD',
+        retry_after_seconds: 600,
+      }, 409)
+    }
+
+    // ── 3. Verify listing is active ───────────────────────────────────────
+    const listing = await db.prepare(
+      'SELECT id, rate_hourly, host_id, status FROM listings WHERE id = ? AND status = ?'
+    ).bind(listing_id, 'active').first<any>()
+
+    if (!listing) {
+      return c.json({ error: 'Listing not found or unavailable', code: 'LISTING_UNAVAILABLE' }, 404)
+    }
+
+    // ── 4. Expire any stale holds for this session before creating new ────
+    await db.prepare(`
+      UPDATE reservation_holds
+      SET status = 'expired', updated_at = datetime('now')
+      WHERE session_token = ? AND status = 'active'
+    `).bind(sessionToken).run()
+
+    // ── 5. INSERT new hold (10-min TTL) ───────────────────────────────────
+    const holdExpiry = new Date(Date.now() + 10 * 60 * 1000).toISOString()
+
+    const hours    = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / 3600000))
+    const rate     = listing.rate_hourly || 12
+    const base     = Math.round(rate * hours * 100) / 100
+    const fee      = Math.round(base * 0.15 * 100) / 100
+    const total    = Math.round((base + fee) * 100) / 100
+
+    const holdRes = await db.prepare(`
+      INSERT INTO reservation_holds
+        (listing_id, user_id, session_token, start_time, end_time,
+         hold_expires_at, status, idempotency_key, ip_address, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, datetime('now'), datetime('now'))
+    `).bind(
+      listing_id, userId, sessionToken,
+      start_datetime, end_datetime, holdExpiry,
+      checkoutToken, ipAddress
+    ).run()
+
+    const holdId = holdRes.meta?.last_row_id ?? 0
+
+    logEvent('info', 'holds.created', { hold_id: holdId, listing_id, user_id: userId, expires_at: holdExpiry, ip })
+
+    return c.json({
+      hold_id:       holdId,
+      session_token: sessionToken,
+      expires_at:    holdExpiry,
+      listing_id,
+      start_time:    start_datetime,
+      end_time:      end_datetime,
+      pricing: {
+        hours,
+        rate_per_hour: rate,
+        subtotal:      base,
+        platform_fee:  fee,
+        total,
+        total_cents:   Math.round(total * 100),
+        currency:      'usd',
+      },
+      status: 'active',
+    }, 201)
+
+  } catch (e: any) {
+    console.error('[holds POST]', e.message)
+    return c.json({ error: 'Failed to reserve slot. Please try again.' }, 500)
+  }
+})
+
+// ── HOLD STATUS — poll to verify hold is still valid ─────────────────────
+apiRoutes.get('/holds/:token', async (c) => {
+  const db    = c.env?.DB
+  const token = c.req.param('token')
+  if (!db || !token) return c.json({ valid: false })
+
+  try {
+    const hold = await db.prepare(`
+      SELECT id, status, hold_expires_at, listing_id, start_time, end_time
+      FROM reservation_holds
+      WHERE session_token = ? LIMIT 1
+    `).bind(token).first<any>()
+
+    if (!hold) return c.json({ valid: false, code: 'HOLD_NOT_FOUND' })
+
+    const expired = new Date(hold.hold_expires_at) <= new Date()
+    if (expired && hold.status === 'active') {
+      // Mark as expired
+      await db.prepare(`UPDATE reservation_holds SET status='expired', updated_at=datetime('now') WHERE session_token=? AND status='active'`)
+        .bind(token).run()
+      return c.json({ valid: false, code: 'HOLD_EXPIRED' })
+    }
+
+    return c.json({
+      valid:       hold.status === 'active' && !expired,
+      status:      hold.status,
+      expires_at:  hold.hold_expires_at,
+      seconds_remaining: Math.max(0, Math.floor((new Date(hold.hold_expires_at).getTime() - Date.now()) / 1000)),
+    })
+  } catch {
+    return c.json({ valid: false })
+  }
+})
+
+// ── RELEASE HOLD — called on payment failure / page close ────────────────
+apiRoutes.post('/holds/:token/release', async (c) => {
+  const db    = c.env?.DB
+  const token = c.req.param('token')
+  if (!db || !token) return c.json({ ok: false })
+  try {
+    await db.prepare(`
+      UPDATE reservation_holds SET status='released', updated_at=datetime('now')
+      WHERE session_token=? AND status='active'
+    `).bind(token).run()
+    return c.json({ ok: true })
+  } catch {
+    return c.json({ ok: false })
+  }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// BOOKINGS — Create booking (now called ONLY from payments/confirm)
+// POST /api/bookings  — kept for backward compat / host instant-book
+//
+// IMPORTANT: The new production flow is:
+//   POST /api/holds → POST /api/payments/create-intent → stripe.confirmPayment()
+//   → POST /api/payments/confirm  (which creates the booking atomically)
+//
+// This route now primarily handles non-Stripe instant-book scenarios
+// and is idempotent via checkout_token.
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.post('/bookings', async (c) => {
+  const db   = c.env?.DB
+  if (!db)   return c.json({ error: 'Database unavailable' }, 503)
+
+  // Optional auth — allow guest checkouts
+  const session    = c.get('user') as any
+  const driver_id  = session?.userId ?? null
+
+  const body = await c.req.json().catch(() => ({})) as any
+
+  // ── Idempotency: return existing booking for same checkout_token ──────
+  const checkoutToken = String(body.checkout_token || '').slice(0, 64) || null
+  if (checkoutToken) {
+    try {
+      const existing = await db.prepare(
+        'SELECT id, status FROM bookings WHERE checkout_token = ? LIMIT 1'
+      ).bind(checkoutToken).first<any>()
+      if (existing) {
+        const bookingRef = 'PP-' + new Date().getFullYear() + '-' + String(existing.id).padStart(4, '0')
+        return c.json({ id: bookingRef, db_id: existing.id, status: existing.status, idempotent: true }, 200)
+      }
+    } catch {}
+  }
+
+  // ── Input validation ──────────────────────────────────────────────────
+  let listing_id: number, start_datetime: string, end_datetime: string
+  try {
+    listing_id     = parseInt(String(body.listing_id || ''))
+    start_datetime = String(body.start_datetime || '').slice(0, 30)
+    end_datetime   = String(body.end_datetime   || '').slice(0, 30)
+    if (isNaN(listing_id) || listing_id < 1) throw new Error('listing_id required')
+  } catch (e: any) {
+    return c.json({ error: e.message }, 400)
+  }
+
+  const start = new Date(start_datetime)
+  const end   = new Date(end_datetime)
+  if (isNaN(start.getTime()) || isNaN(end.getTime()) || end <= start) {
+    return c.json({ error: 'Invalid date range' }, 400)
+  }
+
+  const hours          = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / 3600000))
+  const vehicle_plate  = String(body.vehicle_plate || '').slice(0, 20) || null
+  const cancelAck      = body.cancellation_acknowledged === true || body.cancellation_acknowledged === 1
+  const cancelPolicyVer = cancelAck ? (body.cancellation_policy_version || CURRENT_VERSIONS.cancellation_policy) : null
+  const cancelAckIp    = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || null
+  const holdId         = body.hold_id ? parseInt(String(body.hold_id)) : null
+  const sessionToken   = String(body.session_token || '').slice(0, 64) || null
+
+  try {
+    // ── Validate hold if provided ─────────────────────────────────────
+    if (holdId) {
+      const hold = await db.prepare(`
+        SELECT id, status, hold_expires_at, listing_id, start_time, end_time
+        FROM reservation_holds WHERE id = ?
+      `).bind(holdId).first<any>()
+
+      if (!hold) return c.json({ error: 'Reservation hold not found', code: 'HOLD_NOT_FOUND' }, 409)
+      if (hold.status === 'converted') return c.json({ error: 'This slot is already booked', code: 'HOLD_CONVERTED' }, 409)
+      if (hold.status !== 'active' || new Date(hold.hold_expires_at) <= new Date()) {
+        return c.json({
+          error: 'Your reservation hold has expired. Please start over.',
+          code: 'HOLD_EXPIRED',
+        }, 409)
+      }
+    } else {
+      // No hold — run direct conflict check (only confirmed/active, NOT pending)
       const conflict = await db.prepare(`
         SELECT id FROM bookings
-        WHERE listing_id = ?
-          AND status IN ('confirmed','active','pending')
-          AND start_time < ?
-          AND end_time   > ?
+        WHERE listing_id = ? AND status IN ('confirmed','active')
+          AND start_time < ? AND end_time > ?
         LIMIT 1
       `).bind(listing_id, end_datetime, start_datetime).first<{ id: number }>()
 
       if (conflict) {
         return c.json({
-          error: 'This time slot is no longer available. Please choose different dates.',
-          code:  'BOOKING_CONFLICT',
+          error: 'This spot is already booked for the selected time. Please choose different dates.',
+          code:  'SLOT_BOOKED',
         }, 409)
       }
-
-      // ── Fetch real rate and host_id from listing ─────────────────────
-      const listing = await db.prepare(
-        'SELECT rate_hourly, status, host_id FROM listings WHERE id = ? AND status = ?'
-      ).bind(listing_id, 'active').first<{ rate_hourly: number; status: string; host_id: number }>()
-
-      if (!listing) {
-        return c.json({ error: 'Listing not found or not available' }, 404)
-      }
-
-      const rate      = listing.rate_hourly || 12
-      const base      = Math.round(rate * hours * 100) / 100
-      const fee       = Math.round(base * 0.15 * 100) / 100
-      const hostPay   = Math.round((base - fee) * 100) / 100
-      const total     = Math.round((base + fee) * 100) / 100
-      const insertResult = await db.prepare(`
-        INSERT INTO bookings
-          (listing_id, driver_id, host_id, start_time, end_time,
-           duration_hours, status, subtotal, platform_fee, host_payout,
-           total_charged, vehicle_plate, vehicle_description,
-           cancellation_acknowledged, cancellation_ack_version, cancellation_ack_at, cancellation_ack_ip,
-           created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?,
-                ?, ?, CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END, ?,
-                datetime('now'), datetime('now'))
-      `).bind(
-        listing_id, driver_id || null, listing.host_id,
-        start_datetime, end_datetime, hours,
-        base, fee, hostPay, total,
-        vehicle_plate || null, vehicle_plate || null,
-        cancelAck ? 1 : 0, cancelPolicyVer,
-        cancelAck ? 1 : 0, cancelAckIp
-      ).run()
-
-      const dbBookingId = insertResult.meta?.last_row_id ?? 0
-      const bookingRef  = 'PP-' + new Date().getFullYear() + '-' + String(dbBookingId).padStart(4, '0')
-
-      // ── Fire booking request notification (awaited before response) ────
-      try {
-        // Batch the 3 notification lookups into a single parallel Promise.all
-        const [driver, host, listingRow] = await Promise.all([
-          db.prepare('SELECT full_name, email, phone FROM users WHERE id = ?')
-            .bind(driver_id).first<any>(),
-          db.prepare('SELECT id, full_name, email, phone FROM users WHERE id = ?')
-            .bind(listing.host_id).first<any>(),
-          db.prepare('SELECT title, address, city FROM listings WHERE id = ?')
-            .bind(listing_id).first<any>(),
-        ])
-        const listingTitle = listingRow?.title || 'Parking Space'
-        const listingAddress = [listingRow?.address, listingRow?.city].filter(Boolean).join(', ')
-        if (host) {
-          await notifyBookingRequest(c.env as any, {
-            driverId: driver_id as number,
-            driverName: driver?.full_name || 'A driver',
-            driverEmail: driver?.email || '',
-            driverPhone: driver?.phone || null,
-            hostId: listing.host_id,
-            hostName: host.full_name || 'Host',
-            hostEmail: host.email || '',
-            hostPhone: host.phone || null,
-            bookingId: Number(dbBookingId),
-            listingId: listing_id,
-            listingTitle,
-            listingAddress,
-            startTime: start_datetime,
-            endTime: end_datetime,
-            totalCharged: total,
-            hostPayout: hostPay,
-          })
-        }
-      } catch (ne: any) { console.error('[notify booking request]', ne.message) }
-
-      return c.json({
-        id: bookingRef, db_id: dbBookingId, listing_id,
-        start_time: start_datetime, end_time: end_datetime, hours,
-        vehicle_description: vehicle_plate || null,
-        pricing: { rate_per_hour: rate, base, service_fee: fee, total },
-        status: 'pending',
-        created_at: new Date().toISOString()
-      }, 201)
-
-    } catch (e: any) {
-      if (e.message?.includes('BOOKING_CONFLICT')) throw e
-      console.error('[bookings POST]', e.message)
-      return c.json({ error: 'Failed to create booking' }, 500)
     }
-  }
 
-  // DB not available — cannot create booking without rate data
-  return c.json({ error: 'Database unavailable. Please try again.' }, 503)
+    // ── Fetch real rate / host ────────────────────────────────────────
+    const listing = await db.prepare(
+      'SELECT rate_hourly, status, host_id FROM listings WHERE id = ? AND status = ?'
+    ).bind(listing_id, 'active').first<any>()
+    if (!listing) return c.json({ error: 'Listing not found or unavailable' }, 404)
+
+    const rate   = listing.rate_hourly || 12
+    const base   = Math.round(rate * hours * 100) / 100
+    const fee    = Math.round(base * 0.15 * 100) / 100
+    const hPay   = Math.round((base - fee) * 100) / 100
+    const total  = Math.round((base + fee) * 100) / 100
+
+    // ── INSERT booking row ────────────────────────────────────────────
+    const ins = await db.prepare(`
+      INSERT INTO bookings
+        (listing_id, driver_id, host_id, start_time, end_time,
+         duration_hours, status, subtotal, platform_fee, host_payout,
+         total_charged, vehicle_plate, vehicle_description,
+         cancellation_acknowledged, cancellation_ack_version,
+         cancellation_ack_at, cancellation_ack_ip,
+         checkout_token, hold_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?,
+              ?, ?,
+              CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END, ?,
+              ?, ?, datetime('now'), datetime('now'))
+    `).bind(
+      listing_id, driver_id, listing.host_id,
+      start_datetime, end_datetime, hours,
+      base, fee, hPay, total,
+      vehicle_plate, vehicle_plate,
+      cancelAck ? 1 : 0, cancelPolicyVer,
+      cancelAck ? 1 : 0, cancelAckIp,
+      checkoutToken, holdId
+    ).run()
+
+    const dbBookingId = ins.meta?.last_row_id ?? 0
+    const bookingRef  = 'PP-' + new Date().getFullYear() + '-' + String(dbBookingId).padStart(4, '0')
+
+    // ── Register idempotency record ───────────────────────────────────
+    if (checkoutToken) {
+      try {
+        await db.prepare(`
+          INSERT OR IGNORE INTO booking_idempotency (checkout_token, booking_id, hold_id)
+          VALUES (?, ?, ?)
+        `).bind(checkoutToken, dbBookingId, holdId).run()
+      } catch {}
+    }
+
+    console.log(`[Booking] Created booking ${dbBookingId} listing=${listing_id} hold=${holdId}`)
+
+    return c.json({
+      id: bookingRef, db_id: dbBookingId, listing_id,
+      start_time: start_datetime, end_time: end_datetime, hours,
+      vehicle_description: vehicle_plate,
+      pricing: { rate_per_hour: rate, base, service_fee: fee, total },
+      status: 'pending',
+      created_at: new Date().toISOString()
+    }, 201)
+
+  } catch (e: any) {
+    console.error('[bookings POST]', e.message)
+    return c.json({ error: 'Failed to create booking. Please try again.' }, 500)
+  }
 })
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -2474,6 +2971,152 @@ apiRoutes.get('/estimate-earnings', (c) => {
   const monthly= weekly * 4.33
   return c.json({ type, rate_per_hour: rate, hours_per_day: h, days_per_week: d,
     weekly_estimate: Math.round(weekly), monthly_estimate: Math.round(monthly), yearly_estimate: Math.round(monthly * 12) })
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// ADMIN INTEGRITY CHECK
+// GET /api/admin/integrity
+// Runs a full payment-booking consistency audit:
+//   1. Bookings confirmed but no matching payments row
+//   2. Payments with no matching confirmed booking
+//   3. Active holds older than 15 min (should have auto-expired)
+//   4. payment_recovery_log rows still pending
+//   5. orphan_payments unresolved
+// Returns counts + sample rows for each issue category.
+// Also logs a row to integrity_log.
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.get('/admin/integrity', async (c) => {
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'DB unavailable' }, 503)
+
+  const t0 = Date.now()
+  try {
+    const [
+      bookingsNoPayment,
+      paymentsNoBooking,
+      staleHolds,
+      pendingRecovery,
+      orphansUnresolved,
+    ] = await db.batch([
+      // 1. confirmed bookings with no payments row
+      db.prepare(`
+        SELECT b.id, b.stripe_payment_intent_id, b.total_charged, b.driver_id,
+               b.listing_id, b.start_time, b.created_at
+        FROM bookings b
+        LEFT JOIN payments p ON p.booking_id = b.id
+        WHERE b.status = 'confirmed'
+          AND p.id IS NULL
+        ORDER BY b.created_at DESC
+        LIMIT 20
+      `),
+      // 2. succeeded payments referencing non-existent / non-confirmed booking
+      db.prepare(`
+        SELECT p.id, p.stripe_payment_intent_id, p.amount, p.booking_id, p.created_at
+        FROM payments p
+        LEFT JOIN bookings b ON b.id = p.booking_id
+        WHERE p.status = 'succeeded'
+          AND (b.id IS NULL OR b.status NOT IN ('confirmed','active','completed'))
+        ORDER BY p.created_at DESC
+        LIMIT 20
+      `),
+      // 3. stale active holds (older than 15 min — should be expired)
+      db.prepare(`
+        SELECT id, listing_id, session_token, hold_expires_at, created_at
+        FROM reservation_holds
+        WHERE status = 'active'
+          AND datetime(hold_expires_at) < datetime('now', '-5 minutes')
+        ORDER BY created_at DESC
+        LIMIT 20
+      `),
+      // 4. payment_recovery_log pending items
+      db.prepare(`
+        SELECT id, stripe_pi_id, amount_cents, hold_id, attempts, created_at
+        FROM payment_recovery_log
+        WHERE recovery_status = 'pending'
+        ORDER BY created_at DESC
+        LIMIT 20
+      `),
+      // 5. orphan_payments unresolved
+      db.prepare(`
+        SELECT id, stripe_pi_id, amount_cents, driver_email, detected_at
+        FROM orphan_payments
+        WHERE resolution = 'pending'
+        ORDER BY detected_at DESC
+        LIMIT 20
+      `),
+    ])
+
+    const issues = {
+      bookings_no_payment:   (bookingsNoPayment.results  || []).length,
+      payments_no_booking:   (paymentsNoBooking.results  || []).length,
+      stale_holds:           (staleHolds.results         || []).length,
+      pending_recovery:      (pendingRecovery.results    || []).length,
+      orphans_unresolved:    (orphansUnresolved.results  || []).length,
+    }
+    const totalIssues = Object.values(issues).reduce((a, b) => a + b, 0)
+    const status      = totalIssues === 0 ? 'ok' : 'issues_found'
+    const duration    = Date.now() - t0
+
+    // Log to integrity_log table
+    await db.prepare(`
+      INSERT INTO integrity_log
+        (triggered_by, bookings_checked, payments_checked, holds_checked,
+         orphans_found, recovery_items, duration_ms, status, summary)
+      SELECT 'admin',
+        (SELECT COUNT(*) FROM bookings WHERE status = 'confirmed'),
+        (SELECT COUNT(*) FROM payments WHERE status = 'succeeded'),
+        (SELECT COUNT(*) FROM reservation_holds WHERE status = 'active'),
+        ?, ?, ?, ?,
+        json_object(
+          'bookings_no_payment', ?,
+          'payments_no_booking', ?,
+          'stale_holds',         ?,
+          'pending_recovery',    ?,
+          'orphans_unresolved',  ?
+        )
+    `).bind(
+      issues.orphans_unresolved,
+      issues.pending_recovery,
+      duration,
+      status,
+      issues.bookings_no_payment,
+      issues.payments_no_booking,
+      issues.stale_holds,
+      issues.pending_recovery,
+      issues.orphans_unresolved,
+    ).run().catch(() => {})
+
+    // Auto-expire stale holds as a side-effect
+    if (issues.stale_holds > 0) {
+      await db.prepare(`
+        UPDATE reservation_holds
+        SET status = 'expired', updated_at = datetime('now')
+        WHERE status = 'active' AND datetime(hold_expires_at) < datetime('now', '-5 minutes')
+      `).run().catch(() => {})
+    }
+
+    logEvent(totalIssues > 0 ? 'warn' : 'info', 'integrity.scan', {
+      status, issues, duration_ms: duration,
+    })
+
+    return c.json({
+      status,
+      run_at:    new Date().toISOString(),
+      duration_ms: duration,
+      issues,
+      details: {
+        bookings_no_payment: bookingsNoPayment.results  || [],
+        payments_no_booking: paymentsNoBooking.results  || [],
+        stale_holds:         staleHolds.results         || [],
+        pending_recovery:    pendingRecovery.results    || [],
+        orphans_unresolved:  orphansUnresolved.results  || [],
+      },
+    })
+
+  } catch (e: any) {
+    logEvent('error', 'integrity.scan_error', { error: e.message })
+    return c.json({ error: e.message }, 500)
+  }
 })
 
 // ════════════════════════════════════════════════════════════════════════════

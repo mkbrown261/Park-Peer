@@ -15,12 +15,16 @@ async function stripeRequest(
   env: Env,
   method: string,
   path: string,
-  body?: Record<string, string | number | boolean>
+  body?: Record<string, string | number | boolean>,
+  idempotencyKey?: string
 ): Promise<any> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
     'Content-Type': 'application/x-www-form-urlencoded',
     'Stripe-Version': '2024-06-20'
+  }
+  if (idempotencyKey) {
+    headers['Idempotency-Key'] = idempotencyKey
   }
 
   const options: RequestInit = { method, headers }
@@ -41,7 +45,8 @@ export async function createPaymentIntent(
   env: Env,
   amountCents: number,
   currency: string = 'usd',
-  metadata: Record<string, string> = {}
+  metadata: Record<string, string> = {},
+  idempotencyKey?: string   // checkout_token passed by caller to prevent duplicate PIs
 ): Promise<{ clientSecret: string; paymentIntentId: string }> {
   const flatMeta: Record<string, string> = {}
   for (const [k, v] of Object.entries(metadata)) {
@@ -54,7 +59,7 @@ export async function createPaymentIntent(
     // Stripe form-encoding: automatic_payment_methods[enabled]=true
     'automatic_payment_methods[enabled]': 'true',
     ...flatMeta
-  } as any)
+  } as any, idempotencyKey ? `pi-${idempotencyKey}` : undefined)
 
   return { clientSecret: pi.client_secret, paymentIntentId: pi.id }
 }

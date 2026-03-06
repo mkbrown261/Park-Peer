@@ -141,10 +141,15 @@ bookingPage.get('/:id', async (c) => {
               <i class="fas fa-plus"></i> Add Card
             </button>
             <div id="new-card-form" class="hidden mt-3 space-y-2">
+              <!-- Hold countdown pill — visible after slot is locked -->
+              <div id="hold-countdown" class="hidden text-xs font-semibold text-indigo-300 bg-indigo-900/30 border border-indigo-500/30 rounded-lg px-3 py-1.5 mb-2 flex items-center gap-1.5">
+                <i class="fas fa-clock text-indigo-400"></i>
+                <span>Slot reserved…</span>
+              </div>
               <!-- Stripe Payment Element mounts here -->
               <div id="stripe-payment-element" class="bg-charcoal-200 border border-white/10 rounded-xl px-3 py-3 text-sm text-white"></div>
               <div id="stripe-card-errors" class="text-red-400 text-xs mt-1 hidden"></div>
-              <p class="text-xs text-gray-500 mt-1"><i class="fas fa-lock mr-1 text-green-400"></i>Secured by Stripe · 256-bit SSL</p>
+              <p class="text-xs text-gray-500 mt-1"><i class="fas fa-lock mr-1 text-green-400"></i>Secured by Stripe · 256-bit SSL · Slot held 10 min</p>
             </div>
           </div>
 
@@ -330,7 +335,15 @@ bookingPage.get('/:id', async (c) => {
     let stripeElements  = null;   // Elements group (Payment Element)
     let paymentElement  = null;   // The mounted Payment Element
     let stripeReady     = false;  // true once Stripe Elements are mounted
-    let dbBookingId     = null;   // D1 booking row id (from POST /api/bookings)
+    let dbBookingId     = null;   // D1 booking row id (set in payments/confirm)
+
+    // ── Hold + idempotency state ───────────────────────────────────────────
+    // checkout_token: UUID generated once per page-load; ties retries together
+    const checkoutToken = ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g,c=>(c^crypto.getRandomValues(new Uint8Array(1))[0]&15>>c/4).toString(16));
+    let holdId          = null;   // reservation_holds.id
+    let holdSessionToken= null;   // reservation_holds.session_token (proves ownership)
+    let holdExpiresAt   = null;   // ISO timestamp; show countdown to user
+    let stripePI        = null;   // paymentIntentId reused on retry
 
     // ── Load listing details from API ──────────────────────────────────────
     async function loadListing() {
@@ -365,20 +378,15 @@ bookingPage.get('/:id', async (c) => {
     }
 
     // ── Stripe initialisation ─────────────────────────────────────────────
-    // Called once when user clicks "Add Card". Fetches publishable key,
-    // creates a Payment Intent immediately, mounts Payment Element.
+    // NEW FLOW (ghost-booking-proof):
+    //   1. POST /api/holds        — lock the slot for 10 min (atomic overlap check)
+    //   2. POST /api/payments/create-intent — create Stripe PI tied to the hold
+    //   3. Mount Payment Element with clientSecret
+    //   4. stripe.confirmPayment()  — user enters card, Stripe charges
+    //   5. POST /api/payments/confirm — server-side verify + atomic D1 write
     async function initStripe() {
       if (stripeReady) return;  // already mounted
       try {
-        // 1. Get publishable key
-        const cfgRes = await fetch('/api/stripe/config');
-        const cfg    = await cfgRes.json();
-        if (!cfg.publishableKey) throw new Error('Stripe not configured');
-
-        stripe = Stripe(cfg.publishableKey);
-
-        // 2. Create a tentative booking + Payment Intent together
-        //    (using current dates so PI amount matches what user sees)
         const arrive = document.getElementById('booking-arrive').value;
         const depart = document.getElementById('booking-depart').value;
         const email  = document.getElementById('contact-email')?.value || '';
@@ -388,38 +396,70 @@ bookingPage.get('/:id', async (c) => {
           return;
         }
 
-        // Step 2a: reserve the slot in D1 (pending status)
-        const csrfRes = await fetch('/api/auth/csrf', { credentials: 'include' }).catch(() => null);
-        const csrfToken = csrfRes?.ok ? (await csrfRes.json()).csrf_token : null;
+        // ── STEP 1: Acquire a reservation hold (10-min slot lock) ──────────
+        // Idempotent: if we already have an active hold for this session, reuse it.
+        let holdPayload = null;
+        if (holdId && holdSessionToken) {
+          // Verify existing hold is still valid
+          const chkRes = await fetch('/api/holds/' + holdSessionToken).catch(() => null);
+          if (chkRes?.ok) {
+            const chk = await chkRes.json();
+            if (chk.valid && chk.status === 'active') {
+              holdPayload = { hold_id: holdId, session_token: holdSessionToken, expires_at: holdExpiresAt };
+            }
+          }
+        }
 
-        const bkRes = await fetch('/api/bookings', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {})
-          },
-          credentials: 'include',
-          body: JSON.stringify({
-            listing_id:              LISTING_ID,
-            start_datetime:          arrive,
-            end_datetime:            depart,
-            vehicle_plate:           document.getElementById('vehicle-plate').value.trim() || null,
-            cancellation_acknowledged:       true,
-            cancellation_policy_version:     '1.0',
-          })
-        });
-        const bkData = await bkRes.json();
-        if (!bkRes.ok) { showStripeError(bkData.error || 'Could not reserve slot.'); return; }
-        dbBookingId = bkData.db_id;
+        if (!holdPayload) {
+          const holdRes = await fetch('/api/holds', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              listing_id:     LISTING_ID,
+              start_datetime: arrive,
+              end_datetime:   depart,
+              checkout_token: checkoutToken,
+              ...(holdSessionToken ? { session_token: holdSessionToken } : {}),
+            })
+          });
+          const holdData = await holdRes.json();
+          if (!holdRes.ok) {
+            const code = holdData.code || '';
+            if (code === 'SLOT_BOOKED') {
+              showStripeError('This parking spot is already booked for the selected time. Please choose different dates.');
+            } else if (code === 'SLOT_HELD') {
+              showStripeError('Another user is currently checking out for this slot. Please wait a few minutes and try again.');
+            } else {
+              showStripeError(holdData.error || 'Could not reserve this slot. Please try again.');
+            }
+            return;
+          }
+          holdId           = holdData.hold_id;
+          holdSessionToken = holdData.session_token;
+          holdExpiresAt    = holdData.expires_at;
+          holdPayload      = holdData;
 
-        // Step 2b: create Stripe Payment Intent (stamps stripe_pi_id onto booking)
+          // Show hold countdown in UI if element exists
+          startHoldCountdown(holdData.expires_at);
+        }
+
+        // ── STEP 2: Get Stripe publishable key ────────────────────────────
+        const cfgRes = await fetch('/api/stripe/config');
+        const cfg    = await cfgRes.json();
+        if (!cfg.publishableKey) throw new Error('Stripe not configured');
+        stripe = Stripe(cfg.publishableKey);
+
+        // ── STEP 3: Create Payment Intent tied to hold ────────────────────
+        // checkout_token ensures idempotency on retries (same PI reused)
         const piRes = await fetch('/api/payments/create-intent', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
           body: JSON.stringify({
             listing_id:     LISTING_ID,
-            booking_id:     dbBookingId,
+            hold_id:        holdId,
+            session_token:  holdSessionToken,
+            checkout_token: checkoutToken,
             start_datetime: arrive,
             end_datetime:   depart,
             driver_email:   email || 'guest@parkpeer.app',
@@ -427,16 +467,30 @@ bookingPage.get('/:id', async (c) => {
         });
         const piData = await piRes.json();
         if (!piRes.ok || !piData.clientSecret) {
-          showStripeError(piData.error || 'Payment setup failed.');
+          const code = piData.code || '';
+          if (code === 'HOLD_EXPIRED') {
+            holdId = null; holdSessionToken = null;
+            showStripeError('Your reservation hold expired. Please try adding your card again to refresh the hold.');
+          } else if (code === 'SLOT_BOOKED') {
+            showStripeError('This spot was just booked by someone else. Please choose different dates.');
+          } else {
+            showStripeError(piData.error || 'Payment setup failed. Please try again.');
+          }
           return;
         }
+        stripePI = piData.paymentIntentId;
 
-        // 3. Mount Stripe Payment Element with the client secret
-        stripeElements = stripe.elements({ clientSecret: piData.clientSecret,
+        // ── STEP 4: Mount Stripe Payment Element ──────────────────────────
+        stripeElements = stripe.elements({
+          clientSecret: piData.clientSecret,
           appearance: {
             theme: 'night',
-            variables: { colorPrimary: '#6366f1', colorBackground: '#1e1e2e',
-                         colorText: '#ffffff', fontFamily: 'system-ui, sans-serif' }
+            variables: {
+              colorPrimary:    '#6366f1',
+              colorBackground: '#1e1e2e',
+              colorText:       '#ffffff',
+              fontFamily:      'system-ui, sans-serif',
+            }
           }
         });
         paymentElement = stripeElements.create('payment');
@@ -446,6 +500,27 @@ bookingPage.get('/:id', async (c) => {
       } catch (e) {
         showStripeError(e.message || 'Could not initialise payment.');
       }
+    }
+
+    // ── Hold countdown display ─────────────────────────────────────────────
+    let holdCountdownTimer = null;
+    function startHoldCountdown(expiresAt) {
+      const el = document.getElementById('hold-countdown');
+      if (!el || !expiresAt) return;
+      el.classList.remove('hidden');
+      if (holdCountdownTimer) clearInterval(holdCountdownTimer);
+      holdCountdownTimer = setInterval(() => {
+        const secsLeft = Math.max(0, Math.floor((new Date(expiresAt) - Date.now()) / 1000));
+        const m = Math.floor(secsLeft / 60);
+        const s = String(secsLeft % 60).padStart(2, '0');
+        el.textContent = 'Slot reserved for ' + m + ':' + s;
+        if (secsLeft === 0) {
+          clearInterval(holdCountdownTimer);
+          el.textContent = 'Hold expired — please refresh to try again.';
+          el.classList.add('text-red-400');
+          stripeReady = false; // force re-init on retry
+        }
+      }, 1000);
     }
 
     function showStripeError(msg) {
@@ -606,7 +681,9 @@ bookingPage.get('/:id', async (c) => {
             credentials: 'include',
             body: JSON.stringify({
               payment_intent_id:           paymentIntent.id,
-              booking_id:                  dbBookingId,
+              hold_id:                     holdId,
+              session_token:               holdSessionToken,
+              checkout_token:              checkoutToken,
               listing_id:                  LISTING_ID,
               driver_name:                 driverName,
               driver_email:                email || null,
@@ -631,47 +708,18 @@ bookingPage.get('/:id', async (c) => {
           return;
         }
 
-        // ── Path B: No card form shown — create booking (reserve only) ───
-        // This path is used when the user hasn't opened the card form yet,
-        // i.e., they are using a saved card flow or Apple/Google Pay (future).
-        // For now, create the booking reservation and prompt to add a card.
-        if (!dbBookingId) {
-          const csrfRes = await fetch('/api/auth/csrf', { credentials: 'include' }).catch(() => null);
-          const csrfToken = csrfRes?.ok ? (await csrfRes.json()).csrf_token : null;
-
-          const res = await fetch('/api/bookings', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {})
-            },
-            credentials: 'include',
-            body: JSON.stringify({
-              listing_id:              LISTING_ID,
-              start_datetime:          arrive,
-              end_datetime:            depart,
-              vehicle_plate:           document.getElementById('vehicle-plate').value.trim() || null,
-              cancellation_acknowledged:       true,
-              cancellation_policy_version:     '1.0',
-            })
-          });
-          const data = await res.json();
-          if (!res.ok) {
-            alert(data.error || 'Booking failed. Please try again.');
-            btn.innerHTML = '<i class="fas fa-lock"></i> <span id="confirm-label">Confirm & Pay</span>';
-            btn.disabled  = false;
-            return;
-          }
-          dbBookingId = data.db_id;
+        // ── Path B: No card form shown — open it (which acquires hold + PI) ─
+        // User clicked Confirm & Pay before opening the card form.
+        // initStripe() will acquire the hold and create the PI.
+        if (!stripeReady) {
+          document.getElementById('new-card-form').classList.remove('hidden');
+          document.getElementById('add-card-btn').classList.add('hidden');
+          await initStripe();
+          btn.innerHTML = '<i class="fas fa-lock"></i> <span id="confirm-label">Complete Payment</span>';
+          btn.disabled  = false;
+          document.getElementById('new-card-form').scrollIntoView({ behavior: 'smooth', block: 'center' });
+          return;
         }
-
-        // Prompt to open card form to complete payment
-        document.getElementById('new-card-form').classList.remove('hidden');
-        document.getElementById('add-card-btn').classList.add('hidden');
-        if (!stripeReady) await initStripe();
-        btn.innerHTML = '<i class="fas fa-lock"></i> <span id="confirm-label">Complete Payment</span>';
-        btn.disabled  = false;
-        document.getElementById('new-card-form').scrollIntoView({ behavior: 'smooth', block: 'center' });
 
       } catch(e) {
         showStripeError('Network error: ' + (e.message || 'Please try again.'));
