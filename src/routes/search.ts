@@ -394,7 +394,14 @@ searchPage.get('/', async (c) => {
       color: #fff;
       box-shadow: 0 20px 40px rgba(0,0,0,0.6) !important;
     }
-    .mapboxgl-popup-tip { display: none !important; }
+    /* Popup tip — show a small downward arrow so it's clear which pin the popup belongs to */
+    .mapboxgl-popup-tip {
+      border-top-color: rgba(255,255,255,0.12) !important;
+    }
+    .mapboxgl-popup-anchor-bottom .mapboxgl-popup-tip {
+      border-top-color: #1a1a1a !important;
+      border-bottom: none !important;
+    }
     .mapboxgl-popup-close-button {
       color: #9ca3af;
       font-size: 18px;
@@ -1454,7 +1461,12 @@ searchPage.get('/', async (c) => {
     if (amenitiesArr.includes('gated'))           tags.push({ t: 'Gated',    i: 'fa-lock' })
     if (amenitiesArr.includes('24hr_access'))     tags.push({ t: '24/7',     i: 'fa-clock' })
 
-    const popup = new mapboxgl.Popup({ offset: 10, maxWidth: '280px', closeButton: true })
+    const popup = new mapboxgl.Popup({
+        offset: [0, -52],    // lift popup 52px above the pin so pin + route stay visible
+        anchor: 'bottom',    // popup opens upward; tip points down at pin
+        maxWidth: '290px',
+        closeButton: true
+      })
       .setLngLat([l.lng, l.lat])
       .setHTML(
         '<div class="p-4">' +
@@ -1506,6 +1518,19 @@ searchPage.get('/', async (c) => {
       .addTo(map)
 
     activePopup = popup
+
+    // Pan map so the popup (which opens ~52px above the pin) stays fully visible.
+    // Shift the view upward by ~160px (half a typical popup height + offset)
+    // only if the pin is in the upper portion of the map container.
+    try {
+      const mapEl   = document.getElementById('map')
+      const mapH    = mapEl ? mapEl.offsetHeight : 600
+      const pinPx   = map.project([l.lng, l.lat])
+      // If the pin is in the top 55% of the map, ease down so popup has room above
+      if (pinPx.y < mapH * 0.55) {
+        map.easeTo({ offset: [0, -140], duration: 300 })
+      }
+    } catch(e) {}
 
     // Highlight the corresponding card
     const card = document.querySelector('[data-id="' + l.id + '"].listing-card')
