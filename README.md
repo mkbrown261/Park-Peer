@@ -138,7 +138,7 @@ Full user lifecycle management with compliance, refunds, and auditing.
 | Styling | Tailwind CSS (CDN) |
 | Icons | Font Awesome 6 |
 | Payments | Stripe (✅ Production-wired — live keys, Stripe.js v3 Payment Element, idempotency) |
-| Database | Cloudflare D1 (✅ Production — 33 tables, 13 migrations applied) |
+| Database | Cloudflare D1 (✅ Production — 33 tables, **14 migrations** applied, `host_availability_schedule` added) |
 
 ## 🚀 Local Development
 ```bash
@@ -158,8 +158,14 @@ npx wrangler pages deploy dist --project-name parkpeer
 - [x] Full-featured search with filter sidebar + visual map
 - [x] Listing detail page with gallery, reviews, availability calendar, booking widget
 - [x] **Stripe payment integration** — live keys, Stripe.js v3 Payment Element, idempotency keys, ghost-booking prevention
-- [x] **Cloudflare D1 persistence** — 33 tables, 13 migrations, full booking/payment lifecycle in D1
+- [x] **Cloudflare D1 persistence** — 33+ tables, 14 migrations, full booking/payment lifecycle in D1
 - [x] **Production-grade booking pipeline** — holds-first flow, atomic D1 batch, recovery logging, integrity audit
+- [x] **Full time-based reservations** — 15-min time grid, 14-day date strip, multi-day bookings, in-range highlighting, quick duration chips
+- [x] **Host availability schedule** — Mon–Sun open/close hours, closed days; server-enforced on validate-slot + holds
+- [x] **15-min increment pricing** — aligned across validate-slot, /api/holds, create-intent; minimum 15-min booking
+- [x] **Mobile-first booking UI** — scroll-snap date strip, large touch targets, auto-scroll to first available slot
+- [x] **Smart error messages** — SLOT_BOOKED / SLOT_HELD / HOST_CLOSED_DAY / OUTSIDE_HOST_HOURS / LISTING_UNAVAILABLE / TOO_SHORT
+- [x] **Hold countdown timer** — live 10-min countdown in payment panel; auto-invalidates Stripe on expiry
 - [x] Driver dashboard with live countdown timer, booking history, saved spots
 - [x] Host dashboard with listing management, booking approvals, revenue chart, calendar
 - [x] Sign Up / Login with role selection, password strength meter, social OAuth UI
@@ -179,6 +185,69 @@ npx wrangler pages deploy dist --project-name parkpeer
 
 ---
 *Built with Hono + Cloudflare Pages — Deploy to the edge globally in seconds.*
+
+## ⏱️ Recent Fixes (2026-03-06) — Full Time-Based Reservation System v2
+
+### Booking UI Overhaul
+| Feature | Detail |
+|---|---|
+| **14-day scrollable date strip** | Scroll-snap, auto-selects first open day, host-closed days greyed out |
+| **15-minute time grid** | 96 slots/day (00:00–23:45), colour-coded: available / booked / held / closed / past |
+| **In-range highlighting** | All 15-min slots between start and end glow indigo when selecting end time |
+| **Quick duration chips** | 30min / 1h / 2h / 3h / 4h / 8h — only shown if end slot is actually available |
+| **Multi-day support** | If end time ≤ start time, end-date strip auto-appears; user picks next-day (or +N days) |
+| **Mobile UX** | Min 36–42px touch targets, scroll-snap date strip, auto-scroll to first available slot on open |
+| **Hold countdown** | Live `M:SS` pill in payment panel; turns red and invalidates Stripe on expiry |
+| **Success modal** | Shows `PP-YYYY-XXXX` booking reference, full date range, start–end times |
+
+### Backend / Pricing Fixes
+| Fix | Detail |
+|---|---|
+| **15-min increment pricing** | `Math.ceil(rawMins / 15) * 15` — all 3 endpoints aligned (validate-slot, /holds, create-intent) |
+| **2h example** | 2h → `$24.00 subtotal + $3.60 fee = $27.60 total` (verified in tests) |
+| **15-min minimum** | `TOO_SHORT` code returned if < 15 min; minimum bookable unit = `0.25h = $3.00` |
+| **Host schedule enforcement** | `OUTSIDE_HOST_HOURS` / `HOST_CLOSED_DAY` returned by validate-slot AND /holds |
+| **Overlap detection** | `start1 < end2 && start2 < end1` — checked against confirmed/active bookings AND active holds |
+
+### Migration 0014 — `host_availability_schedule`
+```sql
+CREATE TABLE host_availability_schedule (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  listing_id INTEGER NOT NULL,
+  day_of_week INTEGER NOT NULL CHECK(day_of_week BETWEEN 0 AND 6),
+  is_available INTEGER NOT NULL DEFAULT 1,
+  open_time TEXT NOT NULL DEFAULT '07:00',
+  close_time TEXT NOT NULL DEFAULT '22:00',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(listing_id, day_of_week)
+);
+```
+Default seeded: all 7 days, 07:00–22:00 open for existing listings.
+
+### API Endpoints for Time-Based Reservations
+| Method | Route | Description |
+|---|---|---|
+| GET | `/api/listings/:id/time-slots?date=YYYY-MM-DD` | 96 × 15-min slots with status (available/booked/held/closed/past) |
+| POST | `/api/listings/:id/validate-slot` | Server-side check before hold; returns pricing if valid |
+| GET | `/api/listings/:id/availability-schedule` | Host's 7-day weekly schedule |
+| PUT | `/api/listings/:id/availability-schedule` | Host updates their schedule (authenticated) |
+| POST | `/api/holds` | Acquire 10-min slot hold before Stripe PI |
+| GET | `/api/holds/:token` | Poll hold status (valid/expired/converted) |
+
+### Verification Test Results
+```
+✓ 96 slots/day (15-min grid, 0:00–23:45)
+✓ 15-min pricing: 6 duration cases (0.25h–2.5h) all match
+✓ Host hours: before-open → OUTSIDE_HOST_HOURS, after-close → OUTSIDE_HOST_HOURS  
+✓ TOO_SHORT: < 15 min rejected with correct code
+✓ LISTING_UNAVAILABLE: nonexistent listing rejected
+✓ Rate limiting: 429 fires on burst > 20/min
+✓ Admin integrity requires auth (HTTP 401)
+✓ Webhook rejects missing signature
+✓ 7-day host schedule returns correctly
+✓ 23/23 UI elements present in booking page
+```
 
 ## 🔧 Recent Fixes (2026-03-06) — Stripe + D1 Production Wiring
 
