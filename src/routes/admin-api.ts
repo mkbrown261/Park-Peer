@@ -1021,3 +1021,127 @@ adminApiRoutes.patch('/notifications/read', async (c: any) => {
     return c.json({ error: 'Failed to update'}, 500)
   }
 })
+
+// ════════════════════════════════════════════════════════════════════════════
+// GET /api/admin/payout-audit
+// Full payment distribution audit with anomaly detection.
+// Protected by adminApiAuthMiddleware (admin session cookie).
+// Query params: ?days=30&page=1&per_page=50&status=all|ok|warning|error
+// ════════════════════════════════════════════════════════════════════════════
+adminApiRoutes.get('/payout-audit', async (c: any) => {
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+
+  const days    = Math.min(365, parseInt(c.req.query('days')     || '30'))
+  const page    = Math.max(1,   parseInt(c.req.query('page')     || '1'))
+  const perPage = Math.min(200, parseInt(c.req.query('per_page') || '50'))
+  const filter  = c.req.query('status') || 'all'
+  const offset  = (page - 1) * perPage
+
+  try {
+    // ── Summary stats ────────────────────────────────────────────────────
+    const summary = await db.prepare(`
+      SELECT
+        COUNT(*)                                                      AS total_payments,
+        COALESCE(SUM(amount),       0)                               AS total_charged,
+        COALESCE(SUM(platform_fee), 0)                               AS total_platform_fees,
+        COALESCE(SUM(host_payout),  0)                               AS total_host_payouts,
+        COUNT(CASE WHEN stripe_transfer_id IS NOT NULL THEN 1 END)   AS transferred_count,
+        COUNT(CASE WHEN stripe_transfer_id IS     NULL THEN 1 END)   AS pending_transfer_count,
+        COUNT(CASE WHEN ABS(amount - (platform_fee + host_payout)) > 0.02 THEN 1 END) AS fee_mismatch_count,
+        COUNT(CASE WHEN platform_fee < 0 OR host_payout < 0 THEN 1 END)               AS negative_value_count,
+        COUNT(CASE
+          WHEN amount > 0 AND ABS(platform_fee / (amount / 1.15) - 0.15) > 0.01 THEN 1
+        END) AS fee_rate_mismatch_count
+      FROM payments
+      WHERE type = 'charge'
+        AND status = 'succeeded'
+        AND datetime(created_at) >= datetime('now', ? || ' days')
+    `).bind(String(-days)).first<any>()
+
+    const statusCondition = filter === 'ok'
+      ? `AND ABS(p.amount - (p.platform_fee + p.host_payout)) <= 0.02 AND p.stripe_transfer_id IS NOT NULL`
+      : filter === 'warning'
+      ? `AND p.stripe_transfer_id IS NULL AND ABS(p.amount - (p.platform_fee + p.host_payout)) <= 0.02`
+      : filter === 'error'
+      ? `AND ABS(p.amount - (p.platform_fee + p.host_payout)) > 0.02`
+      : ''
+
+    const rows = await db.prepare(`
+      SELECT
+        p.id                       AS payment_id,
+        p.booking_id,
+        p.driver_id,
+        p.host_id,
+        p.amount                   AS total_charged,
+        p.platform_fee,
+        p.host_payout,
+        ROUND(p.amount / 1.15, 2)  AS expected_subtotal,
+        ROUND((p.amount / 1.15) * 0.15, 2) AS expected_platform_fee,
+        ROUND((p.amount / 1.15) * 0.85, 2) AS expected_host_payout,
+        ROUND(ABS(p.platform_fee - ROUND((p.amount / 1.15) * 0.15, 2)), 4) AS fee_delta,
+        ROUND(ABS(p.amount - (p.platform_fee + p.host_payout)), 4)          AS split_delta,
+        p.stripe_payment_intent_id AS payment_intent_id,
+        p.stripe_charge_id         AS charge_id,
+        p.stripe_transfer_id       AS transfer_id,
+        p.status                   AS payment_status,
+        pi2.stripe_account_id      AS host_stripe_account,
+        pr.recovery_status         AS recovery_status,
+        CASE
+          WHEN ABS(p.amount - (p.platform_fee + p.host_payout)) > 0.02 THEN 'error'
+          WHEN p.stripe_transfer_id IS NULL AND pr.recovery_status = 'payout_failed' THEN 'error'
+          WHEN p.stripe_transfer_id IS NULL THEN 'warning'
+          ELSE 'ok'
+        END AS audit_status,
+        p.created_at,
+        p.updated_at
+      FROM payments p
+      LEFT JOIN payout_info pi2 ON pi2.user_id = p.host_id
+      LEFT JOIN payment_recovery_log pr ON pr.stripe_pi_id = p.stripe_payment_intent_id
+      WHERE p.type = 'charge'
+        AND p.status = 'succeeded'
+        AND datetime(p.created_at) >= datetime('now', ? || ' days')
+        ${statusCondition}
+      ORDER BY p.created_at DESC
+      LIMIT ? OFFSET ?
+    `).bind(String(-days), perPage, offset).all<any>()
+
+    // ── Recovery/payout backlog ───────────────────────────────────────────
+    const recoveryRows = await db.prepare(`
+      SELECT id, stripe_pi_id, amount_cents, recovery_status, error_detail, created_at
+      FROM payment_recovery_log
+      WHERE recovery_status IN ('payout_pending','payout_failed','pending')
+        AND datetime(created_at) >= datetime('now', ? || ' days')
+      ORDER BY created_at DESC
+      LIMIT 100
+    `).bind(String(-days)).all<any>()
+
+    const s = summary || {}
+    return c.json({
+      period_days: days,
+      page,
+      per_page: perPage,
+      summary: {
+        total_payments:          s.total_payments          ?? 0,
+        total_charged:           Number((s.total_charged          ?? 0).toFixed(2)),
+        total_platform_fees:     Number((s.total_platform_fees    ?? 0).toFixed(2)),
+        total_host_payouts:      Number((s.total_host_payouts     ?? 0).toFixed(2)),
+        transferred_count:       s.transferred_count       ?? 0,
+        pending_transfer_count:  s.pending_transfer_count  ?? 0,
+        fee_mismatch_count:      s.fee_mismatch_count      ?? 0,
+        negative_value_count:    s.negative_value_count    ?? 0,
+        fee_rate_mismatch_count: s.fee_rate_mismatch_count ?? 0,
+        health: (
+          (s.fee_mismatch_count     ?? 0) === 0 &&
+          (s.negative_value_count   ?? 0) === 0 &&
+          (s.fee_rate_mismatch_count ?? 0) === 0
+        ) ? 'healthy' : 'anomalies_detected',
+      },
+      payments:       rows?.results      ?? [],
+      recovery_items: recoveryRows?.results ?? [],
+    })
+  } catch (e: any) {
+    console.error('[payout-audit]', e.message)
+    return c.json({ error: 'Audit query failed: ' + e.message }, 500)
+  }
+})

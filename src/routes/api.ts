@@ -4,7 +4,11 @@ import {
   createCustomer,
   getPaymentIntent,
   createRefund,
-  verifyWebhookSignature
+  createTransfer,
+  getTransfer,
+  verifyWebhookSignature,
+  calcPaymentSplit,
+  PLATFORM_FEE_RATE
 } from '../services/stripe'
 import {
   sendBookingConfirmation,
@@ -198,6 +202,94 @@ async function hasBookingConflict(
     return !!row
   } catch {
     return false  // fail open — let higher-level checks handle it
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// PAYMENT DISTRIBUTION — dispatchHostPayout
+// Transfers the host_payout portion to the host's connected Stripe account.
+// Called after successful D1 batch in /payments/confirm.
+// Idempotent: uses checkout_token as Idempotency-Key so safe to retry.
+// ════════════════════════════════════════════════════════════════════════════
+async function dispatchHostPayout(
+  env: any,
+  opts: {
+    bookingId:          number
+    paymentIntentId:    string
+    chargeId:           string | null       // pi.latest_charge
+    hostStripeAccount:  string              // payout_info.stripe_account_id
+    hostPayoutCents:    number
+    checkoutToken?:     string | null
+    listingId?:         number
+  }
+): Promise<{ transferId: string | null; error: string | null }> {
+  const db = env?.DB
+  if (!opts.hostStripeAccount || !opts.chargeId) {
+    const msg = !opts.hostStripeAccount
+      ? 'Host has no connected Stripe account — payout queued for manual review'
+      : 'No charge ID available for source_transaction — payout queued'
+    console.warn(`[Payout] ${msg}  booking=${opts.bookingId}`)
+    // Log to recovery for manual review
+    try {
+      await db?.prepare(`
+        INSERT OR IGNORE INTO payment_recovery_log
+          (stripe_pi_id, amount_cents, hold_id, recovery_status, error_detail, created_at)
+        VALUES (?, ?, NULL, 'payout_pending', ?, datetime('now'))
+      `).bind(opts.paymentIntentId, opts.hostPayoutCents, msg).run()
+    } catch {}
+    return { transferId: null, error: msg }
+  }
+
+  const idempKey = opts.checkoutToken ? `payout-${opts.checkoutToken}` : `payout-${opts.paymentIntentId}`
+
+  try {
+    const { transferId } = await createTransfer(
+      env,
+      {
+        amountCents:        opts.hostPayoutCents,
+        currency:           'usd',
+        destinationAccount: opts.hostStripeAccount,
+        sourceTransaction:  opts.chargeId,
+        transferGroup:      `booking-${opts.checkoutToken || opts.paymentIntentId}`,
+        metadata: {
+          booking_id:          String(opts.bookingId),
+          platform:            'parkpeer',
+          payment_intent_id:   opts.paymentIntentId,
+        },
+      },
+      idempKey
+    )
+
+    // Stamp transfer ID on the payments row immediately
+    if (db) {
+      await db.prepare(`
+        UPDATE payments
+        SET    stripe_transfer_id = ?,
+               updated_at         = datetime('now')
+        WHERE  stripe_payment_intent_id = ?
+      `).bind(transferId, opts.paymentIntentId).run().catch((e: any) =>
+        console.error('[Payout] stamp transfer_id failed:', e.message)
+      )
+    }
+
+    console.log(`[Payout] Transfer ${transferId} dispatched  booking=${opts.bookingId}  $${opts.hostPayoutCents / 100}`)
+    return { transferId, error: null }
+  } catch (e: any) {
+    const errMsg = e.message || 'Transfer failed'
+    console.error(`[Payout] createTransfer FAILED booking=${opts.bookingId}:`, errMsg)
+    logEvent('error', 'payout.transfer_failed', {
+      booking_id: opts.bookingId, pi: opts.paymentIntentId,
+      amount_cents: opts.hostPayoutCents, error: errMsg,
+    })
+    // Log to recovery so admin can retry
+    try {
+      await db?.prepare(`
+        INSERT OR IGNORE INTO payment_recovery_log
+          (stripe_pi_id, amount_cents, hold_id, recovery_status, error_detail, created_at)
+        VALUES (?, ?, NULL, 'payout_failed', ?, datetime('now'))
+      `).bind(opts.paymentIntentId, opts.hostPayoutCents, errMsg.slice(0, 500)).run()
+    } catch {}
+    return { transferId: null, error: errMsg }
   }
 }
 
@@ -948,42 +1040,65 @@ apiRoutes.post('/payments/create-intent', async (c) => {
   }
 
   // ── Fetch authoritative pricing from DB (never trust client price) ───
-  // Use 15-min increment pricing consistent with validate-slot and holds
-  const rawMins15 = (end.getTime() - start.getTime()) / 60_000
-  const roundMins15 = Math.max(15, Math.ceil(rawMins15 / 15) * 15)
-  const hours = Math.round((roundMins15 / 60) * 100) / 100
-  let ratePerHour = 12
+  // FIX #1: Use calcPaymentSplit() for consistent fee math everywhere.
+  // FIX #2: Use 15-min increment rounding (consistent with holds & validate-slot).
+  const rawMins   = (end.getTime() - start.getTime()) / 60_000
+  const roundMins = Math.max(15, Math.ceil(rawMins / 15) * 15)
+  const hours     = Math.round((roundMins / 60) * 100) / 100
+
+  let ratePerHour   = 12
+  let hostAccountId: string | null = null   // host's Stripe Connect account
+
   if (db) {
     try {
-      const row = await db.prepare('SELECT rate_hourly FROM listings WHERE id = ? AND status = ?')
-        .bind(String(listing_id), 'active').first<{ rate_hourly: number }>()
-      if (row?.rate_hourly) ratePerHour = row.rate_hourly
+      // Fetch listing rate AND host's connected Stripe account in one query
+      const row = await db.prepare(`
+        SELECT l.rate_hourly, p.stripe_account_id
+        FROM listings l
+        LEFT JOIN payout_info p ON p.user_id = l.host_id
+        WHERE l.id = ? AND l.status = 'active'
+      `).bind(String(listing_id)).first<{ rate_hourly: number; stripe_account_id: string | null }>()
+
+      if (row?.rate_hourly)        ratePerHour   = row.rate_hourly
+      if (row?.stripe_account_id)  hostAccountId = row.stripe_account_id
     } catch {}
   }
 
-  const subtotal    = Math.round(ratePerHour * hours * 100) / 100
-  const platformFee = Math.round(subtotal * 0.15 * 100) / 100
-  const total       = Math.round((subtotal + platformFee) * 100) / 100
-  const totalCents  = Math.round(total * 100)
+  // Authoritative split (all in cents to avoid floating-point errors)
+  const subtotalCents = Math.round(ratePerHour * hours * 100)
+  const split         = calcPaymentSplit(subtotalCents)
+  const { platformFeeCents, hostPayoutCents, totalCents } = split
+  const subtotal    = subtotalCents    / 100
+  const platformFee = platformFeeCents / 100
+  const hostPayout  = hostPayoutCents  / 100
+  const total       = totalCents       / 100
 
   try {
+    // FIX #3: Pass application_fee_amount so platform keeps its 15%.
+    //         Pass hostAccountId for transfer_group tagging.
     const { clientSecret, paymentIntentId } = await createPaymentIntent(
       env as any,
       totalCents,
       'usd',
       {
-        listing_id:     String(listing_id),
-        booking_id:     booking_id ? String(booking_id) : '',
-        hold_id:        hold_id    ? String(hold_id)    : '',
-        session_token:  session_token || '',
-        checkout_token: checkout_token || '',
-        driver_email:   driver_email  || '',
-        vehicle_plate:  vehicle_plate || '',
+        listing_id:       String(listing_id),
+        booking_id:       booking_id ? String(booking_id) : '',
+        hold_id:          hold_id    ? String(hold_id)    : '',
+        session_token:    session_token  || '',
+        checkout_token:   checkout_token || '',
+        driver_email:     driver_email   || '',
+        vehicle_plate:    vehicle_plate  || '',
         start_datetime,
         end_datetime,
-        platform:       'parkpeer',
+        platform:         'parkpeer',
+        subtotal_cents:   String(subtotalCents),
+        platform_fee_cents: String(platformFeeCents),
+        host_payout_cents:  String(hostPayoutCents),
+        host_account_id:  hostAccountId || '',
       },
-      checkout_token || undefined   // Stripe Idempotency-Key: prevents duplicate PIs on retry
+      checkout_token || undefined,    // Stripe Idempotency-Key
+      platformFeeCents,               // application_fee_amount: stays with platform
+      hostAccountId || undefined      // host connected account for transfer_group
     )
 
     // ── Stamp PI onto booking row (if booking already created) ───────
@@ -1019,12 +1134,20 @@ apiRoutes.post('/payments/create-intent', async (c) => {
       } catch {}
     }
 
-    const pricing = { hours, rate_per_hour: ratePerHour, subtotal, platform_fee: platformFee,
-                      total, total_cents: totalCents, currency: 'usd' }
+    const pricing = {
+      hours, rate_per_hour: ratePerHour,
+      subtotal, platform_fee: platformFee, host_payout: hostPayout,
+      total, total_cents: totalCents,
+      subtotal_cents: subtotalCents, platform_fee_cents: platformFeeCents,
+      host_payout_cents: hostPayoutCents,
+      currency: 'usd',
+    }
 
     logEvent('info', 'create_intent.ok', {
       pi: paymentIntentId, listing_id, hold_id: hold_id || null,
       checkout_token: checkout_token || null, total_cents: totalCents,
+      platform_fee_cents: platformFeeCents, host_payout_cents: hostPayoutCents,
+      host_has_account: !!hostAccountId,
     })
     return c.json({ clientSecret, paymentIntentId, pricing })
 
@@ -1124,9 +1247,19 @@ apiRoutes.post('/payments/confirm', async (c) => {
       }, 402)
     }
 
-    const amountPaid  = pi.amount / 100
-    const platformFee = Math.round(amountPaid * 0.15 * 100) / 100
-    const hostPayout  = Math.round((amountPaid - platformFee) * 100) / 100
+    // ── FIX: Derive subtotal from PI total using authoritative split math.
+    // pi.amount = total_cents = subtotalCents * 1.15
+    // So subtotalCents = pi.amount / 1.15  →  but we must work in cents.
+    // Correct approach: use calcPaymentSplit on the subtotal.
+    //   subtotalCents = round(pi.amount / 1.15)
+    //   then calcPaymentSplit gives exact platformFee & hostPayout.
+    const amountPaid      = pi.amount / 100   // total charged to driver (dollars)
+    const piSubtotalCents = Math.round(pi.amount / 1.15)   // remove 15% markup
+    const piSplit         = calcPaymentSplit(piSubtotalCents)
+    // Convert to dollars for DB storage
+    const subtotalAmt     = piSplit.subtotalCents     / 100
+    const platformFee     = piSplit.platformFeeCents  / 100
+    const hostPayout      = piSplit.hostPayoutCents   / 100
 
     // ── 2. IDEMPOTENCY: return existing booking if PI already confirmed ────
     if (db) {
@@ -1250,8 +1383,13 @@ apiRoutes.post('/payments/confirm', async (c) => {
       }
       const cancelAck    = body.cancellation_acknowledged === true
       const cancelVer    = body.cancellation_policy_version || CURRENT_VERSIONS.cancellation_policy
+      // ── FIX: Use same 15-minute rounding as create-intent (not ceil-to-hour)
       const hours        = resolvedStart && resolvedEnd
-        ? Math.max(1, Math.ceil((new Date(resolvedEnd).getTime() - new Date(resolvedStart).getTime()) / 3600000))
+        ? (() => {
+            const rawMins   = (new Date(resolvedEnd).getTime() - new Date(resolvedStart).getTime()) / 60_000
+            const roundMins = Math.max(15, Math.ceil(rawMins / 15) * 15)
+            return Math.round((roundMins / 60) * 100) / 100
+          })()
         : 1
 
       try {
@@ -1277,7 +1415,7 @@ apiRoutes.post('/payments/confirm', async (c) => {
             `).bind(
               resolvedListingId, resolvedDriverId, resolvedHostId,
               resolvedStart, resolvedEnd, hours,
-              Math.round((amountPaid / 1.15) * 100) / 100,  // subtotal back-calc
+              subtotalAmt,  // FIX: authoritative subtotal (not back-calculated)
               platformFee, hostPayout, amountPaid,
               resolvedVehicle, resolvedVehicle,
               payment_intent_id, pi.latest_charge || null,
@@ -1357,6 +1495,47 @@ apiRoutes.post('/payments/confirm', async (c) => {
           amount: amountPaid, listing_id: resolvedListingId,
           hold_id: hold_id || null,
         })
+
+        // ── F. Dispatch host payout (non-blocking — runs after D1 batch) ──
+        // Look up host Stripe account and fire transfer asynchronously.
+        // Any failure is logged to payment_recovery_log for admin retry.
+        if (dbBookingId && resolvedHostId) {
+          ;(async () => {
+            try {
+              // Fetch host's connected Stripe account
+              const payoutInfoRow = await db.prepare(
+                'SELECT stripe_account_id FROM payout_info WHERE user_id = ? LIMIT 1'
+              ).bind(resolvedHostId).first<{ stripe_account_id: string | null }>().catch(() => null)
+
+              const hostStripeAccount = payoutInfoRow?.stripe_account_id || null
+
+              const payoutResult = await dispatchHostPayout(env as any, {
+                bookingId:         dbBookingId!,
+                paymentIntentId:   payment_intent_id,
+                chargeId:          pi.latest_charge || null,
+                hostStripeAccount: hostStripeAccount || '',
+                hostPayoutCents:   piSplit.hostPayoutCents,
+                checkoutToken:     checkout_token || null,
+                listingId:         resolvedListingId,
+              })
+
+              logEvent(
+                payoutResult.error ? 'warn' : 'info',
+                payoutResult.error ? 'payout.dispatched_with_warning' : 'payout.dispatched',
+                {
+                  booking_id:    dbBookingId,
+                  transfer_id:   payoutResult.transferId || null,
+                  host_id:       resolvedHostId,
+                  host_account:  hostStripeAccount || 'none',
+                  amount_cents:  piSplit.hostPayoutCents,
+                  error:         payoutResult.error || null,
+                }
+              )
+            } catch (pe: any) {
+              console.error('[Confirm] payout dispatch threw:', pe.message)
+            }
+          })()
+        }
 
       } catch (batchErr: any) {
         // ── GHOST BOOKING SAFETY NET ─────────────────────────────────────
@@ -1537,6 +1716,204 @@ apiRoutes.post('/payments/confirm', async (c) => {
 })
 
 // ════════════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════════
+// GET /api/payments/transfer-status?booking_id=X  or  ?payment_intent_id=Y
+// Returns the payout/transfer status for a booking (auth required).
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.get('/payments/transfer-status', requireUserAuth(), async (c) => {
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+
+  const bookingId = c.req.query('booking_id')
+  const piId      = c.req.query('payment_intent_id')
+
+  if (!bookingId && !piId) {
+    return c.json({ error: 'Provide booking_id or payment_intent_id' }, 400)
+  }
+
+  try {
+    const row = await db.prepare(`
+      SELECT
+        p.id                      AS payment_id,
+        p.booking_id,
+        p.amount,
+        p.platform_fee,
+        p.host_payout,
+        p.stripe_payment_intent_id AS payment_intent_id,
+        p.stripe_charge_id         AS charge_id,
+        p.stripe_transfer_id       AS transfer_id,
+        p.status                   AS payment_status,
+        p.type                     AS payment_type,
+        p.created_at,
+        pi2.stripe_account_id      AS host_stripe_account,
+        CASE
+          WHEN p.stripe_transfer_id IS NOT NULL THEN 'transferred'
+          WHEN pr.id IS NOT NULL AND pr.recovery_status = 'payout_failed' THEN 'payout_failed'
+          WHEN pr.id IS NOT NULL AND pr.recovery_status = 'payout_pending' THEN 'payout_pending'
+          ELSE 'awaiting_transfer'
+        END AS payout_status
+      FROM payments p
+      LEFT JOIN users h          ON h.id = (SELECT host_id FROM bookings WHERE id = p.booking_id LIMIT 1)
+      LEFT JOIN payout_info pi2  ON pi2.user_id = h.id
+      LEFT JOIN payment_recovery_log pr ON pr.stripe_pi_id = p.stripe_payment_intent_id
+                                       AND pr.recovery_status IN ('payout_pending','payout_failed')
+      WHERE ${bookingId ? 'p.booking_id = ?' : 'p.stripe_payment_intent_id = ?'}
+        AND p.type = 'charge'
+      LIMIT 1
+    `).bind(bookingId || piId).first<any>()
+
+    if (!row) return c.json({ error: 'Payment not found' }, 404)
+
+    return c.json({
+      payment_id:          row.payment_id,
+      booking_id:          row.booking_id,
+      amount_charged:      row.amount,
+      platform_fee:        row.platform_fee,
+      host_payout:         row.host_payout,
+      payment_intent_id:   row.payment_intent_id,
+      charge_id:           row.charge_id,
+      transfer_id:         row.transfer_id,
+      payment_status:      row.payment_status,
+      payout_status:       row.payout_status,
+      host_has_account:    !!row.host_stripe_account,
+      created_at:          row.created_at,
+    })
+  } catch (e: any) {
+    console.error('[transfer-status]', e.message)
+    return c.json({ error: 'Query failed' }, 500)
+  }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// GET /api/admin/payout-audit
+// Admin-only: full distribution audit report with anomaly flags.
+// Query params: ?days=30&page=1&per_page=50&status=all|ok|warning|error
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.get('/admin/payout-audit', async (c) => {
+  const adminToken  = c.req.header('X-Admin-Token')
+  const tokenSecret = c.env?.ADMIN_TOKEN_SECRET
+  if (!adminToken || !tokenSecret || adminToken !== tokenSecret) {
+    return c.json({ error: 'Unauthorized' }, 403)
+  }
+
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+
+  const days    = Math.min(365, parseInt(c.req.query('days')    || '30'))
+  const page    = Math.max(1,   parseInt(c.req.query('page')    || '1'))
+  const perPage = Math.min(200, parseInt(c.req.query('per_page')|| '50'))
+  const filter  = c.req.query('status') || 'all'   // all | ok | warning | error
+  const offset  = (page - 1) * perPage
+
+  try {
+    // ── Summary stats ────────────────────────────────────────────────────
+    const summary = await db.prepare(`
+      SELECT
+        COUNT(*)                                             AS total_payments,
+        COALESCE(SUM(amount),        0)                     AS total_charged,
+        COALESCE(SUM(platform_fee),  0)                     AS total_platform_fees,
+        COALESCE(SUM(host_payout),   0)                     AS total_host_payouts,
+        COUNT(CASE WHEN stripe_transfer_id IS NOT NULL THEN 1 END) AS transferred_count,
+        COUNT(CASE WHEN stripe_transfer_id IS     NULL THEN 1 END) AS pending_transfer_count,
+        -- Fee integrity checks
+        COUNT(CASE WHEN ABS(amount - (platform_fee + host_payout)) > 0.02 THEN 1 END) AS fee_mismatch_count,
+        COUNT(CASE WHEN platform_fee < 0 OR host_payout < 0 THEN 1 END)               AS negative_value_count,
+        -- Percentage checks (platform_fee should be ~15% of subtotal = amount/1.15)
+        COUNT(CASE
+          WHEN amount > 0 AND ABS(platform_fee / (amount / 1.15) - 0.15) > 0.01 THEN 1
+        END) AS fee_rate_mismatch_count
+      FROM payments
+      WHERE type = 'charge'
+        AND status = 'succeeded'
+        AND datetime(created_at) >= datetime('now', ? || ' days')
+    `).bind(String(-days)).first<any>()
+
+    // ── Per-payment audit rows ────────────────────────────────────────────
+    const statusCondition = filter === 'ok'
+      ? `AND ABS(p.amount - (p.platform_fee + p.host_payout)) <= 0.02
+         AND p.stripe_transfer_id IS NOT NULL`
+      : filter === 'warning'
+      ? `AND p.stripe_transfer_id IS NULL`
+      : filter === 'error'
+      ? `AND ABS(p.amount - (p.platform_fee + p.host_payout)) > 0.02`
+      : ''
+
+    const rows = await db.prepare(`
+      SELECT
+        p.id                       AS payment_id,
+        p.booking_id,
+        p.amount                   AS total_charged,
+        p.platform_fee,
+        p.host_payout,
+        ROUND(p.amount / 1.15, 2)  AS expected_subtotal,
+        ROUND((p.amount / 1.15) * 0.15, 2) AS expected_platform_fee,
+        ROUND((p.amount / 1.15) * 0.85, 2) AS expected_host_payout,
+        ABS(p.platform_fee - ROUND((p.amount / 1.15) * 0.15, 2)) AS fee_delta,
+        ABS(p.amount - (p.platform_fee + p.host_payout))          AS split_delta,
+        p.stripe_payment_intent_id AS payment_intent_id,
+        p.stripe_charge_id         AS charge_id,
+        p.stripe_transfer_id       AS transfer_id,
+        p.status                   AS payment_status,
+        pi2.stripe_account_id      AS host_stripe_account,
+        pr.recovery_status         AS recovery_status,
+        -- Anomaly flag
+        CASE
+          WHEN ABS(p.amount - (p.platform_fee + p.host_payout)) > 0.02 THEN 'error'
+          WHEN p.stripe_transfer_id IS NULL AND pr.recovery_status = 'payout_failed' THEN 'error'
+          WHEN p.stripe_transfer_id IS NULL THEN 'warning'
+          ELSE 'ok'
+        END AS audit_status,
+        p.created_at
+      FROM payments p
+      LEFT JOIN bookings b          ON b.id = p.booking_id
+      LEFT JOIN payout_info pi2     ON pi2.user_id = p.host_id
+      LEFT JOIN payment_recovery_log pr ON pr.stripe_pi_id = p.stripe_payment_intent_id
+      WHERE p.type = 'charge'
+        AND p.status = 'succeeded'
+        AND datetime(p.created_at) >= datetime('now', ? || ' days')
+        ${statusCondition}
+      ORDER BY p.created_at DESC
+      LIMIT ? OFFSET ?
+    `).bind(String(-days), perPage, offset).all<any>()
+
+    // ── Recovery log (pending payouts) ────────────────────────────────────
+    const recoveryRows = await db.prepare(`
+      SELECT id, stripe_pi_id, amount_cents, recovery_status, error_detail, created_at
+      FROM payment_recovery_log
+      WHERE recovery_status IN ('payout_pending','payout_failed','pending')
+        AND datetime(created_at) >= datetime('now', ? || ' days')
+      ORDER BY created_at DESC
+      LIMIT 50
+    `).bind(String(-days)).all<any>()
+
+    return c.json({
+      period_days:  days,
+      page, per_page: perPage,
+      summary: {
+        total_payments:          summary?.total_payments          ?? 0,
+        total_charged:           Number((summary?.total_charged          ?? 0).toFixed(2)),
+        total_platform_fees:     Number((summary?.total_platform_fees    ?? 0).toFixed(2)),
+        total_host_payouts:      Number((summary?.total_host_payouts     ?? 0).toFixed(2)),
+        transferred_count:       summary?.transferred_count       ?? 0,
+        pending_transfer_count:  summary?.pending_transfer_count  ?? 0,
+        fee_mismatch_count:      summary?.fee_mismatch_count      ?? 0,
+        negative_value_count:    summary?.negative_value_count    ?? 0,
+        fee_rate_mismatch_count: summary?.fee_rate_mismatch_count ?? 0,
+        health: (
+          (summary?.fee_mismatch_count     ?? 0) === 0 &&
+          (summary?.negative_value_count   ?? 0) === 0 &&
+          (summary?.fee_rate_mismatch_count?? 0) === 0
+        ) ? 'healthy' : 'anomalies_detected',
+      },
+      payments:        rows?.results      ?? [],
+      recovery_items:  recoveryRows?.results ?? [],
+    })
+  } catch (e: any) {
+    console.error('[payout-audit]', e.message)
+    return c.json({ error: 'Audit query failed' }, 500)
+  }
+})
+
 // POST /api/payments/refund
 // Body: { payment_intent_id, booking_id, amount_cents?, reason, requester_email }
 // ════════════════════════════════════════════════════════════════════════════
@@ -1770,6 +2147,88 @@ apiRoutes.post('/webhooks/stripe', async (c) => {
           console.error('[Webhook] D1 update error (charge.dispute.created):', e.message)
         }
       }
+      break
+    }
+    case 'transfer.created':
+    case 'transfer.paid': {
+      // ── Reconcile host payout transfer ─────────────────────────────────
+      // Stripe fires transfer.created when the Transfer object is created,
+      // and transfer.paid when funds actually settle in the host's account.
+      // We stamp stripe_transfer_id on the payments row on BOTH events
+      // so the record is up to date at the earliest possible moment.
+      const transfer = event.data.object
+      const transferId    = transfer.id        as string
+      const sourceCharge  = transfer.source_transaction as string | undefined
+      const transferGroup = transfer.transfer_group     as string | undefined
+      const settled       = event.type === 'transfer.paid'
+
+      console.log(`[Webhook] Transfer ${event.type}: ${transferId} group=${transferGroup || 'none'} settled=${settled}`)
+
+      if (db && (sourceCharge || transferGroup)) {
+        try {
+          // Find matching payment row via the source charge or transfer_group
+          const whereClause = sourceCharge
+            ? `stripe_charge_id = ?`
+            : `stripe_payment_intent_id LIKE ?`
+          const whereParam  = sourceCharge
+            ? sourceCharge
+            : transferGroup?.replace('booking-', '') || ''
+
+          // Stamp transfer ID + set status to 'payout_sent' if settled
+          const updateResult = await db.prepare(`
+            UPDATE payments
+            SET stripe_transfer_id = COALESCE(stripe_transfer_id, ?),
+                updated_at          = datetime('now')
+            WHERE ${whereClause}
+              AND type = 'charge'
+          `).bind(transferId, whereParam).run()
+
+          if (updateResult.meta?.changes && updateResult.meta.changes > 0) {
+            console.log(`[Webhook] Stamped transfer_id ${transferId} on payment(s) via ${sourceCharge ? 'charge' : 'group'}`)
+          } else {
+            console.warn(`[Webhook] No payment row found for transfer ${transferId} — may need manual reconciliation`)
+          }
+
+          // Also clear any payout_pending recovery entries for this PI
+          if (sourceCharge || transferGroup) {
+            await db.prepare(`
+              UPDATE payment_recovery_log
+              SET recovery_status = 'resolved',
+                  resolved_at     = datetime('now'),
+                  error_detail    = error_detail || ' | resolved by ' || ?
+              WHERE recovery_status IN ('payout_pending','payout_failed')
+                AND (${sourceCharge ? `stripe_pi_id IN (SELECT stripe_payment_intent_id FROM payments WHERE stripe_charge_id = ?)` : `stripe_pi_id LIKE ?`})
+            `).bind(`transfer ${transferId}`, sourceCharge || whereParam).run().catch(() => {})
+          }
+
+          logEvent('info', `transfer.${settled ? 'paid' : 'created'}`, {
+            transfer_id: transferId, source_charge: sourceCharge || null,
+            transfer_group: transferGroup || null, settled,
+          })
+        } catch (e: any) {
+          console.error(`[Webhook] D1 update error (${event.type}):`, e.message)
+        }
+      }
+      break
+    }
+    case 'transfer.failed': {
+      const transfer = event.data.object
+      console.error(`[Webhook] Transfer FAILED: ${transfer.id}`)
+      const sourceCharge = transfer.source_transaction as string | undefined
+      if (db && sourceCharge) {
+        try {
+          // Mark recovery record so admin is alerted
+          await db.prepare(`
+            INSERT OR IGNORE INTO payment_recovery_log
+              (stripe_pi_id, amount_cents, hold_id, recovery_status, error_detail, created_at)
+            SELECT stripe_payment_intent_id, CAST(amount * 100 AS INTEGER), NULL,
+                   'payout_failed', 'Stripe transfer.failed for charge: ' || ?,
+                   datetime('now')
+            FROM payments WHERE stripe_charge_id = ? LIMIT 1
+          `).bind(sourceCharge, sourceCharge).run()
+        } catch {}
+      }
+      logEvent('error', 'transfer.failed', { transfer_id: transfer.id, source_charge: sourceCharge || null })
       break
     }
     default:
