@@ -137,8 +137,8 @@ Full user lifecycle management with compliance, refunds, and auditing.
 | Process Manager | PM2 |
 | Styling | Tailwind CSS (CDN) |
 | Icons | Font Awesome 6 |
-| Payments | Stripe (ready for integration) |
-| Database | Cloudflare D1 (ready to add) |
+| Payments | Stripe (✅ Production-wired — Stripe.js v3 Payment Element) |
+| Database | Cloudflare D1 (✅ Production — 28 tables, 11 migrations applied) |
 
 ## 🚀 Local Development
 ```bash
@@ -157,20 +157,21 @@ npx wrangler pages deploy dist --project-name parkpeer
 - [x] Landing page with floating map pins, earnings calculator, city coverage
 - [x] Full-featured search with filter sidebar + visual map
 - [x] Listing detail page with gallery, reviews, availability calendar, booking widget
-- [x] Secure checkout flow with payment methods, QR code confirmation
+- [x] **Stripe payment integration** — Stripe.js v3 Payment Element, 3-step checkout flow (D1 booking → Stripe PI → confirm)
+- [x] **Cloudflare D1 persistence** — 28 tables, 11 migrations, full booking/payment lifecycle in D1
 - [x] Driver dashboard with live countdown timer, booking history, saved spots
 - [x] Host dashboard with listing management, booking approvals, revenue chart, calendar
 - [x] Sign Up / Login with role selection, password strength meter, social OAuth UI
 - [x] Admin panel with fraud alerts, listing moderation, user management, system health
-- [x] RESTful API with 9 endpoints
+- [x] RESTful API with full CRUD + Stripe + notifications
 - [x] Mobile-responsive across all pages
 - [x] Dark mode design system with Electric Indigo + Neon Lime palette
 
 ## 🔜 Phase 2 Roadmap
-- [ ] Stripe payment integration
-- [ ] Cloudflare D1 database persistence
-- [ ] Google Maps / Mapbox real map
-- [ ] SMS/Email notifications (Twilio + SendGrid)
+- [ ] Stripe live mode switchover (currently test keys)
+- [ ] Webhook endpoint registration on Stripe dashboard (https://parkpeer.pages.dev/api/webhooks/stripe)
+- [ ] Google Maps / Mapbox real map (Mapbox already integrated, real listings needed)
+- [ ] SMS/Email notifications (Twilio + Resend secrets already set in Cloudflare)
 - [ ] Surge pricing engine (events)
 - [ ] QR code generation
 - [ ] Superhost achievement system
@@ -179,7 +180,27 @@ npx wrangler pages deploy dist --project-name parkpeer
 ---
 *Built with Hono + Cloudflare Pages — Deploy to the edge globally in seconds.*
 
-## 🔧 Recent Fixes (2026-03-06)
+## 🔧 Recent Fixes (2026-03-06) — Stripe + D1 Production Wiring
+
+### Stripe Payment Integration (✅ Complete)
+- **Checkout page** — full Stripe.js v3 Payment Element replacing static card HTML
+- **3-step flow**:
+  1. `POST /api/bookings` → creates D1 `bookings` row (status=`pending`), returns `db_id`
+  2. `POST /api/payments/create-intent` → creates Stripe PI, **stamps `stripe_payment_intent_id` onto booking row** (critical webhook link)
+  3. `stripe.confirmPayment()` in browser → on success → `POST /api/payments/confirm`
+- **`/api/payments/confirm`** — fully wired to D1:
+  - Looks up booking by `stripe_payment_intent_id` (or fallback `booking_id`)
+  - `UPDATE bookings SET status='confirmed'`, stamps `stripe_charge_id`
+  - `INSERT INTO payments` row (idempotent — skips if PI already recorded)
+  - Sends confirmation email + SMS; fires in-app notification async
+- **Stripe webhook** (`/api/webhooks/stripe`) — already handled `payment_intent.succeeded`, `payment_intent.payment_failed`, `charge.refunded`, `charge.dispute.created`; now works correctly because PI id is pre-stamped on booking
+
+### Cloudflare D1 Persistence (✅ Complete)
+- **28 tables** fully applied in production (database_id: `119f9fd4-...`)
+- **11 migrations** all confirmed applied remotely
+- **Booking lifecycle**: `pending` → `confirmed` → `active` → `completed` / `cancelled` / `refunded` all tracked in D1
+- **`payments` table** rows now correctly inserted after Stripe confirms
+- **Contact email field** added to checkout for confirmation email delivery
 
 ### Map / UI
 - **Popup no longer blocks the walking route pill** — popup offset increased to 72px when a walk route is active; the `#route-info-pill` drops to `1.5rem` from the bottom while the popup is open (`pill-popup-open` class), giving the popup full clearance above the route line
