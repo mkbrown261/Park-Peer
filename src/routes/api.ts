@@ -855,7 +855,10 @@ apiRoutes.post('/payments/create-intent', async (c) => {
   }
 
   // ── Fetch authoritative pricing from DB (never trust client price) ───
-  const hours = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / 3600000))
+  // Use 15-min increment pricing consistent with validate-slot and holds
+  const rawMins15 = (end.getTime() - start.getTime()) / 60_000
+  const roundMins15 = Math.max(15, Math.ceil(rawMins15 / 15) * 15)
+  const hours = Math.round((roundMins15 / 60) * 100) / 100
   let ratePerHour = 12
   if (db) {
     try {
@@ -2274,6 +2277,430 @@ apiRoutes.get('/listings/:id/availability', async (c) => {
 })
 
 // ════════════════════════════════════════════════════════════════════════════
+// HOST AVAILABILITY SCHEDULE
+// GET  /api/listings/:id/availability-schedule
+//   Returns the host's per-weekday open/close windows.
+//   Response: { listing_id, schedule: [ {day_of_week, is_available, open_time, close_time} ] }
+// PUT  /api/listings/:id/availability-schedule
+//   (Authenticated host only) — save/replace schedule rows.
+//   Body: { schedule: [{day_of_week, is_available, open_time, close_time}] }
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.get('/listings/:id/availability-schedule', async (c) => {
+  const listingId = c.req.param('id')
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'DB unavailable' }, 503)
+
+  try {
+    const rows = await db.prepare(`
+      SELECT day_of_week, is_available, open_time, close_time
+      FROM host_availability_schedule
+      WHERE listing_id = ?
+      ORDER BY day_of_week
+    `).bind(listingId).all<any>()
+
+    // If no schedule rows exist yet, return a default 07:00-22:00 all-week schedule
+    const DAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']
+    let schedule = (rows.results || []).map((r: any) => ({
+      day_of_week:  r.day_of_week,
+      day_name:     DAY_NAMES[r.day_of_week],
+      is_available: r.is_available === 1,
+      open_time:    r.open_time  || '07:00',
+      close_time:   r.close_time || '22:00',
+    }))
+
+    if (schedule.length === 0) {
+      schedule = DAY_NAMES.map((name, i) => ({
+        day_of_week: i, day_name: name, is_available: true,
+        open_time: '07:00', close_time: '22:00',
+      }))
+    }
+
+    return c.json({ listing_id: listingId, schedule })
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+apiRoutes.put('/listings/:id/availability-schedule', requireUserAuth(), async (c) => {
+  const listingId = c.req.param('id')
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'DB unavailable' }, 503)
+
+  const body = await c.req.json().catch(() => ({})) as any
+  const schedule: any[] = Array.isArray(body.schedule) ? body.schedule : []
+  if (schedule.length === 0) return c.json({ error: 'schedule array required' }, 400)
+
+  try {
+    // Upsert each day row
+    await Promise.all(schedule.map((row: any) => {
+      const day = parseInt(String(row.day_of_week))
+      if (isNaN(day) || day < 0 || day > 6) return Promise.resolve()
+      return db.prepare(`
+        INSERT INTO host_availability_schedule
+          (listing_id, day_of_week, is_available, open_time, close_time, updated_at)
+        VALUES (?, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(listing_id, day_of_week) DO UPDATE SET
+          is_available = excluded.is_available,
+          open_time    = excluded.open_time,
+          close_time   = excluded.close_time,
+          updated_at   = excluded.updated_at
+      `).bind(
+        listingId, day,
+        row.is_available ? 1 : 0,
+        row.open_time  || '07:00',
+        row.close_time || '22:00',
+      ).run()
+    }))
+
+    return c.json({ success: true, updated: schedule.length })
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// TIME SLOTS — Fine-grained availability for a specific date
+// GET /api/listings/:id/time-slots?date=YYYY-MM-DD
+//
+// Returns 15-minute time slots for the given date with availability status:
+//   available  — free, no bookings or holds
+//   booked     — confirmed/active booking overlaps this slot
+//   held       — active reservation hold overlaps (another user is checking out)
+//   closed     — outside host's open_time/close_time window for that weekday
+//   past       — slot is in the past
+//
+// Also returns host schedule for the day and any existing bookings for UI display.
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.get('/listings/:id/time-slots', async (c) => {
+  const listingId = c.req.param('id')
+  const dateStr   = c.req.query('date')   // YYYY-MM-DD
+  const db = c.env?.DB
+
+  if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    return c.json({ error: 'date query param required (YYYY-MM-DD)' }, 400)
+  }
+  if (!db) return c.json({ error: 'DB unavailable' }, 503)
+
+  try {
+    // ── 1. Parse the requested date ──────────────────────────────────────
+    const [year, month, day] = dateStr.split('-').map(Number)
+    const dateObj    = new Date(Date.UTC(year, month - 1, day))
+    const dayOfWeek  = dateObj.getUTCDay()   // 0=Sun … 6=Sat
+    const now        = new Date()
+
+    // ── 2. Fetch host schedule for this weekday ──────────────────────────
+    const schedRow = await db.prepare(`
+      SELECT is_available, open_time, close_time
+      FROM host_availability_schedule
+      WHERE listing_id = ? AND day_of_week = ?
+    `).bind(listingId, dayOfWeek).first<any>().catch(() => null)
+
+    // Default schedule if not found: 07:00–22:00
+    const hostAvail    = schedRow ? schedRow.is_available === 1 : true
+    const openTimeStr  = schedRow?.open_time  || '07:00'
+    const closeTimeStr = schedRow?.close_time || '22:00'
+
+    // Convert "HH:MM" to minutes-since-midnight
+    const toMins = (t: string) => {
+      const [h, m] = t.split(':').map(Number)
+      return h * 60 + (m || 0)
+    }
+    const openMins  = toMins(openTimeStr)
+    const closeMins = toMins(closeTimeStr)
+
+    // ── 3. Fetch confirmed/active bookings that touch this date ──────────
+    const dayStart = `${dateStr}T00:00:00Z`
+    const dayEnd   = `${dateStr}T23:59:59Z`
+
+    const [bookingRows, holdRows] = await db.batch([
+      db.prepare(`
+        SELECT start_time, end_time, id as booking_id
+        FROM bookings
+        WHERE listing_id = ?
+          AND status IN ('confirmed','active')
+          AND start_time < ?
+          AND end_time   > ?
+        ORDER BY start_time
+      `).bind(listingId, dayEnd, dayStart),
+      db.prepare(`
+        SELECT start_time, end_time, session_token
+        FROM reservation_holds
+        WHERE listing_id = ?
+          AND status = 'active'
+          AND datetime(hold_expires_at) > datetime('now')
+          AND start_time < ?
+          AND end_time   > ?
+        ORDER BY start_time
+      `).bind(listingId, dayEnd, dayStart),
+    ])
+
+    const bookings: any[] = bookingRows.results || []
+    const holds:    any[] = holdRows.results    || []
+
+    // ── 4. Build 15-min slot grid for the full day (0:00 – 23:45) ───────
+    const SLOT_MINS = 15
+    const slots: Array<{
+      time: string            // "HH:MM"
+      iso:  string            // full ISO string
+      status: 'available'|'booked'|'held'|'closed'|'past'
+    }> = []
+
+    for (let m = 0; m < 24 * 60; m += SLOT_MINS) {
+      const hh   = String(Math.floor(m / 60)).padStart(2, '0')
+      const mm   = String(m % 60).padStart(2, '0')
+      const timeLabel = `${hh}:${mm}`
+      const isoTime   = `${dateStr}T${timeLabel}:00Z`
+      const slotMs    = Date.UTC(year, month - 1, day, Math.floor(m / 60), m % 60)
+
+      // Past?
+      if (slotMs < now.getTime()) {
+        slots.push({ time: timeLabel, iso: isoTime, status: 'past' })
+        continue
+      }
+
+      // Entire day closed?
+      if (!hostAvail) {
+        slots.push({ time: timeLabel, iso: isoTime, status: 'closed' })
+        continue
+      }
+
+      // Outside host window?
+      if (m < openMins || m >= closeMins) {
+        slots.push({ time: timeLabel, iso: isoTime, status: 'closed' })
+        continue
+      }
+
+      // Overlaps a confirmed booking? (slot = [m, m+15])
+      const slotEndMs = slotMs + SLOT_MINS * 60_000
+      const isBooked = bookings.some((b: any) => {
+        const bs = new Date(b.start_time).getTime()
+        const be = new Date(b.end_time).getTime()
+        return bs < slotEndMs && be > slotMs
+      })
+      if (isBooked) {
+        slots.push({ time: timeLabel, iso: isoTime, status: 'booked' })
+        continue
+      }
+
+      // Overlaps an active hold?
+      const isHeld = holds.some((h: any) => {
+        const hs = new Date(h.start_time).getTime()
+        const he = new Date(h.end_time).getTime()
+        return hs < slotEndMs && he > slotMs
+      })
+      if (isHeld) {
+        slots.push({ time: timeLabel, iso: isoTime, status: 'held' })
+        continue
+      }
+
+      slots.push({ time: timeLabel, iso: isoTime, status: 'available' })
+    }
+
+    // ── 5. Return summary data ────────────────────────────────────────────
+    return c.json({
+      listing_id: listingId,
+      date:       dateStr,
+      day_of_week: dayOfWeek,
+      host_schedule: {
+        is_available: hostAvail,
+        open_time:    openTimeStr,
+        close_time:   closeTimeStr,
+      },
+      existing_bookings: bookings.map((b: any) => ({
+        booking_id: b.booking_id,
+        start_time: b.start_time,
+        end_time:   b.end_time,
+      })),
+      slots,
+    })
+
+  } catch (e: any) {
+    console.error('[time-slots]', e.message)
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// VALIDATE TIME RANGE — server-side availability check before /api/holds
+// POST /api/listings/:id/validate-slot
+// Body: { start_datetime, end_datetime }
+// Returns: { valid: bool, code?, error?, blocked_by_bookings?, blocked_by_holds? }
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.post('/listings/:id/validate-slot', async (c) => {
+  const listingId = c.req.param('id')
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'DB unavailable' }, 503)
+
+  const body = await c.req.json().catch(() => ({})) as any
+  const { start_datetime, end_datetime } = body
+
+  if (!start_datetime || !end_datetime) {
+    return c.json({ valid: false, error: 'start_datetime and end_datetime required', code: 'MISSING_FIELDS' }, 400)
+  }
+
+  const start = new Date(start_datetime)
+  const end   = new Date(end_datetime)
+
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+    return c.json({ valid: false, error: 'Invalid date format', code: 'INVALID_DATE' }, 400)
+  }
+  if (end <= start) {
+    return c.json({ valid: false, error: 'End time must be after start time', code: 'INVALID_RANGE' }, 400)
+  }
+  if (start < new Date()) {
+    return c.json({ valid: false, error: 'Start time must be in the future', code: 'TIME_IN_PAST' }, 400)
+  }
+
+  // Duration must be at least 15 minutes
+  const durMins = (end.getTime() - start.getTime()) / 60_000
+  if (durMins < 15) {
+    return c.json({ valid: false, error: 'Minimum booking duration is 15 minutes', code: 'TOO_SHORT' }, 400)
+  }
+
+  try {
+    // ── 1. Host schedule check ────────────────────────────────────────────
+    // Check every calendar day the booking spans
+    const msPerDay = 86_400_000
+    let cursor = new Date(start)
+    cursor.setUTCHours(0, 0, 0, 0)
+    const endDay = new Date(end)
+    endDay.setUTCHours(0, 0, 0, 0)
+
+    while (cursor <= endDay) {
+      const dow = cursor.getUTCDay()
+      const schedRow = await db.prepare(`
+        SELECT is_available, open_time, close_time
+        FROM host_availability_schedule
+        WHERE listing_id = ? AND day_of_week = ?
+      `).bind(listingId, dow).first<any>().catch(() => null)
+
+      const isAvail   = schedRow ? schedRow.is_available === 1 : true
+      const openTime  = schedRow?.open_time  || '07:00'
+      const closeTime = schedRow?.close_time || '22:00'
+
+      const toMins = (t: string) => {
+        const [h, m] = t.split(':').map(Number)
+        return h * 60 + (m || 0)
+      }
+
+      if (!isAvail) {
+        const DAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']
+        return c.json({
+          valid:  false,
+          error:  `The host is not available on ${DAY_NAMES[dow]}s. Please choose a different day.`,
+          code:   'HOST_CLOSED_DAY',
+          day_of_week: dow,
+        }, 409)
+      }
+
+      // Check if the booking start or end falls outside host's window on this day
+      const dateStr = cursor.toISOString().split('T')[0]
+      const dayOpenMs  = Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth(), cursor.getUTCDate(),
+        Math.floor(toMins(openTime) / 60), toMins(openTime) % 60)
+      const dayCloseMs = Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth(), cursor.getUTCDate(),
+        Math.floor(toMins(closeTime) / 60), toMins(closeTime) % 60)
+
+      // Booking portion on this day
+      const segStart = Math.max(start.getTime(), dayOpenMs - 24 * 3600_000)
+      // If booking starts before host opens on this day's date
+      const bookingStartOnDay = new Date(start)
+      if (bookingStartOnDay.toISOString().startsWith(dateStr) && start.getTime() < dayOpenMs) {
+        return c.json({
+          valid: false,
+          error: `This spot opens at ${openTime} on this day. Please select a later start time.`,
+          code:  'OUTSIDE_HOST_HOURS',
+          open_time: openTime, close_time: closeTime,
+        }, 409)
+      }
+      const bookingEndOnDay = new Date(end)
+      if (bookingEndOnDay.toISOString().startsWith(dateStr) && end.getTime() > dayCloseMs) {
+        return c.json({
+          valid: false,
+          error: `This spot closes at ${closeTime} on this day. Please select an earlier end time.`,
+          code:  'OUTSIDE_HOST_HOURS',
+          open_time: openTime, close_time: closeTime,
+        }, 409)
+      }
+
+      cursor = new Date(cursor.getTime() + msPerDay)
+    }
+
+    // ── 2. Confirmed booking overlap check ───────────────────────────────
+    const conflict = await db.prepare(`
+      SELECT id, start_time, end_time
+      FROM bookings
+      WHERE listing_id = ?
+        AND status IN ('confirmed','active')
+        AND start_time < ?
+        AND end_time   > ?
+      LIMIT 1
+    `).bind(listingId, end_datetime, start_datetime).first<any>()
+
+    if (conflict) {
+      const cs = new Date(conflict.start_time)
+      const ce = new Date(conflict.end_time)
+      const fmt = (d: Date) => d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',hour12:true})
+      return c.json({
+        valid:  false,
+        error:  `This time slot is already booked (${fmt(cs)} – ${fmt(ce)}). Please choose a different time.`,
+        code:   'SLOT_BOOKED',
+        conflicting_booking: { start: conflict.start_time, end: conflict.end_time },
+      }, 409)
+    }
+
+    // ── 3. Active hold overlap check ─────────────────────────────────────
+    const heldSlot = await db.prepare(`
+      SELECT id, start_time, end_time
+      FROM reservation_holds
+      WHERE listing_id = ?
+        AND status = 'active'
+        AND datetime(hold_expires_at) > datetime('now')
+        AND start_time < ?
+        AND end_time   > ?
+      LIMIT 1
+    `).bind(listingId, end_datetime, start_datetime).first<any>()
+
+    if (heldSlot) {
+      return c.json({
+        valid:  false,
+        error:  'This time slot is temporarily reserved by another user. Please try again in a few minutes.',
+        code:   'SLOT_HELD',
+        retry_after_seconds: 600,
+      }, 409)
+    }
+
+    // ── All clear — price using 15-min increments ─────────────────────────
+    // Round up to nearest 15-minute block (minimum 1 block = 0.25h)
+    const rawMins   = (end.getTime() - start.getTime()) / 60_000
+    const roundMins = Math.max(15, Math.ceil(rawMins / 15) * 15)
+    const hours     = Math.round((roundMins / 60) * 100) / 100
+
+    const listing = await db.prepare(
+      'SELECT rate_hourly FROM listings WHERE id = ? AND status = ?'
+    ).bind(listingId, 'active').first<any>().catch(() => null)
+    const rate     = listing?.rate_hourly || 12
+    const subtotal = Math.round(rate * hours * 100) / 100
+    const fee      = Math.round(subtotal * 0.15 * 100) / 100
+    const total    = Math.round((subtotal + fee) * 100) / 100
+
+    return c.json({
+      valid: true,
+      pricing: {
+        hours,
+        rate_per_hour: rate,
+        subtotal, platform_fee: fee, total,
+        total_cents: Math.round(total * 100),
+        currency: 'usd',
+      }
+    })
+
+  } catch (e: any) {
+    console.error('[validate-slot]', e.message)
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
 // RESERVATION HOLDS — Slot-lock before payment
 // POST /api/holds
 //
@@ -2364,6 +2791,42 @@ apiRoutes.post('/holds', async (c) => {
   }
 
   try {
+    // ── 0. Host availability schedule check ─────────────────────────────
+    {
+      const toMins = (t: string) => { const [h,m] = t.split(':').map(Number); return h*60+(m||0) }
+      const DAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']
+      // iterate over each calendar day spanned by the booking
+      const msPerDay = 86_400_000
+      let cur = new Date(start); cur.setUTCHours(0,0,0,0)
+      const endDay = new Date(end); endDay.setUTCHours(0,0,0,0)
+      while (cur <= endDay) {
+        const dow = cur.getUTCDay()
+        const schedRow = await db.prepare(
+          'SELECT is_available, open_time, close_time FROM host_availability_schedule WHERE listing_id = ? AND day_of_week = ?'
+        ).bind(listing_id, dow).first<any>().catch(() => null)
+        const isAvail   = schedRow ? schedRow.is_available === 1 : true
+        const openStr   = schedRow?.open_time  || '07:00'
+        const closeStr  = schedRow?.close_time || '22:00'
+        if (!isAvail) {
+          return c.json({
+            error: `The host is not available on ${DAY_NAMES[dow]}s. Please choose a different day.`,
+            code: 'HOST_CLOSED_DAY', day_of_week: dow,
+          }, 409)
+        }
+        const dateStr = cur.toISOString().split('T')[0]
+        const [y,mo,d] = dateStr.split('-').map(Number)
+        const openMs  = Date.UTC(y, mo-1, d, Math.floor(toMins(openStr)/60),  toMins(openStr)%60)
+        const closeMs = Date.UTC(y, mo-1, d, Math.floor(toMins(closeStr)/60), toMins(closeStr)%60)
+        if (start.toISOString().startsWith(dateStr) && start.getTime() < openMs) {
+          return c.json({ error: `This spot opens at ${openStr} on this day.`, code: 'OUTSIDE_HOST_HOURS', open_time: openStr, close_time: closeStr }, 409)
+        }
+        if (end.toISOString().startsWith(dateStr) && end.getTime() > closeMs) {
+          return c.json({ error: `This spot closes at ${closeStr} on this day. Please select an earlier end time.`, code: 'OUTSIDE_HOST_HOURS', open_time: openStr, close_time: closeStr }, 409)
+        }
+        cur = new Date(cur.getTime() + msPerDay)
+      }
+    }
+
     // ── 1. Check for CONFIRMED/ACTIVE booking conflicts ──────────────────
     const bookingConflict = await db.prepare(`
       SELECT id FROM bookings
@@ -2422,11 +2885,14 @@ apiRoutes.post('/holds', async (c) => {
     // ── 5. INSERT new hold (10-min TTL) ───────────────────────────────────
     const holdExpiry = new Date(Date.now() + 10 * 60 * 1000).toISOString()
 
-    const hours    = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / 3600000))
-    const rate     = listing.rate_hourly || 12
-    const base     = Math.round(rate * hours * 100) / 100
-    const fee      = Math.round(base * 0.15 * 100) / 100
-    const total    = Math.round((base + fee) * 100) / 100
+    // Price using 15-min increments (same logic as validate-slot)
+    const rawMins   = (end.getTime() - start.getTime()) / 60_000
+    const roundMins = Math.max(15, Math.ceil(rawMins / 15) * 15)
+    const hours     = Math.round((roundMins / 60) * 100) / 100
+    const rate      = listing.rate_hourly || 12
+    const base      = Math.round(rate * hours * 100) / 100
+    const fee       = Math.round(base * 0.15 * 100) / 100
+    const total     = Math.round((base + fee) * 100) / 100
 
     const holdRes = await db.prepare(`
       INSERT INTO reservation_holds
