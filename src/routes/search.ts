@@ -55,6 +55,20 @@ searchPage.get('/', async (c) => {
           </div>
         </div>
 
+        <!-- ── Walk Score Destination Input ── -->
+        <div class="relative mb-3" id="walk-dest-row">
+          <div class="flex items-center gap-2 bg-charcoal-100 border border-indigo-500/40 rounded-xl px-3 py-2.5 focus-within:border-indigo-500 transition-all">
+            <i class="fas fa-location-dot text-lime-500 text-sm flex-shrink-0"></i>
+            <input type="text" id="dest-input" placeholder="Where are you going? (for walk score)" autocomplete="off"
+              class="bg-transparent text-white placeholder-gray-500 text-sm flex-1 focus:outline-none"/>
+            <button id="dest-clear" onclick="clearDestination()" class="hidden text-gray-500 hover:text-white text-xs flex-shrink-0 transition-colors">
+              <i class="fas fa-times"></i>
+            </button>
+          </div>
+          <!-- Autocomplete dropdown -->
+          <div id="dest-suggestions" class="hidden absolute left-0 right-0 top-full mt-1 bg-charcoal-100 border border-white/10 rounded-xl shadow-xl z-50 overflow-hidden"></div>
+        </div>
+
         <!-- Filter Pills -->
         <div class="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-hide">
           <button onclick="setTypeFilter('all', this)" data-filter="all"
@@ -84,6 +98,20 @@ searchPage.get('/', async (c) => {
         </div>
       </div>
 
+      <!-- Walk Score Banner (shown when destination is set) -->
+      <div id="walk-banner" class="hidden px-4 py-2.5 bg-gradient-to-r from-lime-500/10 to-indigo-500/10 border-b border-lime-500/20 flex-shrink-0">
+        <div class="flex items-center justify-between gap-2">
+          <div class="flex items-center gap-2 min-w-0">
+            <i class="fas fa-person-walking text-lime-400 text-sm flex-shrink-0"></i>
+            <span class="text-lime-300 text-xs font-semibold truncate" id="walk-banner-dest">Destination set</span>
+          </div>
+          <div id="walk-calc-status" class="text-gray-500 text-xs flex-shrink-0 flex items-center gap-1">
+            <span id="walk-calc-spinner" class="hidden"><i class="fas fa-spinner fa-spin text-indigo-400"></i></span>
+            <span id="walk-calc-label"></span>
+          </div>
+        </div>
+      </div>
+
       <!-- Results Header -->
       <div class="px-4 py-3 flex items-center justify-between border-b border-white/5 flex-shrink-0 bg-charcoal">
         <p class="text-sm text-gray-400" id="results-count">
@@ -102,6 +130,7 @@ searchPage.get('/', async (c) => {
           <select id="sort-select" onchange="sortListings(this.value)"
             class="bg-transparent text-gray-400 text-xs focus:outline-none cursor-pointer hover:text-white transition-colors">
             <option value="rating">Best Match</option>
+            <option value="walk_score" id="sort-walk-option" class="hidden">🚶 Closest Walk</option>
             <option value="price_asc">Price: Low to High</option>
             <option value="price_desc">Price: High to Low</option>
             <option value="reviews">Most Reviewed</option>
@@ -184,6 +213,43 @@ searchPage.get('/', async (c) => {
           class="w-10 h-10 glass rounded-xl flex items-center justify-center text-white hover:bg-white/10 transition-colors" title="Find my location">
           <i class="fas fa-crosshairs text-sm"></i>
         </button>
+      </div>
+
+      <!-- Walk Score Best Parking Suggestion Chip -->
+      <div id="best-walk-chip" class="hidden absolute top-14 left-1/2 -translate-x-1/2 z-20 pointer-events-none">
+        <div class="flex items-center gap-2 bg-lime-500 text-black px-4 py-2 rounded-full shadow-xl text-xs font-bold whitespace-nowrap">
+          <i class="fas fa-person-walking"></i>
+          <span id="best-walk-chip-text">Best parking is nearby</span>
+        </div>
+      </div>
+
+      <!-- Walk Route Info Panel -->
+      <div id="walk-route-panel" class="hidden absolute bottom-20 left-4 z-20 w-64">
+        <div class="glass rounded-2xl border border-lime-500/30 overflow-hidden">
+          <div class="px-4 py-3 bg-lime-500/10 border-b border-lime-500/20 flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <i class="fas fa-person-walking text-lime-400 text-sm"></i>
+              <span class="text-white text-xs font-bold">Walking Route</span>
+            </div>
+            <button onclick="clearWalkRoute()" class="text-gray-500 hover:text-white text-xs transition-colors">
+              <i class="fas fa-times"></i>
+            </button>
+          </div>
+          <div class="px-4 py-3">
+            <div class="flex items-center justify-between mb-2">
+              <div class="text-center">
+                <p class="text-2xl font-black text-white" id="route-panel-time">–</p>
+                <p class="text-gray-500 text-xs">walk time</p>
+              </div>
+              <div class="w-px h-10 bg-white/10"></div>
+              <div class="text-center">
+                <p class="text-xl font-black text-lime-400" id="route-panel-dist">–</p>
+                <p class="text-gray-500 text-xs">distance</p>
+              </div>
+            </div>
+            <div class="text-xs text-gray-500 truncate" id="route-panel-dest"></div>
+          </div>
+        </div>
       </div>
 
       <!-- Map loading overlay -->
@@ -398,6 +464,90 @@ searchPage.get('/', async (c) => {
     }
     .badge-tooltip:hover .badge-tip { visibility: visible; opacity: 1; }
     .scrollbar-hide::-webkit-scrollbar { display: none; }
+
+    /* ── Walk Score Marker Pins ────────────────────────────── */
+    .park-pin.walk-pin {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 4px 9px 3px;
+      gap: 0;
+      min-width: 52px;
+    }
+    .ws-time {
+      font-size: 11px;
+      font-weight: 900;
+      line-height: 1.1;
+      display: block;
+    }
+    .ws-price {
+      font-size: 9px;
+      font-weight: 600;
+      opacity: 0.75;
+      display: block;
+      line-height: 1.1;
+    }
+    .ws-best-badge {
+      font-size: 7px;
+      font-weight: 900;
+      letter-spacing: 0.05em;
+      background: rgba(255,255,255,0.25);
+      border-radius: 20px;
+      padding: 1px 4px;
+      margin-top: 2px;
+      display: block;
+      line-height: 1.2;
+    }
+    /* Tier colors */
+    .park-pin.ws-green  { background: #16a34a; border-color: #22c55e; color: #fff; }
+    .park-pin.ws-yellow { background: #a16207; border-color: #eab308; color: #fff; }
+    .park-pin.ws-orange { background: #c2410c; border-color: #f97316; color: #fff; }
+    .park-pin.ws-red    { background: #991b1b; border-color: #ef4444; color: #fff; }
+    /* Best walk glow */
+    .park-pin.ws-best {
+      box-shadow: 0 0 0 3px rgba(34,197,94,0.5), 0 0 16px rgba(34,197,94,0.4) !important;
+      border-color: #22c55e !important;
+      transform: scale(1.12);
+      z-index: 10;
+    }
+    .park-pin.ws-best:hover, .park-pin.ws-best.active {
+      transform: scale(1.22) !important;
+    }
+    /* Walk card badge */
+    .ws-card-badge {
+      padding: 0 12px 8px;
+    }
+    .ws-card-badge-inner {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 20px;
+      background: rgba(34,197,94,0.08);
+      border: 1px solid rgba(34,197,94,0.2);
+      color: #86efac;
+    }
+    .ws-card-badge-inner.ws-yellow { background: rgba(234,179,8,0.08); border-color: rgba(234,179,8,0.2); color: #fde68a; }
+    .ws-card-badge-inner.ws-orange { background: rgba(249,115,22,0.08); border-color: rgba(249,115,22,0.2); color: #fed7aa; }
+    .ws-card-badge-inner.ws-red    { background: rgba(239,68,68,0.08);  border-color: rgba(239,68,68,0.2);  color: #fca5a5; }
+    .ws-card-badge-inner.ws-best   { background: rgba(34,197,94,0.14); border-color: rgba(34,197,94,0.4); color: #4ade80; box-shadow: 0 0 0 1px rgba(34,197,94,0.15); }
+    .ws-best-label {
+      background: #22c55e;
+      color: #000;
+      font-size: 9px;
+      font-weight: 900;
+      letter-spacing: 0.05em;
+      padding: 1px 5px;
+      border-radius: 20px;
+      margin-left: 2px;
+    }
+    .ws-approx { opacity: 0.55; font-style: italic; }
+    /* Destination input row */
+    #dest-suggestions button:hover { background: rgba(99,102,241,0.08); }
+    /* Walk route dashed line animation */
+    @keyframes dashOffset { to { stroke-dashoffset: -20; } }
   </style>
 
   <script>
@@ -419,6 +569,66 @@ searchPage.get('/', async (c) => {
   let trustedZoneLayerAdded = false
 
   let MAPBOX_TOKEN = ''
+
+  // ── WALK SCORE STATE ───────────────────────────────────────────────────────
+  const WS = {
+    destCoords: null,          // { lng, lat }
+    destName: '',              // human-readable label
+    scores: new Map(),         // listingId → { distanceM, durationS, source:'api'|'haversine' }
+    closestId: null,           // id of closest listing
+    activeRoute: null,         // { listingId, distanceM, durationS }
+    destMarker: null,          // mapboxgl.Marker for destination pin
+    calcQueue: [],             // listing ids awaiting calculation
+    calcInFlight: 0,           // concurrent requests in flight
+    calcDone: 0,               // completed this batch
+    calcTotal: 0,              // total in batch
+    debounceTimer: null,
+    // Prevent recalc when destination hasn't meaningfully changed
+    lastCalcDestKey: null
+  }
+  const WS_CONCURRENCY = 4    // max parallel Directions API calls
+  const WS_MAX_SPOTS   = 20   // only compute for nearest N spots by haversine
+  const WS_CACHE_TTL   = 5 * 60 * 1000  // 5 min cache
+  const wsCache = new Map()   // key → { result, ts }
+
+  // Format meters → human string
+  function fmtDist(m) {
+    if (m < 160)  return Math.round(m) + ' m'
+    const miles = m / 1609.34
+    if (miles < 0.1) return Math.round(m) + ' m'
+    return miles.toFixed(2) + ' mi'
+  }
+  // Format seconds → human string
+  function fmtDur(s) {
+    const m = Math.round(s / 60)
+    if (m < 1)  return '< 1 min'
+    if (m === 1) return '1 min'
+    return m + ' min'
+  }
+  // Haversine fallback (returns metres)
+  function haversine(lat1, lng1, lat2, lng2) {
+    const R = 6371000
+    const toR = x => x * Math.PI / 180
+    const dLat = toR(lat2 - lat1)
+    const dLng = toR(lng2 - lng1)
+    const a = Math.sin(dLat/2)**2 + Math.cos(toR(lat1))*Math.cos(toR(lat2))*Math.sin(dLng/2)**2
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))
+  }
+  // Walk score color tier: green <3min, yellow 3-6min, orange 6-10min, red >10min
+  function wsColor(durationS) {
+    const m = durationS / 60
+    if (m < 3)  return 'ws-green'
+    if (m < 6)  return 'ws-yellow'
+    if (m < 10) return 'ws-orange'
+    return 'ws-red'
+  }
+  function wsColorHex(durationS) {
+    const m = durationS / 60
+    if (m < 3)  return '#22c55e'
+    if (m < 6)  return '#eab308'
+    if (m < 10) return '#f97316'
+    return '#ef4444'
+  }
 
   // PRI helpers
   function priColor(score) {
@@ -665,6 +875,13 @@ searchPage.get('/', async (c) => {
     if (currentSort === 'rating')      sorted.sort((a, b) => (b.rating || 0) - (a.rating || 0))
     if (currentSort === 'reviews')     sorted.sort((a, b) => (b.review_count || 0) - (a.review_count || 0))
     if (currentSort === 'reliability') sorted.sort((a, b) => (b.pri_score ?? -1) - (a.pri_score ?? -1))
+    if (currentSort === 'walk_score') {
+      sorted.sort((a, b) => {
+        const sa = WS.scores.get(a.id)?.durationS ?? Infinity
+        const sb = WS.scores.get(b.id)?.durationS ?? Infinity
+        return sa - sb
+      })
+    }
 
     document.getElementById('count-num').textContent = sorted.length
     document.getElementById('count-label').textContent = 'spots nearby'
@@ -677,6 +894,8 @@ searchPage.get('/', async (c) => {
     if (trustedZonesEnabled) toggleTrustedZones(true)
     // Load/refresh top hosts widget
     loadTopHosts()
+    // Trigger walk score calc if destination is set and listings just refreshed
+    if (WS.destCoords && sorted.length > 0) scheduleWalkScoreCalc(600)
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -770,6 +989,9 @@ searchPage.get('/', async (c) => {
 
       container.appendChild(card)
     })
+
+    // Inject walk badges into freshly-rendered cards
+    if (WS.destCoords && WS.scores.size > 0) refreshCardWalkBadges()
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -800,9 +1022,26 @@ searchPage.get('/', async (c) => {
       if (!l.lat || !l.lng) return
 
       const el = document.createElement('div')
-      el.className = 'park-pin ' + priPinClass(l.pri_score)
+      // Store meta on element for walk badge updates
+      el._priceHr  = l.price_hourly || 0
+      el._priScore = l.pri_score
+
+      const score   = WS.scores.get(l.id)
+      const isBest  = (l.id == WS.closestId)
+
+      if (score && WS.destCoords) {
+        const cls = wsColor(score.durationS)
+        el.className = 'park-pin walk-pin ' + priPinClass(l.pri_score) + ' ' + cls + (isBest ? ' ws-best' : '')
+        el.innerHTML =
+          '<span class="ws-time">' + fmtDur(score.durationS) + '</span>' +
+          '<span class="ws-price">$' + (l.price_hourly || 0).toFixed(0) + '</span>' +
+          (isBest ? '<span class="ws-best-badge">BEST</span>' : '')
+      } else {
+        el.className = 'park-pin ' + priPinClass(l.pri_score)
+        el.dataset.id = l.id
+        el.textContent = '$' + (l.price_hourly || 0).toFixed(0)
+      }
       el.dataset.id = l.id
-      el.textContent = '$' + (l.price_hourly || 0).toFixed(0)
 
       try {
         const marker = new mapboxgl.Marker({ element: el, anchor: 'bottom' })
@@ -925,6 +1164,24 @@ searchPage.get('/', async (c) => {
               (l.pri_score != null ? '<span class="ml-1 text-xs font-semibold" style="color:' + (l.pri_score>=95?'#16a34a':l.pri_score>=85?'#2563eb':l.pri_score>=75?'#ca8a04':'#dc2626') + '">• ' + l.pri_score + '%</span>' : '') +
             '</div>' +
           '</div>' +
+          // Walk score section in popup
+          (WS.destCoords ? (() => {
+            const ws = WS.scores.get(l.id)
+            const hex = ws ? wsColorHex(ws.durationS) : '#94a3b8'
+            const isBest = l.id == WS.closestId
+            return '<div style="background:rgba(34,197,94,0.06);border:1px solid rgba(34,197,94,0.2);border-radius:12px;padding:10px 12px;margin-bottom:12px;display:flex;align-items:center;gap:8px">' +
+              '<i class="fas fa-person-walking" style="color:' + hex + ';font-size:14px"></i>' +
+              '<div style="flex:1">' +
+                '<p style="color:' + hex + ';font-size:14px;font-weight:800;margin:0">' +
+                  (ws ? fmtDur(ws.durationS) : 'Calculating…') +
+                '</p>' +
+                '<p style="color:#94a3b8;font-size:11px;margin:2px 0 0">' +
+                  (ws ? fmtDist(ws.distanceM) + ' walk' + (ws.source==='haversine'?' ~':'') : '') +
+                '</p>' +
+              '</div>' +
+              (isBest ? '<span style="background:#22c55e;color:#000;font-size:9px;font-weight:900;padding:2px 7px;border-radius:20px">CLOSEST</span>' : '') +
+            '</div>'
+          })() : '') +
           (tags.length > 0 ? '<div class="flex gap-1 flex-wrap mb-3">' + tags.slice(0,4).map(t => '<span class="text-xs bg-white/5 text-gray-400 px-2 py-0.5 rounded-full flex items-center gap-1"><i class=\\"fas ' + t.i + ' text-indigo-400 text-xs\\"></i>' + t.t + '</span>').join('') + '</div>' : '') +
           (l.instant_book ? '<div class="flex items-center gap-1.5 mb-3"><span class="w-1.5 h-1.5 bg-lime-500 rounded-full"></span><span class="text-lime-400 text-xs font-semibold">Instant Book Available</span></div>' : '') +
           '<a href="/listing/' + l.id + '" class="block w-full py-2.5 btn-primary text-white text-center text-sm font-bold rounded-xl transition-all">View &amp; Reserve</a>' +
@@ -943,6 +1200,9 @@ searchPage.get('/', async (c) => {
 
     // Highlight marker
     highlightPin(l.id)
+
+    // Show walk route if destination is set
+    if (WS.destCoords) showWalkRoute(l.id)
 
     popup.on('close', () => {
       if (card) card.classList.remove('highlighted')
@@ -1036,6 +1296,381 @@ searchPage.get('/', async (c) => {
     applySortAndRender()
   }
 
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // WALK SCORE — DESTINATION INPUT + AUTOCOMPLETE
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  let destDebounce = null
+  document.addEventListener('DOMContentLoaded', () => {
+    const inp = document.getElementById('dest-input')
+    if (!inp) return
+    inp.addEventListener('input', () => {
+      clearTimeout(destDebounce)
+      destDebounce = setTimeout(() => runDestAutocomplete(inp.value.trim()), 280)
+    })
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { closeSuggestions(); inp.blur() }
+    })
+    document.addEventListener('click', e => {
+      if (!e.target.closest('#walk-dest-row')) closeSuggestions()
+    })
+  })
+
+  async function runDestAutocomplete(q) {
+    const box = document.getElementById('dest-suggestions')
+    if (!box) return
+    if (!q || q.length < 3) { box.classList.add('hidden'); box.innerHTML = ''; return }
+    if (!MAPBOX_TOKEN) return
+    try {
+      const url = 'https://api.mapbox.com/geocoding/v5/mapbox.places/' + encodeURIComponent(q)
+        + '.json?access_token=' + MAPBOX_TOKEN + '&types=poi,address,place,neighborhood&limit=5&language=en'
+      const res = await fetch(url)
+      const geo = await res.json()
+      if (!geo.features || !geo.features.length) { box.classList.add('hidden'); return }
+      box.innerHTML = geo.features.map(f => {
+        const place = f.place_name || f.text
+        return '<button class="w-full text-left px-4 py-3 hover:bg-indigo-500/10 border-b border-white/5 last:border-0 transition-colors" ' +
+          'onclick="selectDestination(' + JSON.stringify(f.center[0]) + ',' + JSON.stringify(f.center[1]) + ',' + JSON.stringify(place) + ')">' +
+          '<div class="flex items-start gap-3">' +
+            '<i class="fas fa-location-dot text-lime-400 text-xs mt-0.5 flex-shrink-0"></i>' +
+            '<div class="min-w-0">' +
+              '<p class="text-white text-xs font-semibold truncate">' + f.text + '</p>' +
+              '<p class="text-gray-500 text-xs truncate">' + (f.place_name || '') + '</p>' +
+            '</div>' +
+          '</div>' +
+        '</button>'
+      }).join('')
+      box.classList.remove('hidden')
+    } catch(e) { console.warn('[walk] autocomplete error', e) }
+  }
+
+  function closeSuggestions() {
+    const box = document.getElementById('dest-suggestions')
+    if (box) { box.classList.add('hidden'); box.innerHTML = '' }
+  }
+
+  function selectDestination(lng, lat, name) {
+    WS.destCoords = { lng, lat }
+    WS.destName   = name
+    const inp = document.getElementById('dest-input')
+    if (inp) inp.value = name
+    document.getElementById('dest-clear').classList.remove('hidden')
+    closeSuggestions()
+    // Update walk banner
+    document.getElementById('walk-banner').classList.remove('hidden')
+    document.getElementById('walk-banner-dest').textContent = '→ ' + name
+    // Unlock walk sort option
+    const opt = document.getElementById('sort-walk-option')
+    if (opt) { opt.classList.remove('hidden') }
+    // Place destination pin on map
+    placeDestMarker(lng, lat, name)
+    // Trigger walk score calculation for current listings
+    if (allListings.length > 0) scheduleWalkScoreCalc()
+  }
+
+  function clearDestination() {
+    WS.destCoords  = null
+    WS.destName    = ''
+    WS.scores.clear()
+    WS.closestId   = null
+    WS.lastCalcDestKey = null
+    const inp = document.getElementById('dest-input')
+    if (inp) inp.value = ''
+    document.getElementById('dest-clear').classList.add('hidden')
+    document.getElementById('walk-banner').classList.add('hidden')
+    document.getElementById('best-walk-chip').classList.add('hidden')
+    document.getElementById('walk-calc-label').textContent = ''
+    const opt = document.getElementById('sort-walk-option')
+    if (opt) opt.classList.add('hidden')
+    if (currentSort === 'walk_score') {
+      currentSort = 'rating'
+      const sel = document.getElementById('sort-select')
+      if (sel) sel.value = 'rating'
+    }
+    clearDestMarker()
+    clearWalkRoute()
+    // Re-render markers without walk badges
+    _renderPinsNow(allListings)
+    applySortAndRender()
+  }
+
+  function placeDestMarker(lng, lat, name) {
+    clearDestMarker()
+    if (!map || typeof mapboxgl === 'undefined') return
+    const el = document.createElement('div')
+    el.innerHTML = '<div style="background:#22c55e;color:#000;font-size:10px;font-weight:800;padding:4px 10px;border-radius:20px;white-space:nowrap;box-shadow:0 0 0 3px rgba(34,197,94,0.3)">' +
+      '<i class="fas fa-location-dot" style="margin-right:4px"></i>Destination</div>' +
+      '<div style="width:8px;height:8px;background:#22c55e;border-radius:50%;margin:3px auto 0"></div>'
+    el.style.cssText = 'cursor:default;'
+    WS.destMarker = new mapboxgl.Marker({ element: el, anchor: 'bottom' })
+      .setLngLat([lng, lat]).addTo(map)
+  }
+  function clearDestMarker() {
+    if (WS.destMarker) { WS.destMarker.remove(); WS.destMarker = null }
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // WALK SCORE — CALCULATION ENGINE
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  function scheduleWalkScoreCalc(debounceMs = 300) {
+    clearTimeout(WS.debounceTimer)
+    WS.debounceTimer = setTimeout(runWalkScoreCalc, debounceMs)
+  }
+
+  async function runWalkScoreCalc() {
+    if (!WS.destCoords) return
+    const { lng: dLng, lat: dLat } = WS.destCoords
+    const destKey = dLat.toFixed(5) + ',' + dLng.toFixed(5)
+    // Skip if destination hasn't changed and we already have scores for current listings
+    const listingKey = allListings.map(l => l.id).join(',')
+    const calcKey    = destKey + '|' + listingKey
+    if (calcKey === WS.lastCalcDestKey) return
+    WS.lastCalcDestKey = calcKey
+
+    // Filter to spots with coords, limit to nearest WS_MAX_SPOTS by haversine
+    const valid = allListings
+      .filter(l => l.lat && l.lng)
+      .map(l => ({ ...l, _hav: haversine(l.lat, l.lng, dLat, dLng) }))
+      .sort((a, b) => a._hav - b._hav)
+      .slice(0, WS_MAX_SPOTS)
+
+    // Seed haversine estimates immediately (instant visual feedback)
+    valid.forEach(l => {
+      if (!WS.scores.has(l.id)) {
+        // Walking speed ~1.4 m/s (5 km/h) for initial estimate
+        WS.scores.set(l.id, { distanceM: l._hav, durationS: l._hav / 1.4, source: 'haversine' })
+      }
+    })
+
+    // Update markers with haversine estimates right away
+    updateAllWalkBadges()
+    updateBestWalkChip()
+
+    // Now queue API calls for listings that don't have fresh cached results
+    const toFetch = []
+    valid.forEach(l => {
+      const cacheKey = l.id + '|' + destKey
+      const cached   = wsCache.get(cacheKey)
+      if (cached && (Date.now() - cached.ts < WS_CACHE_TTL)) {
+        WS.scores.set(l.id, cached.result)
+      } else {
+        toFetch.push(l)
+      }
+    })
+
+    if (toFetch.length === 0) {
+      finalizeWalkScores()
+      return
+    }
+
+    // Show progress
+    WS.calcDone  = 0
+    WS.calcTotal = toFetch.length
+    updateCalcStatus()
+    document.getElementById('walk-calc-spinner').classList.remove('hidden')
+
+    // Process in batches of WS_CONCURRENCY
+    WS.calcQueue = [...toFetch]
+    for (let i = 0; i < WS_CONCURRENCY; i++) drainWalkQueue(destKey)
+  }
+
+  async function drainWalkQueue(destKey) {
+    if (WS.calcQueue.length === 0) return
+    const l = WS.calcQueue.shift()
+    const cacheKey = l.id + '|' + destKey
+    try {
+      const url = 'https://api.mapbox.com/directions/v5/mapbox/walking/' +
+        l.lng + ',' + l.lat + ';' +
+        WS.destCoords.lng + ',' + WS.destCoords.lat +
+        '?access_token=' + MAPBOX_TOKEN +
+        '&overview=full&geometries=geojson&steps=false&language=en'
+      const res  = await fetch(url)
+      const data = await res.json()
+      if (data.routes && data.routes[0]) {
+        const route = data.routes[0]
+        const result = {
+          distanceM: route.distance,
+          durationS: route.duration,
+          geometry:  route.geometry,
+          source:    'api'
+        }
+        WS.scores.set(l.id, result)
+        wsCache.set(cacheKey, { result, ts: Date.now() })
+      }
+    } catch(e) {
+      // Keep haversine estimate already set
+    }
+    WS.calcDone++
+    updateCalcStatus()
+    // Update visuals incrementally
+    updateWalkBadge(l.id)
+    updateBestWalkChip()
+    // Continue queue
+    if (WS.calcQueue.length > 0) {
+      drainWalkQueue(destKey)
+    } else if (WS.calcDone >= WS.calcTotal) {
+      finalizeWalkScores()
+    }
+  }
+
+  function finalizeWalkScores() {
+    document.getElementById('walk-calc-spinner').classList.add('hidden')
+    document.getElementById('walk-calc-label').textContent = 'Scores ready'
+    setTimeout(() => { document.getElementById('walk-calc-label').textContent = '' }, 2500)
+    updateAllWalkBadges()
+    updateBestWalkChip()
+    // Auto-sort by walk score if user has set walk sort
+    if (currentSort === 'walk_score') applySortAndRender()
+    // Update listing cards with walk badges
+    refreshCardWalkBadges()
+  }
+
+  function updateCalcStatus() {
+    const lbl = document.getElementById('walk-calc-label')
+    if (lbl) lbl.textContent = WS.calcDone + '/' + WS.calcTotal + ' scored'
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // WALK SCORE — MARKER BADGE RENDERING
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  function updateAllWalkBadges() {
+    activeMarkers.forEach(m => updateWalkBadge(m.id))
+    // Find closest
+    let best = null, bestDur = Infinity
+    WS.scores.forEach((v, id) => {
+      if (v.durationS < bestDur) { bestDur = v.durationS; best = id }
+    })
+    WS.closestId = best
+    // Apply/remove best-walk class on all markers
+    activeMarkers.forEach(m => {
+      m.el.classList.toggle('ws-best', m.id == WS.closestId)
+    })
+  }
+
+  function updateWalkBadge(listingId) {
+    const m = activeMarkers.find(m => m.id == listingId)
+    if (!m) return
+    const score = WS.scores.get(listingId)
+    if (!score) return
+    const dur = score.durationS
+    const cls = wsColor(dur)
+    const label = fmtDur(dur)
+    const isBest = (listingId == WS.closestId)
+    // Rebuild pin element
+    m.el.className = 'park-pin walk-pin ' + priPinClass(m.el._priScore) + ' ' + cls + (isBest ? ' ws-best' : '')
+    m.el.innerHTML =
+      '<span class="ws-time">' + label + '</span>' +
+      '<span class="ws-price">$' + (m.el._priceHr || 0).toFixed(0) + '</span>'
+    if (isBest) {
+      m.el.innerHTML += '<span class="ws-best-badge">BEST</span>'
+    }
+  }
+
+  function updateBestWalkChip() {
+    const chip = document.getElementById('best-walk-chip')
+    const txt  = document.getElementById('best-walk-chip-text')
+    if (!chip || !WS.closestId || !WS.destCoords) return
+    const score = WS.scores.get(WS.closestId)
+    if (!score) return
+    txt.textContent = 'Best parking is ' + fmtDur(score.durationS) + ' walk away'
+    chip.classList.remove('hidden')
+    // Hide chip after 5s
+    clearTimeout(chip._hideTimer)
+    chip._hideTimer = setTimeout(() => chip.classList.add('hidden'), 5000)
+  }
+
+  function refreshCardWalkBadges() {
+    // Inject walk badges into existing listing cards
+    allListings.forEach(l => {
+      const card = document.querySelector('[data-id="' + l.id + '"].listing-card')
+      if (!card) return
+      // Remove stale badge
+      card.querySelector('.ws-card-badge')?.remove()
+      const score = WS.scores.get(l.id)
+      if (!score) return
+      const badge = document.createElement('div')
+      badge.className = 'ws-card-badge'
+      const isB = (l.id == WS.closestId)
+      badge.innerHTML =
+        '<div class="ws-card-badge-inner ' + wsColor(score.durationS) + (isB ? ' ws-best' : '') + '">' +
+          (isB ? '<i class="fas fa-circle-check"></i> ' : '<i class="fas fa-person-walking"></i> ') +
+          fmtDur(score.durationS) + ' · ' + fmtDist(score.distanceM) +
+          (score.source === 'haversine' ? ' <span class="ws-approx">~</span>' : '') +
+          (isB ? ' <span class="ws-best-label">CLOSEST</span>' : '') +
+        '</div>'
+      card.querySelector('.flex.items-center.justify-between.mt-2')?.after(badge)
+    })
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // WALK ROUTE — DISPLAY WALKING PATH ON MAP
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  function showWalkRoute(listingId) {
+    if (!WS.destCoords || !map || typeof mapboxgl === 'undefined') return
+    const score = WS.scores.get(listingId)
+    if (!score) {
+      // Fetch on demand
+      fetchWalkRouteOnDemand(listingId)
+      return
+    }
+    _renderWalkRoute(listingId, score)
+  }
+
+  async function fetchWalkRouteOnDemand(listingId) {
+    const l = allListings.find(x => x.id == listingId)
+    if (!l || !l.lat || !l.lng || !WS.destCoords) return
+    try {
+      const url = 'https://api.mapbox.com/directions/v5/mapbox/walking/' +
+        l.lng + ',' + l.lat + ';' +
+        WS.destCoords.lng + ',' + WS.destCoords.lat +
+        '?access_token=' + MAPBOX_TOKEN +
+        '&overview=full&geometries=geojson&steps=false'
+      const res  = await fetch(url)
+      const data = await res.json()
+      if (data.routes && data.routes[0]) {
+        const route = data.routes[0]
+        const result = { distanceM: route.distance, durationS: route.duration, geometry: route.geometry, source: 'api' }
+        WS.scores.set(listingId, result)
+        _renderWalkRoute(listingId, result)
+      }
+    } catch(e) {}
+  }
+
+  function _renderWalkRoute(listingId, score) {
+    if (!map || !score.geometry) return
+    clearWalkRoute()
+    WS.activeRoute = { listingId, ...score }
+    // Add route source + layer
+    try {
+      if (map.getSource('walk-route')) map.removeSource('walk-route')
+      if (map.getLayer('walk-route-line')) map.removeLayer('walk-route-line')
+      if (map.getLayer('walk-route-glow')) map.removeLayer('walk-route-glow')
+    } catch(e) {}
+    map.addSource('walk-route', { type: 'geojson', data: { type: 'Feature', geometry: score.geometry } })
+    // Glow layer
+    map.addLayer({ id: 'walk-route-glow', type: 'line', source: 'walk-route',
+      paint: { 'line-color': '#22c55e', 'line-width': 10, 'line-opacity': 0.2, 'line-blur': 6 } })
+    // Main line
+    map.addLayer({ id: 'walk-route-line', type: 'line', source: 'walk-route',
+      paint: { 'line-color': '#22c55e', 'line-width': 3.5, 'line-opacity': 0.95,
+               'line-dasharray': [2, 1.5] } })
+    // Update route panel
+    document.getElementById('route-panel-time').textContent = fmtDur(score.durationS)
+    document.getElementById('route-panel-dist').textContent = fmtDist(score.distanceM)
+    document.getElementById('route-panel-dest').textContent = '→ ' + (WS.destName || 'Destination')
+    document.getElementById('walk-route-panel').classList.remove('hidden')
+  }
+
+  function clearWalkRoute() {
+    if (!map) return
+    try {
+      if (map.getLayer('walk-route-glow')) map.removeLayer('walk-route-glow')
+      if (map.getLayer('walk-route-line')) map.removeLayer('walk-route-line')
+      if (map.getSource('walk-route'))     map.removeSource('walk-route')
+    } catch(e) {}
+    document.getElementById('walk-route-panel').classList.add('hidden')
+    WS.activeRoute = null
+  }
+
   function locateUser() {
     if (!navigator.geolocation) return
     navigator.geolocation.getCurrentPosition(pos => {
@@ -1053,8 +1688,18 @@ searchPage.get('/', async (c) => {
   function setMapStyle(style) {
     if (!map) return
     map.setStyle(MAP_STYLES[style] || MAP_STYLES.dark)
-    // After style reload, re-add all pins directly (map.loaded() is true after style.load)
-    map.once('style.load', () => { clearMarkers(); _renderPinsNow(allListings) })
+    // After style reload, re-add all pins and walk route
+    map.once('style.load', () => {
+      clearMarkers()
+      _renderPinsNow(allListings)
+      if (WS.destCoords) {
+        placeDestMarker(WS.destCoords.lng, WS.destCoords.lat, WS.destName)
+        if (WS.activeRoute) {
+          const score = WS.scores.get(WS.activeRoute.listingId)
+          if (score) _renderWalkRoute(WS.activeRoute.listingId, score)
+        }
+      }
+    })
     document.querySelectorAll('[id^=btn-]').forEach(b => b.classList.remove('active-map-btn'))
     document.getElementById('btn-' + style)?.classList.add('active-map-btn')
   }
