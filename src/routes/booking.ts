@@ -190,7 +190,7 @@ bookingPage.get('/:id', async (c) => {
                 <p class="picker-label">Start Time</p>
                 <button id="start-picker-btn" onclick="toggleTimePicker('start')"
                   class="picker-card w-full text-left hover:border-indigo-500/40 transition-colors">
-                  <div id="start-display" class="picker-value placeholder">— Select —</div>
+                  <div id="start-display" class="picker-value placeholder">— Tap to choose time —</div>
                 </button>
               </div>
               <div>
@@ -667,15 +667,26 @@ bookingPage.get('/:id', async (c) => {
     const strip = document.getElementById('date-strip');
     strip.innerHTML = '';
     const today = new Date();
+    let firstOpenDate = null;
     for (let i = 0; i < 14; i++) {
       const d = new Date(today);
       d.setDate(today.getDate() + i);
       const dateStr = d.toISOString().split('T')[0];
       strip.appendChild(makeDateBtn(d, dateStr, selectStartDate));
+      if (!firstOpenDate) {
+        const dow = d.getDay();
+        const sched = getDaySchedule(dow);
+        if (!sched || sched.is_available) firstOpenDate = dateStr;
+      }
     }
-    // Auto-select first open day
-    const first = strip.querySelector('.date-btn:not([disabled])');
-    if (first) first.click();
+    // Pre-select the first open date visually (no spinner, no auto-popup)
+    if (firstOpenDate) {
+      selectedStartDate = firstOpenDate;
+      selectedEndDate   = firstOpenDate;
+      markDateSelected('date-strip', firstOpenDate);
+      // Silently pre-fetch slots in background so first tap is instant
+      fetchSlots(firstOpenDate);
+    }
   }
 
   function buildEndDateStrip(fromDateStr) {
@@ -743,7 +754,7 @@ bookingPage.get('/:id', async (c) => {
 
   function resetTimeDisplays() {
     document.getElementById('start-display').className = 'picker-value placeholder';
-    document.getElementById('start-display').textContent = '— Select —';
+    document.getElementById('start-display').textContent = '— Tap to choose time —';
     document.getElementById('end-display').className = 'picker-value placeholder';
     document.getElementById('end-display').textContent = '— Select start first —';
     document.getElementById('end-picker-btn').disabled = true;
@@ -766,17 +777,26 @@ bookingPage.get('/:id', async (c) => {
 
     popup.classList.remove('hidden');
     title.textContent = mode === 'start' ? 'Select Start Time' : 'Select End Time';
-    grid.classList.add('hidden');
-    loader.classList.remove('hidden');
-    popup.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
     // Which date to fetch slots for?
     const fetchDate = mode === 'end' ? (selectedEndDate || selectedStartDate) : selectedStartDate;
-    const slots = await fetchSlots(fetchDate);
 
-    loader.classList.add('hidden');
-    grid.classList.remove('hidden');
-    renderTimeGrid(slots, mode);
+    // If already cached, skip spinner entirely for instant feel
+    if (slotCache[fetchDate]) {
+      grid.classList.remove('hidden');
+      loader.classList.add('hidden');
+      renderTimeGrid(slotCache[fetchDate], mode);
+    } else {
+      grid.classList.add('hidden');
+      loader.classList.remove('hidden');
+      const slots = await fetchSlots(fetchDate);
+      loader.classList.add('hidden');
+      grid.classList.remove('hidden');
+      renderTimeGrid(slots, mode);
+    }
+
+    // Scroll popup into view after render (so user sees times, not the spinner)
+    setTimeout(() => popup.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 50);
   }
 
   function toggleTimePicker(mode) {
@@ -1307,7 +1327,7 @@ bookingPage.get('/:id', async (c) => {
         } else if (code === 'HOST_CLOSED_DAY') {
           showStripeError(holdData.error || 'The host is not available on the selected day.');
         } else if (code === 'OUTSIDE_HOST_HOURS') {
-          showStripeError(holdData.error || 'Your selected time is outside the host\'s available hours.');
+          showStripeError(holdData.error || "Your selected time is outside the host's available hours.");
         } else if (code === 'LISTING_UNAVAILABLE') {
           showStripeError('This listing is no longer available. Please search for another spot.');
         } else {
