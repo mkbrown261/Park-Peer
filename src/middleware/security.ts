@@ -125,6 +125,10 @@ export function validatePassword(password: unknown): string {
   if (p.length < 8) throw new Error('Password must be at least 8 characters')
   if (!/[A-Z]/.test(p)) throw new Error('Password must contain at least one uppercase letter')
   if (!/[0-9]/.test(p)) throw new Error('Password must contain at least one number')
+  // Block common weak passwords
+  const lower = p.toLowerCase()
+  const commonWeak = ['password1','password123','admin1234','123456789','qwerty123']
+  if (commonWeak.includes(lower)) throw new Error('Password is too common. Choose a stronger one.')
   return p
 }
 
@@ -429,6 +433,12 @@ const _rlStore = new Map<string, RLEntry>()
 
 export function isRateLimited(key: string, maxReqs: number, windowMs: number): boolean {
   const now   = Date.now()
+  // Evict stale entries to prevent unbounded map growth
+  if (_rlStore.size > 10_000) {
+    for (const [k, v] of _rlStore) {
+      if (now - v.windowStart > windowMs * 2) _rlStore.delete(k)
+    }
+  }
   const entry = _rlStore.get(key)
   if (!entry || now - entry.windowStart > windowMs) {
     _rlStore.set(key, { count: 1, windowStart: now })

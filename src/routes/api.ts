@@ -337,11 +337,24 @@ apiRoutes.post('/auth/refresh', async (c) => {
   if (!match) return c.json({ error: 'No refresh token' }, 401)
 
   try {
-    const [rpEnc, rs] = match[1].split('.').reduce<[string, string]>(
-      (acc, part, i, arr) => i < arr.length - 1 ? [`${acc[0]}${acc[0] ? '.' : ''}${part}`, acc[1]] : [acc[0], part],
-      ['', '']
-    )
-    // Simple decode without full HMAC (the route is not auth-sensitive — short-lived)
+    // Verify the refresh token HMAC before trusting its contents
+    // Format: <b64u-payload>.<hmac-sig>
+    const tokenValue = match[1]
+    const lastDot    = tokenValue.lastIndexOf('.')
+    if (lastDot === -1) return c.json({ error: 'Invalid refresh token format' }, 401)
+    const rpEnc = tokenValue.slice(0, lastDot)
+    const rs    = tokenValue.slice(lastDot + 1)
+
+    // Import HMAC key and verify signature before decoding
+    const encoder   = new TextEncoder()
+    const keyMat    = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'])
+    const padded    = rs.replace(/-/g, '+').replace(/_/g, '/')
+    const padLen    = (4 - (padded.length % 4)) % 4
+    const sigBytes  = Uint8Array.from(atob(padded + '='.repeat(padLen)), ch => ch.charCodeAt(0))
+    const dataBytes = encoder.encode(`refresh.${rpEnc}`)
+    const sigValid  = await crypto.subtle.verify('HMAC', keyMat, sigBytes, dataBytes)
+    if (!sigValid) return c.json({ error: 'Invalid refresh token signature' }, 401)
+
     const decoded = JSON.parse(atob(rpEnc.replace(/-/g, '+').replace(/_/g, '/') + '=='))
     const userId  = decoded.userId as number
     if (!userId) return c.json({ error: 'Invalid refresh token' }, 401)
@@ -389,7 +402,7 @@ apiRoutes.get('/auth/status', async (c) => {
       stripe:         !!(c.env?.STRIPE_SECRET_KEY),
       db:             !!(c.env?.DB),
       jwt_secret_set: !!(c.env?.USER_TOKEN_SECRET),
-      redirect_base:  c.env?.OAUTH_REDIRECT_BASE || '(default: https://parkpeer.pages.dev)',
+      redirect_base:  !!(c.env?.OAUTH_REDIRECT_BASE),
     }
   })
 })
@@ -513,20 +526,12 @@ apiRoutes.get('/platform/cities', async (c) => {
 // HEALTH
 // ════════════════════════════════════════════════════════════════════════════
 apiRoutes.get('/health', (c) => {
-  const env = c.env
+  // Return minimal public health status — no internal configuration details
   return c.json({
     status: 'ok',
     service: 'ParkPeer API',
     version: '2.0.0',
     timestamp: new Date().toISOString(),
-    services: {
-      d1_database:  env?.DB ? 'connected' : 'not configured',
-      r2_storage:   env?.MEDIA ? 'connected' : 'not configured',
-      stripe:       env?.STRIPE_SECRET_KEY ? 'configured' : 'not configured',
-      resend:     (env?.RESEND_API_KEY && env.RESEND_API_KEY !== 'PLACEHOLDER_RESEND_KEY') ? 'configured' : 'placeholder',
-      twilio:       env?.TWILIO_ACCOUNT_SID ? 'configured' : 'not configured',
-      ai_chat:      env?.OPENAI_API_KEY ? 'configured' : 'not configured',
-    }
   })
 })
 
@@ -607,7 +612,7 @@ apiRoutes.get('/geocode/autocomplete', requireUserAuth(), async (c) => {
       return c.json({ error: 'Invalid response from geocoding service.', features: [] }, 502)
     }
 
-    console.log(`[GET /api/geocode/autocomplete] q="${q}" raw_count=${data.features?.length ?? 0}`)
+    console.log(`[GET /api/geocode/autocomplete] query_len=${q.length} raw_count=${data.features?.length ?? 0}`)
 
     if (!data.features || !data.features.length) {
       return c.json({ features: [] })
@@ -650,7 +655,7 @@ apiRoutes.get('/geocode/autocomplete', requireUserAuth(), async (c) => {
     // (partial queries return low relevance scores by design)
     .filter((f: any) => f.lat != null && f.lng != null)
 
-    console.log(`[GET /api/geocode/autocomplete] q="${q}" returned=${features.length}`)
+    console.log(`[GET /api/geocode/autocomplete] query_len=${q.length} returned=${features.length}`)
     return c.json({ features })
   } catch (e: any) {
     console.error('[GET /api/geocode/autocomplete] Unexpected error:', e.message)
@@ -682,7 +687,7 @@ apiRoutes.get('/geocode/verify', requireUserAuth(), async (c) => {
   const inCABounds = lat > 41 && lat < 84 && lng > -142 && lng < -52
   if (!inUSBounds && !inCABounds) {
     // Still allow — ParkPeer may expand internationally
-    console.warn(`[geocode/verify] Coordinates outside US/CA: ${lat},${lng}`)
+    console.warn(`[geocode/verify] Coordinates outside US/CA bounds`)
   }
 
   return c.json({
@@ -930,7 +935,7 @@ apiRoutes.post('/payments/confirm', async (c) => {
 // POST /api/payments/refund
 // Body: { payment_intent_id, booking_id, amount_cents?, reason, requester_email }
 // ════════════════════════════════════════════════════════════════════════════
-apiRoutes.post('/payments/refund', async (c) => {
+apiRoutes.post('/payments/refund', requireUserAuth(), async (c) => {
   const env = c.env
   if (!env?.STRIPE_SECRET_KEY) {
     return c.json({ error: 'Stripe not configured' }, 503)
@@ -1170,18 +1175,24 @@ apiRoutes.post('/webhooks/stripe', async (c) => {
 })
 
 // ════════════════════════════════════════════════════════════════════════════
-// RESEND — Send welcome email (called after signup)
-// POST /api/emails/welcome
+// RESEND — Send welcome email (internal use only — called server-side after signup)
+// POST /api/emails/welcome  — requires auth to prevent spam abuse
 // ════════════════════════════════════════════════════════════════════════════
-apiRoutes.post('/emails/welcome', async (c) => {
-  let body: any = {}
-  try { body = await c.req.json() } catch {
-    return c.json({ error: 'Invalid JSON' }, 400)
+apiRoutes.post('/emails/welcome', requireUserAuth(), async (c) => {
+  const session = c.get('user') as any
+  const db = c.env?.DB
+  // Only send to the authenticated user's own email
+  let email = session?.email
+  let name  = ''
+  if (db && session?.userId) {
+    try {
+      const row = await db.prepare('SELECT email, full_name, role FROM users WHERE id = ?')
+        .bind(session.userId).first<any>()
+      if (row) { email = row.email; name = row.full_name }
+    } catch {}
   }
-  const { email, name, role = 'DRIVER' } = body
-  if (!email || !name) return c.json({ error: 'Missing email or name' }, 400)
-
-  const ok = await sendWelcomeEmail(c.env as any, { toEmail: email, toName: name, role })
+  if (!email) return c.json({ error: 'Could not determine email from session' }, 400)
+  const ok = await sendWelcomeEmail(c.env as any, { toEmail: email, toName: name || email, role: session?.role?.toUpperCase() || 'DRIVER' })
   return c.json({ success: ok })
 })
 
@@ -1208,15 +1219,32 @@ apiRoutes.get('/listings', async (c) => {
     let where: string[] = ["l.status = 'active'"]
     const params: any[] = []
 
-    if (type && type !== 'all') { where.push('l.type = ?'); params.push(type) }
-    if (city) { where.push("(l.city LIKE ? OR l.state LIKE ?)"); params.push(`%${city}%`); params.push(`%${city}%`) }
-    if (min_price) { where.push('l.rate_hourly >= ?'); params.push(parseFloat(min_price)) }
-    if (max_price) { where.push('l.rate_hourly <= ?'); params.push(parseFloat(max_price)) }
+    // Validate & sanitize enum/numeric inputs before building query
+    const VALID_TYPES = ['driveway','garage','lot','street','covered']
+    if (type && type !== 'all') {
+      if (VALID_TYPES.includes(type.toLowerCase())) {
+        where.push('l.type = ?'); params.push(type.toLowerCase())
+      }
+      // silently ignore invalid type values
+    }
+    // Escape LIKE wildcards in user strings to prevent wildcard injection
+    const escapeLike = (s: string) => s.replace(/[%_\\]/g, ch => '\\' + ch)
+    if (city) {
+      const safeCity = escapeLike(city.substring(0, 100))
+      where.push("(l.city LIKE ? ESCAPE '\\' OR l.state LIKE ? ESCAPE '\\')")
+      params.push(`%${safeCity}%`); params.push(`%${safeCity}%`)
+    }
+    const minPriceF = min_price ? parseFloat(min_price) : NaN
+    const maxPriceF = max_price ? parseFloat(max_price) : NaN
+    if (!isNaN(minPriceF) && minPriceF >= 0) { where.push('l.rate_hourly >= ?'); params.push(minPriceF) }
+    if (!isNaN(maxPriceF) && maxPriceF >= 0) { where.push('l.rate_hourly <= ?'); params.push(maxPriceF) }
     if (instant === '1' || instant === 'true') { where.push('l.instant_book = 1') }
-    if (min_pri) { where.push('l.pri_score >= ?'); params.push(parseFloat(min_pri)) }
+    const minPriF = min_pri ? parseFloat(min_pri) : NaN
+    if (!isNaN(minPriF) && minPriF >= 0 && minPriF <= 100) { where.push('l.pri_score >= ?'); params.push(minPriF) }
     if (q) {
-      where.push("(l.title LIKE ? OR l.address LIKE ? OR l.city LIKE ? OR l.description LIKE ?)")
-      const ql = `%${q}%`
+      const safeQ = escapeLike(q.substring(0, 200))
+      where.push("(l.title LIKE ? ESCAPE '\\' OR l.address LIKE ? ESCAPE '\\' OR l.city LIKE ? ESCAPE '\\' OR l.description LIKE ? ESCAPE '\\')")
+      const ql = `%${safeQ}%`
       params.push(ql, ql, ql, ql)
     }
 
@@ -1309,7 +1337,7 @@ apiRoutes.get('/listings', async (c) => {
     return c.json({ data, total, limit: lim, offset: off, has_more: off + lim < total, source: 'd1' })
   } catch (e: any) {
     console.error('[API] listings error:', e.message)
-    return c.json({ error: 'Failed to fetch listings', detail: e.message }, 500)
+    return c.json({ error: 'Failed to fetch listings' }, 500)
   }
 })
 
@@ -1378,7 +1406,7 @@ apiRoutes.post('/listings', requireUserAuth(), async (c) => {
     return c.json({ error: 'Invalid JSON body' }, 400)
   }
 
-  console.log(`[POST /api/listings] user=${session.userId} body=`, JSON.stringify(body).substring(0, 300))
+  console.log(`[POST /api/listings] user=${session.userId} title="${String(body.title || '').substring(0,60)}"`)  // no PII logged
 
   // ── Validate required fields ────────────────────────────────────────────
   try {
@@ -1506,7 +1534,7 @@ apiRoutes.post('/listings', requireUserAuth(), async (c) => {
     if (e.message?.includes('required') || e.message?.includes('exceeds') || e.message?.includes('rate')) {
       return c.json({ error: e.message }, 400)
     }
-    return c.json({ error: 'Failed to create listing', detail: e.message }, 500)
+    return c.json({ error: 'Failed to create listing'}, 500)
   }
 })
 
@@ -1538,17 +1566,46 @@ apiRoutes.put('/listings/:id', requireUserAuth(), async (c) => {
 
   if (body.title !== undefined)       { updates.push('title = ?');        params.push(sanitizeHtml(validateInput(body.title, { maxLength: 120 }))) }
   if (body.description !== undefined) { updates.push('description = ?');  params.push(sanitizeHtml(validateInput(body.description, { maxLength: 2000 }))) }
-  if (body.type !== undefined)        { updates.push('type = ?');          params.push(body.type) }
+  if (body.type !== undefined) {
+    const VALID_TYPES = ['driveway','garage','lot','street','covered']
+    const t = String(body.type).toLowerCase()
+    if (VALID_TYPES.includes(t)) { updates.push('type = ?'); params.push(t) }
+    else return c.json({ error: 'Invalid listing type' }, 400)
+  }
   if (body.address !== undefined)     { updates.push('address = ?');       params.push(sanitizeHtml(validateInput(body.address, { maxLength: 200 }))) }
-  if (body.city !== undefined)        { updates.push('city = ?');          params.push(sanitizeHtml(body.city)) }
-  if (body.state !== undefined)       { updates.push('state = ?');         params.push(sanitizeHtml(body.state)) }
-  if (body.zip !== undefined)         { updates.push('zip = ?');           params.push(sanitizeHtml(body.zip)) }
-  if (body.rate_hourly !== undefined) { updates.push('rate_hourly = ?');   params.push(parseFloat(body.rate_hourly) || null) }
-  if (body.rate_daily !== undefined)  { updates.push('rate_daily = ?');    params.push(parseFloat(body.rate_daily) || null) }
+  if (body.city !== undefined)        { updates.push('city = ?');          params.push(sanitizeHtml(validateInput(body.city, { maxLength: 100 }))) }
+  if (body.state !== undefined)       { updates.push('state = ?');         params.push(sanitizeHtml(validateInput(body.state, { maxLength: 50 }))) }
+  if (body.zip !== undefined)         { updates.push('zip = ?');           params.push(sanitizeHtml(validateInput(body.zip, { maxLength: 20 }))) }
+  if (body.rate_hourly !== undefined) {
+    const r = parseFloat(body.rate_hourly)
+    if (!isNaN(r) && r >= 0.5 && r <= 500) { updates.push('rate_hourly = ?'); params.push(r) }
+    else return c.json({ error: 'Hourly rate must be between $0.50 and $500' }, 400)
+  }
+  if (body.rate_daily !== undefined) {
+    const r = parseFloat(body.rate_daily)
+    if (!isNaN(r) && r >= 1 && r <= 5000) { updates.push('rate_daily = ?'); params.push(r) }
+    else return c.json({ error: 'Daily rate must be between $1 and $5,000' }, 400)
+  }
   if (body.rate_monthly !== undefined){ updates.push('rate_monthly = ?');  params.push(parseFloat(body.rate_monthly) || null) }
-  if (body.status !== undefined)      { updates.push('status = ?');        params.push(body.status) }
+  // status can only be set to 'active' or 'archived' by the owner — never 'suspended' (admin-only)
+  if (body.status !== undefined) {
+    const ALLOWED_STATUSES = ['active','archived']
+    const userRole = (session.role || '').toUpperCase()
+    if (userRole === 'ADMIN' || ALLOWED_STATUSES.includes(String(body.status))) {
+      updates.push('status = ?'); params.push(body.status)
+    } else {
+      return c.json({ error: 'Invalid status value' }, 400)
+    }
+  }
   if (body.instant_book !== undefined){ updates.push('instant_book = ?');  params.push(body.instant_book ? 1 : 0) }
-  if (body.amenities !== undefined)   { updates.push('amenities = ?');     params.push(JSON.stringify(body.amenities)) }
+  if (body.amenities !== undefined) {
+    const VALID_AMENITIES = ['covered','ev_charging','security_camera','gated','lighting','24hr_access','shuttle','attended']
+    let amenities: string[] = []
+    if (Array.isArray(body.amenities)) {
+      amenities = body.amenities.filter((a: any) => VALID_AMENITIES.includes(String(a)))
+    }
+    updates.push('amenities = ?'); params.push(JSON.stringify(amenities))
+  }
 
   if (updates.length === 0) return c.json({ error: 'No fields to update' }, 400)
 
@@ -1937,12 +1994,15 @@ apiRoutes.post('/bookings', requireUserAuth(), async (c) => {
 
       // ── Fire booking request notification (awaited before response) ────
       try {
-        const driver = await db.prepare('SELECT full_name, email, phone FROM users WHERE id = ?')
-          .bind(driver_id).first<any>()
-        const host = await db.prepare('SELECT id, full_name, email, phone FROM users WHERE id = ?')
-          .bind(listing.host_id).first<any>()
-        const listingRow = await db.prepare('SELECT title, address, city FROM listings WHERE id = ?')
-          .bind(listing_id).first<any>()
+        // Batch the 3 notification lookups into a single parallel Promise.all
+        const [driver, host, listingRow] = await Promise.all([
+          db.prepare('SELECT full_name, email, phone FROM users WHERE id = ?')
+            .bind(driver_id).first<any>(),
+          db.prepare('SELECT id, full_name, email, phone FROM users WHERE id = ?')
+            .bind(listing.host_id).first<any>(),
+          db.prepare('SELECT title, address, city FROM listings WHERE id = ?')
+            .bind(listing_id).first<any>(),
+        ])
         const listingTitle = listingRow?.title || 'Parking Space'
         const listingAddress = [listingRow?.address, listingRow?.city].filter(Boolean).join(', ')
         if (host) {
@@ -2433,7 +2493,7 @@ apiRoutes.post('/webhooks/twilio/sms', async (c) => {
   const from = params['From'] || ''
   const body = params['Body']?.trim().toUpperCase() || ''
 
-  console.log(`[Twilio SMS] From: ${from} Body: "${body}"`)
+  console.log(`[Twilio SMS] From: ${from} Body: [redacted]`)  // body may contain PII
 
   // Simple keyword auto-replies
   let reply = ''
@@ -3433,7 +3493,7 @@ apiRoutes.get('/pri/:listingId', async (c) => {
       consistency_score:    row?.consistency_score ?? 0,
     })
   } catch (e: any) {
-    return c.json({ error: 'Failed to fetch PRI', detail: e.message }, 500)
+    return c.json({ error: 'Failed to fetch PRI'}, 500)
   }
 })
 
@@ -3495,7 +3555,7 @@ apiRoutes.get('/host-credentials/:hostId', async (c) => {
       founding_at:      creds.tier4_founding_at,
     })
   } catch (e: any) {
-    return c.json({ error: 'Failed to fetch host credentials', detail: e.message }, 500)
+    return c.json({ error: 'Failed to fetch host credentials'}, 500)
   }
 })
 
@@ -3601,7 +3661,7 @@ apiRoutes.get('/savings', requireUserAuth(), async (c) => {
       }
     })
   } catch (e: any) {
-    return c.json({ error: 'Failed to fetch savings', detail: e.message }, 500)
+    return c.json({ error: 'Failed to fetch savings'}, 500)
   }
 })
 
@@ -3660,7 +3720,7 @@ apiRoutes.get('/top-hosts', async (c) => {
 
     return c.json({ success: true, hosts })
   } catch (e: any) {
-    return c.json({ error: 'Failed to fetch top hosts', detail: e.message }, 500)
+    return c.json({ error: 'Failed to fetch top hosts' }, 500)
   }
 })
 
@@ -3710,7 +3770,7 @@ apiRoutes.get('/notifications', requireUserAuth(), async (c) => {
       total: total?.n ?? 0,
     })
   } catch (e: any) {
-    return c.json({ error: 'Failed to fetch notifications', detail: e.message }, 500)
+    return c.json({ error: 'Failed to fetch notifications'}, 500)
   }
 })
 
@@ -3752,7 +3812,7 @@ apiRoutes.patch('/notifications/read', requireUserAuth(), async (c) => {
     }
     return c.json({ success: true })
   } catch (e: any) {
-    return c.json({ error: 'Failed to update notifications', detail: e.message }, 500)
+    return c.json({ error: 'Failed to update notifications'}, 500)
   }
 })
 
@@ -3780,7 +3840,7 @@ apiRoutes.get('/notifications/prefs', requireUserAuth(), async (c) => {
     }
     return c.json({ prefs })
   } catch (e: any) {
-    return c.json({ error: 'Failed to fetch preferences', detail: e.message }, 500)
+    return c.json({ error: 'Failed to fetch preferences'}, 500)
   }
 })
 
@@ -3830,6 +3890,6 @@ apiRoutes.put('/notifications/prefs', requireUserAuth(), async (c) => {
 
     return c.json({ success: true })
   } catch (e: any) {
-    return c.json({ error: 'Failed to save preferences', detail: e.message }, 500)
+    return c.json({ error: 'Failed to save preferences'}, 500)
   }
 })

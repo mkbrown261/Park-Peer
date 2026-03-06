@@ -305,7 +305,7 @@ adminApiRoutes.get('/users', async (c: any) => {
     return c.json({ users, total: total?.n ?? 0, limit, offset })
   } catch (e: any) {
     console.error('[admin/users]', e.message)
-    return c.json({ error: 'Failed to fetch users', detail: e.message }, 500)
+    return c.json({ error: 'Failed to fetch users'}, 500)
   }
 })
 
@@ -386,7 +386,7 @@ adminApiRoutes.get('/users/:id', async (c: any) => {
     })
   } catch (e: any) {
     console.error('[admin/users/:id]', e.message)
-    return c.json({ error: 'Failed to fetch user detail', detail: e.message }, 500)
+    return c.json({ error: 'Failed to fetch user detail'}, 500)
   }
 })
 
@@ -719,7 +719,7 @@ adminApiRoutes.post('/users/:id/delete', async (c: any) => {
 
   } catch (e: any) {
     console.error('[admin/delete]', e.message, e.stack)
-    return c.json({ error: 'Deletion failed', detail: e.message }, 500)
+    return c.json({ error: 'Deletion failed'}, 500)
   }
 })
 
@@ -766,7 +766,7 @@ adminApiRoutes.post('/users/:id/suspend', async (c: any) => {
 
     return c.json({ success: true, new_status: newStatus, audit_log_id: auditId })
   } catch (e: any) {
-    return c.json({ error: 'Failed to update user status', detail: e.message }, 500)
+    return c.json({ error: 'Failed to update user status'}, 500)
   }
 })
 
@@ -839,7 +839,7 @@ adminApiRoutes.post('/users/:id/refund', async (c: any) => {
 
     return c.json({ success: true, refund: refundResult, audit_log_id: auditId })
   } catch (e: any) {
-    return c.json({ error: 'Refund failed', detail: e.message }, 500)
+    return c.json({ error: 'Refund failed'}, 500)
   }
 })
 
@@ -886,7 +886,7 @@ adminApiRoutes.get('/audit-log', async (c: any) => {
 
     return c.json({ entries, total: total?.n ?? 0, limit, offset })
   } catch (e: any) {
-    return c.json({ error: 'Failed to fetch audit log', detail: e.message }, 500)
+    return c.json({ error: 'Failed to fetch audit log'}, 500)
   }
 })
 
@@ -919,7 +919,7 @@ adminApiRoutes.get('/refund-log', async (c: any) => {
 
     return c.json({ entries: rows.results || [], total: total?.n ?? 0, limit, offset })
   } catch (e: any) {
-    return c.json({ error: 'Failed to fetch refund log', detail: e.message }, 500)
+    return c.json({ error: 'Failed to fetch refund log'}, 500)
   }
 })
 
@@ -952,7 +952,7 @@ adminApiRoutes.get('/stats', async (c: any) => {
       manual_refunds_pending: manualRefunds?.n ?? 0,
     })
   } catch (e: any) {
-    return c.json({ error: 'Failed to fetch stats', detail: e.message }, 500)
+    return c.json({ error: 'Failed to fetch stats'}, 500)
   }
 })
 
@@ -994,7 +994,7 @@ adminApiRoutes.get('/notifications', async (c: any) => {
       total:        total?.n  ?? 0,
     })
   } catch (e: any) {
-    return c.json({ error: 'Failed to fetch notifications', detail: e.message }, 500)
+    return c.json({ error: 'Failed to fetch notifications'}, 500)
   }
 })
 
@@ -1018,6 +1018,6 @@ adminApiRoutes.patch('/notifications/read', async (c: any) => {
     }
     return c.json({ success: true })
   } catch (e: any) {
-    return c.json({ error: 'Failed to update', detail: e.message }, 500)
+    return c.json({ error: 'Failed to update'}, 500)
   }
 })

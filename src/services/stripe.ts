@@ -51,7 +51,8 @@ export async function createPaymentIntent(
   const pi = await stripeRequest(env, 'POST', '/payment_intents', {
     amount: amountCents,
     currency,
-    automatic_payment_methods: 'enabled',
+    // Stripe form-encoding: automatic_payment_methods[enabled]=true
+    'automatic_payment_methods[enabled]': 'true',
     ...flatMeta
   } as any)
 

@@ -602,7 +602,12 @@ searchPage.get('/', async (c) => {
       /* Use opacity + pointer-events only — NO visibility transition */
       /* visibility transition causes pill to stay invisible when toggled rapidly */
       opacity: 0;
-      transition: opacity 0.15s ease;
+      transition: opacity 0.15s ease, bottom 0.2s ease;
+    }
+    /* When a Mapbox popup is open: nudge pill further down so it clears the
+       popup body. JS adds/removes .pill-popup-open on the pill element. */
+    #route-info-pill.pill-popup-open {
+      bottom: 1.5rem;  /* drop to 24px so popup has maximum vertical space */
     }
     #route-info-pill.pill-visible {
       opacity: 1;
@@ -715,6 +720,17 @@ searchPage.get('/', async (c) => {
   let trustedZonesEnabled = false
   let topHostsCollapsed = false
   let trustedZoneLayerAdded = false
+
+  // ── Client-side HTML escape helper (XSS prevention for dynamic content) ──
+  function escHtml(s) {
+    if (s == null) return ''
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#x27;')
+  }
 
   let MAPBOX_TOKEN = ''
 
@@ -1255,7 +1271,7 @@ searchPage.get('/', async (c) => {
           '</span>'
         : (l.pri_bookings < 5 ? '<span class="text-gray-600 text-xs">New Listing</span>' : '')
       const hostLine = l.host
-        ? '<p class="text-gray-600 text-xs mt-1.5 flex items-center">' + (l.host.name || '') + hostBadges(l.host) + '</p>'
+        ? '<p class="text-gray-600 text-xs mt-1.5 flex items-center">' + escHtml(l.host.name || '') + hostBadges(l.host) + '</p>'
         : ''
       const dailyPrice = l.price_daily
         ? '<p class="text-gray-500 text-xs">$' + l.price_daily.toFixed(0) + '/day</p>'
@@ -1270,10 +1286,10 @@ searchPage.get('/', async (c) => {
           '<div class="flex-1 p-3 min-w-0">' +
             '<div class="flex items-start justify-between gap-2">' +
               '<div class="min-w-0">' +
-                '<h3 class="font-bold text-white text-sm group-hover:text-indigo-300 transition-colors truncate">' + l.title + '</h3>' +
+                '<h3 class="font-bold text-white text-sm group-hover:text-indigo-300 transition-colors truncate">' + escHtml(l.title) + '</h3>' +
                 '<p class="text-gray-500 text-xs flex items-center gap-1 mt-0.5 truncate">' +
-                  '<i class="fas fa-map-pin text-indigo-400 flex-shrink-0"></i> ' + l.address +
-                  (l.city ? ', ' + l.city : '') +
+                  '<i class="fas fa-map-pin text-indigo-400 flex-shrink-0"></i> ' + escHtml(l.address) +
+                  (l.city ? ', ' + escHtml(l.city) : '') +
                 '</p>' +
               '</div>' +
               '<div class="text-right flex-shrink-0">' +
@@ -1339,7 +1355,7 @@ searchPage.get('/', async (c) => {
       // Store meta on element for walk badge updates (never overwritten)
       el._priceHr  = l.price_hourly || 0
       el._priScore = l.pri_score
-      el._lng      = l.lng   // FIX 3 debug: freeze coords on element
+      el._lng      = l.lng
       el._lat      = l.lat
 
       // Base inline style — set ONCE here, updateWalkBadge only touches className + textContent
@@ -1461,8 +1477,17 @@ searchPage.get('/', async (c) => {
     if (amenitiesArr.includes('gated'))           tags.push({ t: 'Gated',    i: 'fa-lock' })
     if (amenitiesArr.includes('24hr_access'))     tags.push({ t: '24/7',     i: 'fa-clock' })
 
+    // ── Popup positioning strategy ──────────────────────────────────────
+    // When a walk route is active, the route line + pill live in the lower
+    // half of the map.  Open the popup ABOVE the pin with a larger offset so
+    // the popup body clears the pill (bottom 6rem / 96px) and the route line.
+    // auto-pan is on by default in Mapbox v3 so the popup will scroll into
+    // view if the pin is near any edge.
+    const hasActiveRoute = !!(WS.destCoords)
+    const popupYOffset   = hasActiveRoute ? -72 : -52   // extra lift when route visible
+
     const popup = new mapboxgl.Popup({
-        offset: [0, -52],    // lift popup 52px above the pin so pin + route stay visible
+        offset: [0, popupYOffset],
         anchor: 'bottom',    // popup opens upward; tip points down at pin
         maxWidth: '290px',
         closeButton: true
@@ -1475,8 +1500,8 @@ searchPage.get('/', async (c) => {
               '<i class="fas ' + (l.type === 'garage' ? 'fa-warehouse' : l.type === 'driveway' ? 'fa-home' : 'fa-parking') + ' text-indigo-400"></i>' +
             '</div>' +
             '<div class="flex-1 min-w-0">' +
-              '<h4 class="font-bold text-white text-sm leading-tight mb-0.5 truncate">' + l.title + '</h4>' +
-              '<p class="text-gray-400 text-xs truncate">' + l.address + (l.city ? ', ' + l.city : '') + '</p>' +
+              '<h4 class="font-bold text-white text-sm leading-tight mb-0.5 truncate">' + escHtml(l.title) + '</h4>' +
+              '<p class="text-gray-400 text-xs truncate">' + escHtml(l.address) + (l.city ? ', ' + escHtml(l.city) : '') + '</p>' +
             '</div>' +
           '</div>' +
           '<div class="flex items-center justify-between mb-3">' +
@@ -1519,16 +1544,33 @@ searchPage.get('/', async (c) => {
 
     activePopup = popup
 
-    // Pan map so the popup (which opens ~52px above the pin) stays fully visible.
-    // Shift the view upward by ~160px (half a typical popup height + offset)
-    // only if the pin is in the upper portion of the map container.
+    // Tell the route-info pill that a popup is open so it can dodge downward
+    document.getElementById('route-info-pill')?.classList.add('pill-popup-open')
+
+    // ── Auto-pan so popup + pill never overlap ─────────────────────────
+    // Mapbox v3 auto-pan is enabled by default (autoPan option).  We add an
+    // extra manual nudge so the PILL at bottom-6rem never collides with the
+    // popup body when a walk route is active.
     try {
-      const mapEl   = document.getElementById('map')
-      const mapH    = mapEl ? mapEl.offsetHeight : 600
-      const pinPx   = map.project([l.lng, l.lat])
-      // If the pin is in the top 55% of the map, ease down so popup has room above
-      if (pinPx.y < mapH * 0.55) {
-        map.easeTo({ offset: [0, -140], duration: 300 })
+      const mapEl  = document.getElementById('map')
+      const mapH   = mapEl ? mapEl.offsetHeight : 600
+      const mapW   = mapEl ? mapEl.offsetWidth  : 800
+      const pinPx  = map.project([l.lng, l.lat])
+      // Popup height is roughly 260px (with walk section) or 220px without.
+      // Pill top edge ≈ mapH - 96px.  We need popup bottom (= pin y - offset)
+      // to sit above pill top.  Required clear: pinY - offset - popupH > mapH - 96
+      const popupH  = WS.destCoords ? 280 : 240
+      const pillTop = mapH - 96   // route-info-pill bottom: 6rem
+      const neededY = pinPx.y - popupYOffset - popupH  // top of popup in screen coords
+      // Pan up enough to keep popup above the pill, plus 16px breathing room
+      const gap = pillTop - neededY - 16
+      if (gap < 0) {
+        // popup already clears the pill — only pan if pin is near top edge
+        if (pinPx.y < mapH * 0.40) map.easeTo({ offset: [0, -120], duration: 300 })
+      } else {
+        // Need to move view upward by [gap] pixels so popup clears the pill
+        const panUp = Math.min(gap + 20, 220)
+        map.easeTo({ offset: [0, -(panUp)], duration: 300 })
       }
     } catch(e) {}
 
@@ -1549,6 +1591,11 @@ searchPage.get('/', async (c) => {
       if (card) card.classList.remove('highlighted')
       unhighlightPin(l.id)
       activePopup = null
+      // Let the pill return to its normal resting position
+      document.getElementById('route-info-pill')?.classList.remove('pill-popup-open')
+      // Restore natural map center (undo easeTo offset) so subsequent
+      // interactions don't start with a panned-away viewport.
+      try { map.easeTo({ offset: [0, 0], duration: 250 }) } catch(e) {}
     })
   }
 
@@ -1701,9 +1748,9 @@ searchPage.get('/', async (c) => {
         const name = f.place_name || f.text || ''
         destSuggestionData.set(key, { lng: f.center[0], lat: f.center[1], name })
         // Safely escape for HTML display only (no inline JS)
-        const safeName    = name.replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        const safeText    = (f.text || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        const safePlaceFull = (f.place_name || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        const safeName    = escHtml(name)
+        const safeText    = escHtml(f.text || '')
+        const safePlaceFull = escHtml(f.place_name || '')
         return '<button data-dest-key="' + key + '" '
           + 'class="w-full text-left px-4 py-3 hover:bg-indigo-500/10 border-b border-white/5 last:border-0 transition-colors cursor-pointer">'
           + '<div class="flex items-start gap-3 pointer-events-none">'
@@ -2216,12 +2263,19 @@ searchPage.get('/', async (c) => {
           h.performance ? \`<span title="High-Performance"  style="color:#d97706">⭐</span>\` : '',
           h.founding    ? \`<span title="Founding Member"   style="color:#7c3aed">🏆</span>\` : '',
         ].join('')
+        // Sanitise all host fields before embedding in innerHTML
+        const safeName    = escHtml(h.name || 'ParkPeer Host')
+        const safeCount   = escHtml(String(h.listing_count || 0))
+        const safeRating  = escHtml(String(h.avg_rating || 0))
+        const safeId      = parseInt(h.id) || 0
+        const safePri     = h.avg_pri != null ? parseInt(h.avg_pri) : null
+        const priColor    = safePri != null ? (safePri >= 95 ? '#16a34a' : safePri >= 85 ? '#2563eb' : '#ca8a04') : ''
         return \`<div class="flex items-center justify-between gap-2 py-1 border-b border-white/5 last:border-0">
-          <button onclick="filterByHost(\${h.id})" class="text-left flex-1 min-w-0">
-            <p class="text-white font-medium truncate">\${h.name}\${badges ? ' <span class="text-xs">' + badges + '</span>' : ''}</p>
-            <p class="text-gray-500 text-xs">\${h.listing_count} spots · ⭐\${h.avg_rating}</p>
+          <button onclick="filterByHost(\${safeId})" class="text-left flex-1 min-w-0">
+            <p class="text-white font-medium truncate">\${safeName}\${badges ? ' <span class="text-xs">' + badges + '</span>' : ''}</p>
+            <p class="text-gray-500 text-xs">\${safeCount} spots · ⭐\${safeRating}</p>
           </button>
-          \${h.avg_pri != null ? \`<span class="text-xs font-semibold flex-shrink-0" style="color:\${h.avg_pri>=95?'#16a34a':h.avg_pri>=85?'#2563eb':'#ca8a04'}">\${h.avg_pri}% PRI</span>\` : ''}
+          \${safePri != null ? \`<span class="text-xs font-semibold flex-shrink-0" style="color:\${priColor}">\${safePri}% PRI</span>\` : ''}
         </div>\`
       }).join('')
     } catch(e) {}

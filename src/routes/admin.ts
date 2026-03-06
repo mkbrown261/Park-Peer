@@ -1,5 +1,4 @@
 import { Hono } from 'hono'
-import { getCookie } from 'hono/cookie'
 import { AdminLayout } from '../components/admin-layout'
 import { adminAuthMiddleware } from './admin-auth'
 
@@ -1051,8 +1050,8 @@ adminPanel.get('/user-control', async (c: any) => {
   const db: D1Database | undefined = c.env?.DB
   let totalUsers = 0, totalDeleted = 0, totalRefunded = 0, totalSuspended = 0
 
-  // Extract the session token from cookie to embed directly in page
-  const embeddedToken = getCookie(c, '__pp_admin') || ''
+  // The admin cookie (__pp_admin) is HttpOnly/Secure and sent automatically via
+  // credentials:'same-origin'. Never embed session tokens in HTML (XSS risk).
 
   // Load users + stats directly from DB — render server-side, no JS fetch needed
   let users: any[] = []
@@ -1350,18 +1349,11 @@ adminPanel.get('/user-control', async (c: any) => {
     let currentDeleteUserName = ''
     let pendingBlockers = null
 
-    // ── Auth helper — Bearer token for modal API calls ─────────────────────
-    const ADMIN_TOKEN = (function() {
-      const embedded = '${embeddedToken}'
-      if (embedded) return embedded
-      try { return sessionStorage.getItem('pp_admin_token') || '' } catch(e) { return '' }
-    })()
-
+    // ── Auth helper — uses HttpOnly admin cookie sent automatically ──────────
+    // The __pp_admin cookie is HttpOnly/Secure; credentials:'same-origin' sends it.
     function adminFetch(url, options) {
       options = options || {}
-      const headers = Object.assign({}, options.headers || {})
-      if (ADMIN_TOKEN) headers['Authorization'] = 'Bearer ' + ADMIN_TOKEN
-      return fetch(url, Object.assign({}, options, { credentials: 'same-origin', headers: headers }))
+      return fetch(url, Object.assign({}, options, { credentials: 'same-origin' }))
     }
 
     // ── Client-side table filter (no fetch needed — users are server-rendered) ──
@@ -1492,7 +1484,7 @@ adminPanel.get('/user-control', async (c: any) => {
           pendingBlockers = d.blockers
           document.getElementById('del-blockers').classList.remove('hidden')
           const list = document.getElementById('del-blockers-list')
-          list.innerHTML = d.blockers.reasons.map(r => '<li>' + r + '</li>').join('')
+          list.innerHTML = d.blockers.reasons.map(r => '<li>' + String(r).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</li>').join('')
         }
       } catch {}
     }
@@ -1604,7 +1596,7 @@ adminPanel.get('/user-control', async (c: any) => {
         renderDetailPanel(d)
       } catch(e) {
         document.getElementById('detail-content').innerHTML =
-          '<p class="text-red-400 text-sm text-center py-10">Failed to load: ' + e.message + '</p>'
+          '<p class="text-red-400 text-sm text-center py-10">Failed to load user details. Please try again.</p>'
       }
     }
 
@@ -1630,11 +1622,11 @@ adminPanel.get('/user-control', async (c: any) => {
             (u.full_name||'?').substring(0,2).toUpperCase() +
           '</div>' +
           '<div class="flex-1 min-w-0">' +
-            '<p class="font-bold text-white">' + (u.full_name||'—') + '</p>' +
-            '<p class="text-gray-400 text-xs mt-0.5 truncate">' + u.email + '</p>' +
+            '<p class="font-bold text-white">' + (u.full_name||'—').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</p>' +
+            '<p class="text-gray-400 text-xs mt-0.5 truncate">' + (u.email||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</p>' +
             '<div class="flex gap-1.5 mt-1.5">' +
-              '<span class="text-xs px-2 py-0.5 badge-indigo rounded-full font-semibold">' + u.role + '</span>' +
-              '<span class="text-xs px-2 py-0.5 ' + (u.status==='active'?'badge-green':'badge-red') + ' rounded-full font-semibold">' + u.status + '</span>' +
+              '<span class="text-xs px-2 py-0.5 badge-indigo rounded-full font-semibold">' + (u.role||'').replace(/</g,'&lt;') + '</span>' +
+              '<span class="text-xs px-2 py-0.5 ' + (u.status==='active'?'badge-green':'badge-red') + ' rounded-full font-semibold">' + (u.status||'').replace(/</g,'&lt;') + '</span>' +
             '</div>' +
           '</div>' +
         '</div>' +
@@ -1722,7 +1714,7 @@ adminPanel.get('/user-control', async (c: any) => {
       try { return new Date(dt).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' }) } catch { return dt }
     }
     function escapeHtml(s) {
-      return String(s||'').replace(/'/g,"\\'").replace(/"/g,'&quot;')
+      return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')
     }
   </script>
   `
@@ -1733,7 +1725,7 @@ adminPanel.get('/user-control', async (c: any) => {
 // GET /admin/audit-log  — Paginated audit log viewer
 // ════════════════════════════════════════════════════════════════════════════
 adminPanel.get('/audit-log', async (c: any) => {
-  const embeddedToken = getCookie(c, '__pp_admin') || ''
+  // embeddedToken removed — admin cookie sent automatically via credentials:'same-origin'
   const content = `
   <div class="flex items-center justify-between mb-6">
     <p class="text-gray-400 text-sm">Immutable record of all admin actions. Every deletion, refund, and override is logged here.</p>
@@ -1807,16 +1799,10 @@ adminPanel.get('/audit-log', async (c: any) => {
   </div>
 
   <script>
-    const ADMIN_TOKEN = (function() {
-      const embedded = '${embeddedToken}'
-      if (embedded) return embedded
-      try { return sessionStorage.getItem('pp_admin_token') || '' } catch(e) { return '' }
-    })()
+    // Admin cookie is HttpOnly/Secure — sent automatically via credentials:'same-origin'
     function adminFetch(url, options) {
       options = options || {}
-      const headers = Object.assign({}, options.headers || {})
-      if (ADMIN_TOKEN) headers['Authorization'] = 'Bearer ' + ADMIN_TOKEN
-      return fetch(url, Object.assign({}, options, { credentials: 'same-origin', headers: headers }))
+      return fetch(url, Object.assign({}, options, { credentials: 'same-origin' }))
     }
 
     let alOffset = 0
@@ -1857,15 +1843,24 @@ adminPanel.get('/audit-log', async (c: any) => {
       tbody.innerHTML = entries.map(e => {
         const color = actionColors[e.action] || 'badge-gray'
         const date = e.created_at ? new Date(e.created_at).toLocaleString('en-US', {month:'short',day:'numeric',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '—'
+        const eId      = parseInt(e.id) || 0
+        const tId      = parseInt(e.target_id) || 0
+        const action   = escapeHtml(e.action || '')
+        const admEmail = escapeHtml(e.admin_email || '—')
+        const tEmail   = escapeHtml(e.target_email || '')
+        const tType    = escapeHtml(e.target_type || '')
+        const tRole    = escapeHtml(e.target_role || '—')
+        const reason   = escapeHtml(e.reason || '—')
+        const ip       = escapeHtml(e.ip_address || '—')
         return '<tr class="border-b border-white/5 hover:bg-white/[.02] transition-colors">' +
-          '<td class="px-4 py-3 text-gray-600 text-xs font-mono">' + e.id + '</td>' +
+          '<td class="px-4 py-3 text-gray-600 text-xs font-mono">' + eId + '</td>' +
           '<td class="px-4 py-3 text-gray-400 text-xs whitespace-nowrap">' + date + '</td>' +
-          '<td class="px-4 py-3 text-xs"><p class="text-white font-medium">' + (e.admin_email||'—') + '</p></td>' +
-          '<td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-semibold ' + color + '">' + e.action.replace(/_/g,' ') + '</span></td>' +
-          '<td class="px-4 py-3 text-xs"><p class="text-white">' + (e.target_email||'ID: '+e.target_id) + '</p><p class="text-gray-600">' + e.target_type + ' #' + e.target_id + '</p></td>' +
-          '<td class="px-4 py-3 text-gray-400 text-xs">' + (e.target_role||'—') + '</td>' +
-          '<td class="px-4 py-3 text-gray-400 text-xs max-w-[160px] truncate" title="' + (e.reason||'') + '">' + (e.reason||'—') + '</td>' +
-          '<td class="px-4 py-3 text-gray-600 text-xs font-mono">' + (e.ip_address||'—') + '</td>' +
+          '<td class="px-4 py-3 text-xs"><p class="text-white font-medium">' + admEmail + '</p></td>' +
+          '<td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-semibold ' + color + '">' + action.replace(/_/g,' ') + '</span></td>' +
+          '<td class="px-4 py-3 text-xs"><p class="text-white">' + (tEmail || 'ID: ' + tId) + '</p><p class="text-gray-600">' + tType + ' #' + tId + '</p></td>' +
+          '<td class="px-4 py-3 text-gray-400 text-xs">' + tRole + '</td>' +
+          '<td class="px-4 py-3 text-gray-400 text-xs max-w-[160px] truncate" title="' + reason + '">' + reason + '</td>' +
+          '<td class="px-4 py-3 text-gray-600 text-xs font-mono">' + ip + '</td>' +
         '</tr>'
       }).join('')
     }
@@ -1884,15 +1879,22 @@ adminPanel.get('/audit-log', async (c: any) => {
         tbody.innerHTML = entries.map(e => {
           const color = statusColors[e.status] || 'badge-gray'
           const date = e.refunded_at ? new Date(e.refunded_at).toLocaleString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '—'
+          const eId     = parseInt(e.id) || 0
+          const amount  = parseFloat(e.amount || 0)
+          const uEmail  = escapeHtml(e.user_email || '—')
+          const rType   = escapeHtml(e.refund_type || '—')
+          const status  = escapeHtml(e.status || '—')
+          const stripeId = escapeHtml(e.stripe_refund_id || '—')
+          const note    = escapeHtml(e.manual_note || e.failure_reason || '—')
           return '<tr class="border-b border-white/5 hover:bg-white/[.02] transition-colors">' +
-            '<td class="px-4 py-3 text-gray-600 text-xs font-mono">' + e.id + '</td>' +
+            '<td class="px-4 py-3 text-gray-600 text-xs font-mono">' + eId + '</td>' +
             '<td class="px-4 py-3 text-gray-400 text-xs">' + date + '</td>' +
-            '<td class="px-4 py-3 text-white text-xs">' + (e.user_email||'—') + '</td>' +
-            '<td class="px-4 py-3 text-gray-400 text-xs">' + (e.refund_type||'—') + '</td>' +
-            '<td class="px-4 py-3 text-lime-400 text-xs font-semibold">$' + (e.amount||0).toFixed(2) + '</td>' +
-            '<td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-semibold ' + color + '">' + e.status + '</span></td>' +
-            '<td class="px-4 py-3 text-gray-500 text-xs font-mono">' + (e.stripe_refund_id||'—') + '</td>' +
-            '<td class="px-4 py-3 text-gray-500 text-xs max-w-[120px] truncate">' + (e.manual_note||e.failure_reason||'—') + '</td>' +
+            '<td class="px-4 py-3 text-white text-xs">' + uEmail + '</td>' +
+            '<td class="px-4 py-3 text-gray-400 text-xs">' + rType + '</td>' +
+            '<td class="px-4 py-3 text-lime-400 text-xs font-semibold">$' + amount.toFixed(2) + '</td>' +
+            '<td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-semibold ' + color + '">' + status + '</span></td>' +
+            '<td class="px-4 py-3 text-gray-500 text-xs font-mono">' + stripeId + '</td>' +
+            '<td class="px-4 py-3 text-gray-500 text-xs max-w-[120px] truncate">' + note + '</td>' +
           '</tr>'
         }).join('')
       } catch {}
