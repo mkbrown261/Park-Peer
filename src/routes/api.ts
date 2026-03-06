@@ -1205,7 +1205,8 @@ apiRoutes.post('/payments/confirm', async (c) => {
   const {
     payment_intent_id, hold_id, session_token, booking_id,
     listing_id, driver_email, driver_name,
-    start_datetime, end_datetime, vehicle_plate, checkout_token
+    start_datetime, end_datetime, vehicle_plate, checkout_token,
+    driver_phone
   } = body
 
   // ── Input sanitization ─────────────────────────────────────────────────
@@ -1590,31 +1591,39 @@ apiRoutes.post('/payments/confirm', async (c) => {
     let verifiedEmail: string | null = null
     let verifiedPhone: string | null = null
 
-    if (db && session_token) {
+    // Look up verified contacts using BOTH tokens:
+    // - checkout_token: used by the OTP verify flow on the booking page
+    // - session_token (holdSessionToken): used by the hold/confirm flow
+    // They can differ, so we check both and take whichever has a verified record.
+    const vcTokens = [...new Set([checkout_token, session_token].filter(Boolean))]
+
+    if (db && vcTokens.length > 0) {
       try {
+        // Build parameterized query for 1 or 2 tokens
+        const placeholders = vcTokens.map(() => '?').join(',')
         const vcRows = await db.prepare(`
           SELECT contact_type, contact_value FROM verified_contacts
-          WHERE session_token = ? AND used = 0
+          WHERE session_token IN (${placeholders}) AND used = 0
             AND datetime(expires_at) > datetime('now')
-        `).bind(String(session_token)).all<{ contact_type: string; contact_value: string }>()
+        `).bind(...vcTokens).all<{ contact_type: string; contact_value: string }>()
 
         const emailVC = vcRows.results?.find(r => r.contact_type === 'email')
         const phoneVC = vcRows.results?.find(r => r.contact_type === 'phone')
 
         if (emailVC) {
           verifiedEmail = emailVC.contact_value
-          // Mark as used so replay is impossible
+          // Mark all matching tokens as used to prevent replay
           await db.prepare(`
             UPDATE verified_contacts SET used = 1
-            WHERE session_token = ? AND contact_type = 'email'
-          `).bind(String(session_token)).run()
+            WHERE session_token IN (${placeholders}) AND contact_type = 'email'
+          `).bind(...vcTokens).run()
         }
         if (phoneVC) {
           verifiedPhone = phoneVC.contact_value
           await db.prepare(`
             UPDATE verified_contacts SET used = 1
-            WHERE session_token = ? AND contact_type = 'phone'
-          `).bind(String(session_token)).run()
+            WHERE session_token IN (${placeholders}) AND contact_type = 'phone'
+          `).bind(...vcTokens).run()
         }
       } catch (vcErr: any) {
         console.warn('[Confirm] verified_contacts lookup failed:', vcErr.message)
@@ -1623,7 +1632,11 @@ apiRoutes.post('/payments/confirm', async (c) => {
 
     // Prefer verified values; fall back to raw body values
     const emailToSend = verifiedEmail || safeDriverEmail || null
-    const phoneToSend = verifiedPhone || (body.driver_phone ? String(body.driver_phone).slice(0, 20) : null)
+    // Normalize phone: strip non-digits, ensure E.164 for Twilio
+    const rawPhone = verifiedPhone || (driver_phone ? String(driver_phone).trim() : null)
+    const phoneToSend = rawPhone
+      ? (rawPhone.startsWith('+') ? rawPhone : '+1' + rawPhone.replace(/\D/g, ''))
+      : null
 
     // ── 5b. Generate QR token for the booking (embed in email + SMS link) ─
     let qrDataUrl: string | null = null
@@ -1668,7 +1681,14 @@ apiRoutes.post('/payments/confirm', async (c) => {
         startTime: startFmt, endTime: endFmt, totalCharged: amountPaid,
         qrCheckinUrl: qrCheckinUrl || undefined,
       }) : Promise.resolve(true)
-    ]).catch((emailErr: any) => console.error('[Confirm] email/SMS error:', emailErr.message))
+    ]).catch((emailErr: any) => console.error('[Confirm] email/SMS error:', emailErr?.message || emailErr))
+
+    // Log SMS dispatch outcome for debugging
+    if (phoneToSend) {
+      console.log(`[Confirm] SMS dispatched to ${phoneToSend.slice(0,7)}***`)
+    } else {
+      console.log('[Confirm] No phone number provided — SMS skipped')
+    }
 
     // ── 6. In-app notification (async, non-blocking) ─────────────────────
     if (db && resolvedDriverId) {
