@@ -1833,11 +1833,29 @@ bookingPage.get('/:id', async (c) => {
       // Typo detection
       if (DOMAIN_TYPOS[typed]) {
         const fix = DOMAIN_TYPOS[typed];
-        hint.innerHTML = 'Did you mean <strong>' + localPart + '@' + fix + '</strong>? '
-          + '<a href="#" onclick="document.getElementById(\'contact-email\').value=\'' + localPart + '@' + fix + '\';onEmailInput();return false;" '
-          + 'class="underline">Use this</a>';
+        const corrected = localPart + '@' + fix;
+        hint.textContent = '';
         hint.className = 'text-xs mt-1 text-amber-400';
         hint.classList.remove('hidden');
+        // Build hint with a safe DOM button (no inline onclick)
+        const span = document.createElement('span');
+        span.textContent = 'Did you mean ';
+        const strong = document.createElement('strong');
+        strong.textContent = corrected;
+        const space = document.createTextNode('? ');
+        const link = document.createElement('a');
+        link.href = '#';
+        link.className = 'underline ml-1';
+        link.textContent = 'Use this';
+        link.addEventListener('click', function(e) {
+          e.preventDefault();
+          document.getElementById('contact-email').value = corrected;
+          onEmailInput();
+        });
+        hint.appendChild(span);
+        hint.appendChild(strong);
+        hint.appendChild(space);
+        hint.appendChild(link);
         inp.style.borderColor = 'rgba(251,191,36,.4)';
         return;
       }
