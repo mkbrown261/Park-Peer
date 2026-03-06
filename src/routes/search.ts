@@ -1300,52 +1300,92 @@ searchPage.get('/', async (c) => {
   // WALK SCORE — DESTINATION INPUT + AUTOCOMPLETE
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   let destDebounce = null
-  document.addEventListener('DOMContentLoaded', () => {
+  const destSuggestionData = new Map()  // key → { lng, lat, name }
+
+  // Wire up destination input — runs inline (script executes after DOM is parsed)
+  ;(function initDestInput() {
     const inp = document.getElementById('dest-input')
-    if (!inp) return
+    const box = document.getElementById('dest-suggestions')
+    if (!inp || !box) return
+
     inp.addEventListener('input', () => {
       clearTimeout(destDebounce)
-      destDebounce = setTimeout(() => runDestAutocomplete(inp.value.trim()), 280)
+      const q = inp.value.trim()
+      if (!q || q.length < 2) { closeSuggestions(); return }
+      destDebounce = setTimeout(() => runDestAutocomplete(q), 300)
     })
+
     inp.addEventListener('keydown', e => {
       if (e.key === 'Escape') { closeSuggestions(); inp.blur() }
     })
-    document.addEventListener('click', e => {
+
+    // Use mousedown (fires before blur/click) so suggestion click registers
+    // before the document click handler can wipe the dropdown
+    box.addEventListener('mousedown', e => {
+      const btn = e.target.closest('[data-dest-key]')
+      if (!btn) return
+      e.preventDefault()  // prevent input blur
+      const key  = btn.dataset.destKey
+      const data = destSuggestionData.get(key)
+      if (data) selectDestination(data.lng, data.lat, data.name)
+    })
+
+    // Close on outside click — use mousedown so it runs before blur
+    document.addEventListener('mousedown', e => {
       if (!e.target.closest('#walk-dest-row')) closeSuggestions()
     })
-  })
+  })()
 
   async function runDestAutocomplete(q) {
     const box = document.getElementById('dest-suggestions')
     if (!box) return
-    if (!q || q.length < 3) { box.classList.add('hidden'); box.innerHTML = ''; return }
-    if (!MAPBOX_TOKEN) return
+    if (!MAPBOX_TOKEN) {
+      console.warn('[walk] no MAPBOX_TOKEN yet, retrying in 500ms')
+      setTimeout(() => runDestAutocomplete(q), 500)
+      return
+    }
     try {
-      const url = 'https://api.mapbox.com/geocoding/v5/mapbox.places/' + encodeURIComponent(q)
-        + '.json?access_token=' + MAPBOX_TOKEN + '&types=poi,address,place,neighborhood&limit=5&language=en'
+      const url = 'https://api.mapbox.com/geocoding/v5/mapbox.places/'
+        + encodeURIComponent(q)
+        + '.json?access_token=' + MAPBOX_TOKEN
+        + '&types=poi,address,place,neighborhood&limit=5&language=en'
       const res = await fetch(url)
+      if (!res.ok) throw new Error('Geocoding ' + res.status)
       const geo = await res.json()
-      if (!geo.features || !geo.features.length) { box.classList.add('hidden'); return }
-      box.innerHTML = geo.features.map(f => {
-        const place = f.place_name || f.text
-        return '<button class="w-full text-left px-4 py-3 hover:bg-indigo-500/10 border-b border-white/5 last:border-0 transition-colors" ' +
-          'onclick="selectDestination(' + JSON.stringify(f.center[0]) + ',' + JSON.stringify(f.center[1]) + ',' + JSON.stringify(place) + ')">' +
-          '<div class="flex items-start gap-3">' +
-            '<i class="fas fa-location-dot text-lime-400 text-xs mt-0.5 flex-shrink-0"></i>' +
-            '<div class="min-w-0">' +
-              '<p class="text-white text-xs font-semibold truncate">' + f.text + '</p>' +
-              '<p class="text-gray-500 text-xs truncate">' + (f.place_name || '') + '</p>' +
-            '</div>' +
-          '</div>' +
-        '</button>'
+      if (!geo.features || !geo.features.length) { closeSuggestions(); return }
+
+      destSuggestionData.clear()
+      const html = geo.features.map((f, i) => {
+        const key  = 'dest_' + i
+        const name = f.place_name || f.text || ''
+        destSuggestionData.set(key, { lng: f.center[0], lat: f.center[1], name })
+        // Safely escape for HTML display only (no inline JS)
+        const safeName    = name.replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        const safeText    = (f.text || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        const safePlaceFull = (f.place_name || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        return '<button data-dest-key="' + key + '" '
+          + 'class="w-full text-left px-4 py-3 hover:bg-indigo-500/10 border-b border-white/5 last:border-0 transition-colors cursor-pointer">'
+          + '<div class="flex items-start gap-3 pointer-events-none">'
+            + '<i class="fas fa-location-dot text-lime-400 text-xs mt-0.5 flex-shrink-0"></i>'
+            + '<div class="min-w-0">'
+              + '<p class="text-white text-xs font-semibold truncate">' + safeText + '</p>'
+              + '<p class="text-gray-500 text-xs truncate">' + safePlaceFull + '</p>'
+            + '</div>'
+          + '</div>'
+          + '</button>'
       }).join('')
+
+      box.innerHTML = html
       box.classList.remove('hidden')
-    } catch(e) { console.warn('[walk] autocomplete error', e) }
+    } catch(e) {
+      console.warn('[walk] autocomplete error', e)
+    }
   }
 
   function closeSuggestions() {
     const box = document.getElementById('dest-suggestions')
     if (box) { box.classList.add('hidden'); box.innerHTML = '' }
+    destSuggestionData.clear()
   }
 
   function selectDestination(lng, lat, name) {
