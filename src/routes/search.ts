@@ -420,8 +420,8 @@ searchPage.get('/', async (c) => {
       box-shadow: 0 2px 8px rgba(0,0,0,0.4);
       cursor: pointer;
       white-space: nowrap;
-      /* FIX 1: Only transition GPU-composited properties — no 'all' which causes layout thrash */
-      transition: transform 0.15s ease, background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+      /* Transition shadow/color only — no transform transitions (would fight Mapbox positioning) */
+      transition: box-shadow 0.15s ease, background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
       font-family: 'Inter', sans-serif;
       /* Prevent marker from stretching to map width */
       display: inline-flex;
@@ -430,14 +430,10 @@ searchPage.get('/', async (c) => {
       width: fit-content;
       max-width: 120px;
       box-sizing: border-box;
-      /* FIX 1: Use will-change so browser pre-composites the layer */
-      will-change: transform;
-      /* FIX 1: transform-origin center so scale doesn't shift position */
-      transform-origin: center center;
     }
-    /* scale only on hover — skip if animation is already running */
-    .park-pin:hover:not(.pin-active-pulse) { transform: scale(1.1); }
-    .park-pin.active { background: #C6FF00 !important; color: #121212 !important; transform: scale(1.15); border-color: #C6FF00; box-shadow: 0 0 0 3px rgba(198,255,0,0.3), 0 2px 8px rgba(0,0,0,0.4); }
+    /* Hover/active: shadow lift only — NO transform:scale (would shift Mapbox bottom-anchor) */
+    .park-pin:hover:not(.pin-active-pulse) { box-shadow: 0 4px 14px rgba(0,0,0,0.55), 0 0 0 2px rgba(255,255,255,0.5); }
+    .park-pin.active { background: #C6FF00 !important; color: #121212 !important; border-color: #C6FF00; box-shadow: 0 0 0 3px rgba(198,255,0,0.45), 0 4px 12px rgba(0,0,0,0.5); }
     .park-pin.pri-green  { background: #16a34a; }
     .park-pin.pri-blue   { background: #2563eb; }
     .park-pin.pri-yellow { background: #ca8a04; }
@@ -483,11 +479,11 @@ searchPage.get('/', async (c) => {
       max-width: 80px;
       min-width: 44px;
       box-sizing: border-box;
-        transform-origin: center center;
+      /* No transform — hover uses shadow lift only */
     }
-    /* walk-pin hover only scales — does not change background to lime green */
-    .park-pin.walk-pin:hover:not(.pin-active-pulse) { transform: scale(1.1) !important; }
-    .park-pin.walk-pin.active { transform: scale(1.15) !important; box-shadow: 0 0 0 3px rgba(198,255,0,0.3), 0 2px 8px rgba(0,0,0,0.4) !important; }
+    /* walk-pin hover/active: shadow lift only — no scale ever */
+    .park-pin.walk-pin:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.55), 0 0 0 2px rgba(255,255,255,0.4) !important; }
+    .park-pin.walk-pin.active { box-shadow: 0 0 0 3px rgba(198,255,0,0.5), 0 4px 12px rgba(0,0,0,0.5) !important; }
     .ws-time {
       font-size: 11px;
       font-weight: 900;
@@ -517,15 +513,14 @@ searchPage.get('/', async (c) => {
     .park-pin.ws-yellow { background: #a16207; border-color: #eab308; color: #fff; }
     .park-pin.ws-orange { background: #c2410c; border-color: #f97316; color: #fff; }
     .park-pin.ws-red    { background: #991b1b; border-color: #ef4444; color: #fff; }
-    /* Best walk glow */
+    /* Best walk glow — NO transform:scale, glow only */
     .park-pin.ws-best {
-      box-shadow: 0 0 0 3px rgba(34,197,94,0.5), 0 0 16px rgba(34,197,94,0.4), 0 2px 8px rgba(0,0,0,0.4) !important;
+      box-shadow: 0 0 0 3px rgba(34,197,94,0.6), 0 0 18px rgba(34,197,94,0.5), 0 2px 8px rgba(0,0,0,0.4) !important;
       border-color: #22c55e !important;
-      transform: scale(1.12);
       z-index: 10;
     }
-    .park-pin.ws-best:hover:not(.pin-active-pulse), .park-pin.ws-best.active {
-      transform: scale(1.22) !important;
+    .park-pin.ws-best:hover:not(.pin-active-pulse) {
+      box-shadow: 0 0 0 4px rgba(34,197,94,0.7), 0 0 24px rgba(34,197,94,0.6), 0 4px 14px rgba(0,0,0,0.5) !important;
     }
     /* Walk card badge */
     .ws-card-badge {
@@ -1336,7 +1331,7 @@ searchPage.get('/', async (c) => {
         // Walk-pin mode: column layout with time + price spans (built once, updated via textContent)
         const cls = wsColor(score.durationS)
         el.className = 'park-pin walk-pin ' + priPinClass(l.pri_score) + ' ' + cls + (isBest ? ' ws-best' : '')
-        el.style.cssText = 'width:fit-content;max-width:90px;display:inline-flex;flex-direction:column;align-items:center;box-sizing:border-box;will-change:transform;transform-origin:center center;'
+        el.style.cssText = 'width:fit-content;max-width:90px;display:inline-flex;flex-direction:column;align-items:center;box-sizing:border-box;'
         // Build spans once — updateWalkBadge will only do textContent from here on
         const ts = document.createElement('span'); ts.className = 'ws-time'; ts.textContent = fmtDur(score.durationS)
         const ps = document.createElement('span'); ps.className = 'ws-price'; ps.textContent = '$' + (l.price_hourly || 0).toFixed(0)
@@ -1345,14 +1340,14 @@ searchPage.get('/', async (c) => {
       } else {
         // Plain price-pin mode
         el.className = 'park-pin ' + priPinClass(l.pri_score)
-        el.style.cssText = 'width:fit-content;max-width:90px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;will-change:transform;transform-origin:center center;'
+        el.style.cssText = 'width:fit-content;max-width:90px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;'
         el.textContent = '$' + (l.price_hourly || 0).toFixed(0)
       }
       el.dataset.id = l.id
 
       try {
         // FIX 3: Marker is created with frozen LngLat — never re-created on interaction
-        const marker = new mapboxgl.Marker({ element: el, anchor: 'bottom' })
+        const marker = new mapboxgl.Marker({ element: el, anchor: 'center' })
           .setLngLat([l.lng, l.lat])
           .addTo(map)
         console.debug('[pin] created id=' + l.id + ' lng=' + l.lng.toFixed(5) + ' lat=' + l.lat.toFixed(5))
@@ -1923,7 +1918,7 @@ searchPage.get('/', async (c) => {
 
     // Now only touch className + textContent — ZERO layout recalc on marker position
     el.className = 'park-pin walk-pin ' + priPinClass(el._priScore) + ' ' + cls + (isBest ? ' ws-best' : '')
-    el.style.cssText = 'width:fit-content;max-width:90px;display:inline-flex;flex-direction:column;align-items:center;box-sizing:border-box;will-change:transform;transform-origin:center center;'
+    el.style.cssText = 'width:fit-content;max-width:90px;display:inline-flex;flex-direction:column;align-items:center;box-sizing:border-box;'
 
     const timeSpan = el.querySelector('.ws-time')
     const priceSpan = el.querySelector('.ws-price')
