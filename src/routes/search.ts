@@ -228,7 +228,7 @@ searchPage.get('/', async (c) => {
       <!-- FIX 2: UNIFIED route info pill — replaces walk-route-panel + route-info-label -->
       <!-- Only ONE pill exists. It is a CSS-positioned overlay (bottom-center).        -->
       <!-- A separate Mapbox-anchored marker (#route-pin-label) handles map position.   -->
-      <div id="route-info-pill" class="hidden absolute bottom-24 left-1/2 -translate-x-1/2 z-20 pointer-events-auto">
+      <div id="route-info-pill" class="hidden absolute z-20">
         <div class="rip-inner">
           <i class="fas fa-person-walking rip-icon"></i>
           <span id="rip-time">–</span>
@@ -586,11 +586,26 @@ searchPage.get('/', async (c) => {
     }
 
     /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-       FIX 2: UNIFIED ROUTE INFO PILL  — single component
-       Replaces old walk-route-panel + route-info-label
+       UNIFIED ROUTE INFO PILL
+       Key rules:
+       • position/centering is ONLY in CSS (not Tailwind classes)
+       • hidden = display:none so the element never occupies layout
+       • NO transform in any animation — opacity-only fade
        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
-    #route-info-pill { pointer-events: auto; }
-    #route-info-pill.hidden { display: none !important; }
+    #route-info-pill {
+      position: absolute;
+      bottom: 6rem;          /* 96px from bottom of map */
+      left: 50%;
+      transform: translateX(-50%);   /* centering — never touched by JS or keyframes */
+      z-index: 20;
+      pointer-events: auto;
+      /* opacity-only transition for show/hide — ZERO layout/transform change */
+      opacity: 1;
+      transition: opacity 0.18s ease;
+    }
+    #route-info-pill.hidden {
+      display: none !important;  /* fully removed from layout when hidden */
+    }
     .rip-inner {
       display: inline-flex;
       align-items: center;
@@ -609,10 +624,10 @@ searchPage.get('/', async (c) => {
       backdrop-filter: blur(14px);
       -webkit-backdrop-filter: blur(14px);
     }
-    .rip-icon { color: #4ade80; font-size: 11px; flex-shrink: 0; }
-    #rip-time { font-weight: 800; font-size: 13px; color: #fff; }
-    .rip-sep  { color: rgba(255,255,255,0.25); font-size: 10px; }
-    #rip-dist { color: #4ade80; font-weight: 700; font-size: 12px; }
+    .rip-icon  { color: #4ade80; font-size: 11px; flex-shrink: 0; }
+    #rip-time  { font-weight: 800; font-size: 13px; color: #fff; }
+    .rip-sep   { color: rgba(255,255,255,0.25); font-size: 10px; }
+    #rip-dist  { color: #4ade80; font-weight: 700; font-size: 12px; }
     .rip-price { color: #c4b5fd; font-weight: 700; font-size: 11px; }
     .rip-close {
       margin-left: 4px;
@@ -628,9 +643,9 @@ searchPage.get('/', async (c) => {
     }
     .rip-close:hover { color: #fff; }
     @media (max-width: 767px) {
-      #route-info-pill { bottom: 5rem !important; }
+      #route-info-pill { bottom: 5rem; }
       .rip-inner { font-size: 11px; padding: 7px 12px; max-width: 88vw; }
-      #rip-time { font-size: 12px; }
+      #rip-time  { font-size: 12px; }
     }
 
     /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -644,29 +659,10 @@ searchPage.get('/', async (c) => {
       70%  { transform: scale(2.4); opacity: 0;   }
       100% { transform: scale(2.4); opacity: 0;   }
     }
-    /* ── 3. Pin body beat ── */
-    @keyframes pinBeat {
-      0%,100% { transform: scale(1);    }
-      40%     { transform: scale(1.18); }
-      70%     { transform: scale(0.97); }
-    }
-    /* ── 4. Route pill entrance ── */
-    @keyframes ripIn {
-      from { opacity: 0; transform: translateY(8px); }
-      to   { opacity: 1; transform: translateY(0);   }
-    }
-    /* ── 5. Route chip flash on select ── */
-    @keyframes chipSelectFlash {
-      0%   { box-shadow: 0 6px 20px rgba(0,0,0,0.5), 0 0 0 0   rgba(34,197,94,0.7); }
-      50%  { box-shadow: 0 6px 20px rgba(0,0,0,0.5), 0 0 0 8px rgba(34,197,94,0);   }
-      100% { box-shadow: 0 6px 20px rgba(0,0,0,0.5), 0 0 0 0   rgba(34,197,94,0);   }
-    }
-
-    /* Park pin pulse — animate ::before ring only; pin body stays stable */
+    /* ── Park pin pulse ring (::before only — body transform never changes) ── */
     .park-pin.pin-active-pulse {
       position: relative;
       z-index: 5;
-      /* No transform animation on the pin body — hover:scale still works cleanly */
     }
     .park-pin.pin-active-pulse::before {
       content: '';
@@ -679,24 +675,18 @@ searchPage.get('/', async (c) => {
       pointer-events: none;
     }
 
-    /* Route pill: the container uses Tailwind -translate-x-1/2 for centering.
-       NEVER animate the container element directly — the keyframe transform would
-       override Tailwind's translateX(-50%) and snap the pill to the left edge.
-       Animate only the .rip-inner child. */
-    #route-info-pill:not(.hidden) .rip-inner:not(.rip-flash) {
-      animation: ripIn 0.22s ease-out both;
+    /* ── Pill border flash on re-select (opacity+border only, no transform) ── */
+    @keyframes ripFlash {
+      0%,100% { border-color: rgba(34,197,94,0.4); }
+      40%     { border-color: rgba(34,197,94,0.9); box-shadow: 0 6px 20px rgba(0,0,0,0.5), 0 0 0 4px rgba(34,197,94,0.25); }
     }
-
-    /* Active pill flash on re-select */
     .rip-inner.rip-flash {
-      animation: chipSelectFlash 0.5s ease-out both;
-      border-color: rgba(34,197,94,0.7) !important;
+      animation: ripFlash 0.45s ease-out both;
     }
 
     /* Reduced motion */
     @media (prefers-reduced-motion: reduce) {
       .park-pin.pin-active-pulse::before { animation: none !important; }
-      #route-info-pill:not(.hidden) .rip-inner { animation: none !important; }
       .rip-inner.rip-flash               { animation: none !important; }
     }
   </style>
@@ -863,22 +853,22 @@ searchPage.get('/', async (c) => {
       RA.labelMarker.getElement().parentElement.style.pointerEvents = 'none'
     }
 
-    // Also update the bottom-center CSS pill (kept for mobile where map is small)
+    // Show + update the bottom-center CSS pill.
+    // IMPORTANT: update content BEFORE removing .hidden, so the element is
+    // fully populated before it becomes visible (prevents flash of stale content).
     _updateBottomPill(score, listing)
     const pill = document.getElementById('route-info-pill')
-    const inner = pill ? pill.querySelector('.rip-inner') : null
-
     if (pill) {
+      // If already visible and same listing → play border flash
+      const isReselect = !pill.classList.contains('hidden') && RA.activeListingId === listingId
       pill.classList.remove('hidden')
-      // Entrance animation: briefly remove rip-inner from DOM flow to replay ripIn
-      if (inner) {
-        inner.classList.remove('rip-flash')
-        void inner.offsetWidth  // force reflow so animation replays
-        // rip-flash is only for re-tap; first show just relies on ripIn from CSS selector
-        // For re-tap (route already visible), play the flash
-        if (RA.activeListingId && RA.activeListingId === listingId) {
+      if (isReselect) {
+        const inner = pill.querySelector('.rip-inner')
+        if (inner) {
+          inner.classList.remove('rip-flash')
+          void inner.offsetWidth
           inner.classList.add('rip-flash')
-          setTimeout(() => inner.classList.remove('rip-flash'), 600)
+          setTimeout(() => inner.classList.remove('rip-flash'), 500)
         }
       }
     }
@@ -2073,12 +2063,10 @@ searchPage.get('/', async (c) => {
       paint: { 'line-color': RA_INACTIVE_COLOR, 'line-width': 3.5, 'line-opacity': 0.4,
                'line-dasharray': [2, 1.5] } })
 
-    // FIX 2: Update the ONE unified bottom pill (no old walk-route-panel IDs)
-    // raShowRoutePill (called below) also places a map-anchored label above the pin.
-    _updateBottomPill(score, allListings.find(l => l.id == listingId))
-    document.getElementById('route-info-pill').classList.remove('hidden')
-
     // ── Trigger Route Animation Engine ──────────────────────
+    // raActivateRoute → raShowRoutePill handles showing + updating the pill.
+    // Do NOT also call classList.remove('hidden') here — that double-show
+    // triggers the CSS animation twice and causes a brief flicker.
     const listing = allListings.find(l => l.id == listingId)
     // rAF ensures layers are committed to GL before we read them back
     requestAnimationFrame(() => raActivateRoute(listingId, score, listing))
