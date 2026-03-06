@@ -581,9 +581,8 @@ searchPage.get('/', async (c) => {
        UNIFIED ROUTE INFO PILL
        Key rules:
        • position/centering is ONLY in CSS — transform is ALWAYS active
-       • hidden = opacity:0 + visibility:hidden + pointer-events:none
-         (NEVER display:none — that destroys the transform layer and
-          causes a 1-frame jump to left:50% without translateX on repaint)
+       • hidden = opacity:0 + pointer-events:none (NO visibility transition—
+         it causes the pill to stay invisible if toggled mid-transition)
        • NO transform in any animation — opacity-only fade
        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
     #route-info-pill {
@@ -593,21 +592,18 @@ searchPage.get('/', async (c) => {
       transform: translateX(-50%);   /* centering — ALWAYS in effect, never overridden */
       z-index: 20;
       pointer-events: none;          /* overridden to auto when visible */
-      /* Smooth fade in/out — transform stays constant the whole time */
+      /* Use opacity + pointer-events only — NO visibility transition */
+      /* visibility transition causes pill to stay invisible when toggled rapidly */
       opacity: 0;
-      visibility: hidden;
-      transition: opacity 0.18s ease, visibility 0s linear 0.18s;
+      transition: opacity 0.15s ease;
     }
     #route-info-pill.pill-visible {
       opacity: 1;
-      visibility: visible;
       pointer-events: auto;
-      transition: opacity 0.18s ease, visibility 0s linear 0s;
     }
-    /* Keep .hidden support for any legacy callers — maps to same as not-visible */
+    /* .hidden is a hard-off alias used by legacy callers */
     #route-info-pill.hidden {
       opacity: 0 !important;
-      visibility: hidden !important;
       pointer-events: none !important;
     }
     .rip-inner {
@@ -827,10 +823,11 @@ searchPage.get('/', async (c) => {
     const wasVisible = pill.classList.contains('pill-visible')
     const isReselect = wasVisible && RA.activeListingId === listingId
 
-    // Show pill: add pill-visible (opacity:1 + visibility:visible + pointer-events:auto)
+    // Show pill: cancel any in-progress transition, then make visible
     // Remove .hidden just in case any legacy caller added it
-    pill.classList.remove('hidden')
-    pill.classList.add('pill-visible')
+    pill.classList.remove('hidden', 'pill-visible')   // reset
+    void pill.offsetWidth                             // flush — cancel transition
+    pill.classList.add('pill-visible')                // now fade in from scratch
 
     // Only flash border on re-tap of same pin
     if (isReselect) {
@@ -2014,7 +2011,11 @@ searchPage.get('/', async (c) => {
         const route = data.routes[0]
         const result = { distanceM: route.distance, durationS: route.duration, geometry: route.geometry, source: 'api' }
         WS.scores.set(listingId, result)
-        _renderWalkRoute(listingId, result)
+        // Only re-render if this listing is still the active route
+        // (user may have clicked a different pin or dismissed the route while fetch was in-flight)
+        if (WS.activeRoute && WS.activeRoute.listingId === listingId) {
+          _renderWalkRoute(listingId, result)
+        }
       }
     } catch(e) {}
   }
