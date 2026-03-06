@@ -389,7 +389,7 @@ bookingPage.get('/:id', async (c) => {
                   </span>
                 </div>
                 <div class="relative">
-                  <input type="tel" id="contact-phone" placeholder="+1 (555) 000-0000"
+                  <input type="tel" id="contact-phone" placeholder="5551234567 or +442071234567"
                     autocomplete="tel" maxlength="20"
                     oninput="onPhoneInput()"
                     class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 pr-24"/>
@@ -1893,13 +1893,13 @@ bookingPage.get('/:id', async (c) => {
     }
   }
 
-  // ── Phone input — real-time format + inline validation ───────────────────
+  // ── Phone input — validation only, no auto-formatting ───────────────────
   function onPhoneInput() {
     const inp   = document.getElementById('contact-phone');
     const hint  = document.getElementById('phone-hint');
     const btn   = document.getElementById('phone-verify-btn');
     const badge = document.getElementById('phone-verify-badge');
-    let raw = inp.value;
+    const raw   = inp.value;
 
     // If user edits after verification, reset verified state
     if (phoneVerified) {
@@ -1908,83 +1908,43 @@ bookingPage.get('/:id', async (c) => {
       inp.style.borderColor = '';
     }
 
-    // Empty — hide everything
-    if (raw.length === 0) {
-      hint.classList.add('hidden');
-      btn.classList.add('hidden');
-      inp.style.borderColor = '';
-      return;
-    }
-
-    // ── Auto-format US numbers ──────────────────────────────────────────────
-    // Only auto-format domestic (no + prefix) with ≤10 digits
-    const digits = raw.replace(/\D/g, '');
-    if (!raw.startsWith('+') && digits.length <= 10) {
-      let formatted = raw;
-      if (digits.length >= 6) {
-        formatted = '(' + digits.slice(0,3) + ') ' + digits.slice(3,6) + '-' + digits.slice(6,10);
-      } else if (digits.length >= 3) {
-        formatted = '(' + digits.slice(0,3) + ') ' + digits.slice(3);
-      } else {
-        formatted = digits; // 1-2 digits: just show raw digits
-      }
-      if (formatted !== raw) {
-        inp.value = formatted;
-        try { inp.setSelectionRange(formatted.length, formatted.length); } catch(e) {}
-        raw = formatted;
-      }
-    }
-
-    // ── Validate ────────────────────────────────────────────────────────────
-    const cleanDigits = raw.replace(/\D/g, '');
-    const len        = cleanDigits.length;
-    const isUS10  = len === 10 && !raw.startsWith('+');
-    const isUS11  = len === 11 && cleanDigits[0] === '1';
-    const isIntl  = raw.startsWith('+') && len >= 7 && len <= 15;
-    const isValid = isUS10 || isUS11 || isIntl;
-
-    // Always reset hint/border first, then set correct state
-    hint.classList.add('hidden');
+    // Always reset hint first to avoid sticky messages
     hint.textContent = '';
+    hint.classList.add('hidden');
+    btn.classList.add('hidden');
+    inp.style.borderColor = '';
+
+    if (raw.length === 0) return;
+
+    // Count digits only for validation
+    const digits = raw.replace(/\D/g, '');
+    const len    = digits.length;
+
+    // Valid: 10 US digits, 11 digits starting with 1, or + international (7-15 digits)
+    const isUS10  = len === 10;
+    const isUS11  = len === 11 && digits[0] === '1';
+    const isIntl  = raw.trim().startsWith('+') && len >= 7 && len <= 15;
+    const isValid = isUS10 || isUS11 || isIntl;
 
     if (isValid) {
       btn.classList.remove('hidden');
-      inp.style.borderColor = 'rgba(99,102,241,.6)'; // indigo glow
-    } else {
-      btn.classList.add('hidden');
-
-      if (len === 0) {
-        inp.style.borderColor = '';
-      } else if (len > 15) {
-        // Too long — hard error
-        hint.textContent = 'Phone number is too long (max 15 digits)';
-        hint.className = 'text-xs mt-1 text-red-400';
-        hint.classList.remove('hidden');
-        inp.style.borderColor = 'rgba(239,68,68,.5)'; // red
-      } else if (!raw.startsWith('+') && len > 0 && len < 10) {
-        // US domestic incomplete — soft hint
-        const need = 10 - len;
-        hint.textContent = need + ' more digit' + (need === 1 ? '' : 's') + ' needed (or start with + for international)';
-        hint.className = 'text-xs mt-1 text-amber-400';
-        hint.classList.remove('hidden');
-        inp.style.borderColor = 'rgba(251,191,36,.4)'; // amber
-      } else if (raw.startsWith('+') && len < 7) {
-        // International incomplete
-        hint.textContent = 'Enter country code + number (e.g. +44 7911 123456)';
-        hint.className = 'text-xs mt-1 text-amber-400';
-        hint.classList.remove('hidden');
-        inp.style.borderColor = 'rgba(251,191,36,.4)';
-      } else if (!raw.startsWith('+') && len === 10) {
-        // Shouldn't reach here (handled above) but guard anyway
-        btn.classList.remove('hidden');
-        inp.style.borderColor = 'rgba(99,102,241,.6)';
-      } else {
-        // Ambiguous length (11-15 digits, no +, not US 1-xxx)
-        hint.textContent = 'Add + before country code for international numbers';
-        hint.className = 'text-xs mt-1 text-amber-400';
-        hint.classList.remove('hidden');
-        inp.style.borderColor = 'rgba(251,191,36,.4)';
-      }
+      inp.style.borderColor = 'rgba(99,102,241,.6)';
+    } else if (len > 15) {
+      hint.textContent = 'Number too long — max 15 digits';
+      hint.className = 'text-xs mt-1 text-red-400';
+      hint.classList.remove('hidden');
+      inp.style.borderColor = 'rgba(239,68,68,.5)';
+    } else if (len > 0 && len < 10) {
+      const need = 10 - len;
+      hint.textContent = need + ' more digit' + (need === 1 ? '' : 's') + ' needed';
+      hint.className = 'text-xs mt-1 text-gray-500';
+      hint.classList.remove('hidden');
+      inp.style.borderColor = 'rgba(255,255,255,.1)';
+    } else if (len > 10 && !isUS11) {
+      hint.textContent = 'Use +1XXXXXXXXXX for US or +country-code for international';
+      hint.className = 'text-xs mt-1 text-amber-400';
+      hint.classList.remove('hidden');
+      inp.style.borderColor = 'rgba(251,191,36,.4)';
     }
   }
 
