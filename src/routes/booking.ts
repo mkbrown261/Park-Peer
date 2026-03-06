@@ -108,6 +108,10 @@ bookingPage.get('/:id', async (c) => {
                 <input type="text" id="contact-last" placeholder="Last name" class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
               </div>
               <div class="col-span-2">
+                <label class="text-xs text-gray-500 block mb-1.5">Email (for confirmation)</label>
+                <input type="email" id="contact-email" placeholder="you@example.com" class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
+              </div>
+              <div class="col-span-2">
                 <label class="text-xs text-gray-500 block mb-1.5">Phone (for QR code delivery)</label>
                 <input type="tel" id="contact-phone" placeholder="+1 (555) 000-0000" class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
               </div>
@@ -133,11 +137,13 @@ bookingPage.get('/:id', async (c) => {
             </div>
 
             <!-- Add new card -->
-            <button onclick="toggleNewCard()" class="w-full flex items-center justify-center gap-2 p-3 border border-dashed border-white/20 rounded-xl text-gray-400 hover:text-white hover:border-white/40 transition-colors text-sm">
+            <button onclick="toggleNewCard()" id="add-card-btn" class="w-full flex items-center justify-center gap-2 p-3 border border-dashed border-white/20 rounded-xl text-gray-400 hover:text-white hover:border-white/40 transition-colors text-sm">
               <i class="fas fa-plus"></i> Add Card
             </button>
             <div id="new-card-form" class="hidden mt-3 space-y-2">
-              <div id="stripe-card-element" class="bg-charcoal-200 border border-white/10 rounded-xl px-3 py-3 text-sm text-white"></div>
+              <!-- Stripe Payment Element mounts here -->
+              <div id="stripe-payment-element" class="bg-charcoal-200 border border-white/10 rounded-xl px-3 py-3 text-sm text-white"></div>
+              <div id="stripe-card-errors" class="text-red-400 text-xs mt-1 hidden"></div>
               <p class="text-xs text-gray-500 mt-1"><i class="fas fa-lock mr-1 text-green-400"></i>Secured by Stripe · 256-bit SSL</p>
             </div>
           </div>
@@ -314,9 +320,17 @@ bookingPage.get('/:id', async (c) => {
     </div>
   </div>
 
+  <script src="https://js.stripe.com/v3/"></script>
   <script>
     const LISTING_ID = '${id}';
-    let listingData = null;
+    let listingData  = null;
+
+    // ── Stripe state ───────────────────────────────────────────────────────
+    let stripe          = null;   // Stripe.js instance
+    let stripeElements  = null;   // Elements group (Payment Element)
+    let paymentElement  = null;   // The mounted Payment Element
+    let stripeReady     = false;  // true once Stripe Elements are mounted
+    let dbBookingId     = null;   // D1 booking row id (from POST /api/bookings)
 
     // ── Load listing details from API ──────────────────────────────────────
     async function loadListing() {
@@ -325,11 +339,10 @@ bookingPage.get('/:id', async (c) => {
         if (!r.ok) return;
         listingData = await r.json();
 
-        // Update sidebar
         document.getElementById('listing-title').textContent   = listingData.title || 'Parking Space';
         document.getElementById('listing-address').textContent = [listingData.address, listingData.city].filter(Boolean).join(', ') || '—';
 
-        const rating = listingData.rating;
+        const rating  = listingData.rating;
         const reviews = listingData.review_count || 0;
         if (rating) {
           document.getElementById('listing-rating').textContent  = Number(rating).toFixed(1);
@@ -340,15 +353,110 @@ bookingPage.get('/:id', async (c) => {
 
         const t = (listingData.type || '').toLowerCase();
         const iconEl = document.getElementById('listing-icon');
-        if (t === 'garage')   iconEl.className = 'fas fa-warehouse text-white/20 text-2xl';
+        if (t === 'garage')       iconEl.className = 'fas fa-warehouse text-white/20 text-2xl';
         else if (t === 'driveway') iconEl.className = 'fas fa-home text-white/20 text-2xl';
-        else iconEl.className = 'fas fa-parking text-white/20 text-2xl';
+        else                       iconEl.className = 'fas fa-parking text-white/20 text-2xl';
 
         updatePriceBreakdown();
         updateConfirmButton();
       } catch(e) {
         document.getElementById('listing-title').textContent = 'Parking Space';
       }
+    }
+
+    // ── Stripe initialisation ─────────────────────────────────────────────
+    // Called once when user clicks "Add Card". Fetches publishable key,
+    // creates a Payment Intent immediately, mounts Payment Element.
+    async function initStripe() {
+      if (stripeReady) return;  // already mounted
+      try {
+        // 1. Get publishable key
+        const cfgRes = await fetch('/api/stripe/config');
+        const cfg    = await cfgRes.json();
+        if (!cfg.publishableKey) throw new Error('Stripe not configured');
+
+        stripe = Stripe(cfg.publishableKey);
+
+        // 2. Create a tentative booking + Payment Intent together
+        //    (using current dates so PI amount matches what user sees)
+        const arrive = document.getElementById('booking-arrive').value;
+        const depart = document.getElementById('booking-depart').value;
+        const email  = document.getElementById('contact-email')?.value || '';
+
+        if (!arrive || !depart) {
+          showStripeError('Please select arrival and departure times first.');
+          return;
+        }
+
+        // Step 2a: reserve the slot in D1 (pending status)
+        const csrfRes = await fetch('/api/auth/csrf', { credentials: 'include' }).catch(() => null);
+        const csrfToken = csrfRes?.ok ? (await csrfRes.json()).csrf_token : null;
+
+        const bkRes = await fetch('/api/bookings', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {})
+          },
+          credentials: 'include',
+          body: JSON.stringify({
+            listing_id:              LISTING_ID,
+            start_datetime:          arrive,
+            end_datetime:            depart,
+            vehicle_plate:           document.getElementById('vehicle-plate').value.trim() || null,
+            cancellation_acknowledged:       true,
+            cancellation_policy_version:     '1.0',
+          })
+        });
+        const bkData = await bkRes.json();
+        if (!bkRes.ok) { showStripeError(bkData.error || 'Could not reserve slot.'); return; }
+        dbBookingId = bkData.db_id;
+
+        // Step 2b: create Stripe Payment Intent (stamps stripe_pi_id onto booking)
+        const piRes = await fetch('/api/payments/create-intent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            listing_id:     LISTING_ID,
+            booking_id:     dbBookingId,
+            start_datetime: arrive,
+            end_datetime:   depart,
+            driver_email:   email || 'guest@parkpeer.app',
+          })
+        });
+        const piData = await piRes.json();
+        if (!piRes.ok || !piData.clientSecret) {
+          showStripeError(piData.error || 'Payment setup failed.');
+          return;
+        }
+
+        // 3. Mount Stripe Payment Element with the client secret
+        stripeElements = stripe.elements({ clientSecret: piData.clientSecret,
+          appearance: {
+            theme: 'night',
+            variables: { colorPrimary: '#6366f1', colorBackground: '#1e1e2e',
+                         colorText: '#ffffff', fontFamily: 'system-ui, sans-serif' }
+          }
+        });
+        paymentElement = stripeElements.create('payment');
+        paymentElement.mount('#stripe-payment-element');
+        paymentElement.on('ready', () => { stripeReady = true; });
+
+      } catch (e) {
+        showStripeError(e.message || 'Could not initialise payment.');
+      }
+    }
+
+    function showStripeError(msg) {
+      const el = document.getElementById('stripe-card-errors');
+      el.textContent = msg;
+      el.classList.remove('hidden');
+    }
+    function clearStripeError() {
+      const el = document.getElementById('stripe-card-errors');
+      el.textContent = '';
+      el.classList.add('hidden');
     }
 
     // ── Date / time helpers ────────────────────────────────────────────────
@@ -376,45 +484,37 @@ bookingPage.get('/:id', async (c) => {
       const a = new Date(document.getElementById('booking-arrive').value);
       const d = new Date(document.getElementById('booking-depart').value);
       if (!a || !d || isNaN(a) || isNaN(d) || d <= a) {
-        document.getElementById('rate-label').textContent  = 'Rate × hours';
-        document.getElementById('base-amount').textContent = '—';
-        document.getElementById('fee-amount').textContent  = '—';
-        document.getElementById('total-amount').textContent= '—';
+        document.getElementById('rate-label').textContent   = 'Rate × hours';
+        document.getElementById('base-amount').textContent  = '—';
+        document.getElementById('fee-amount').textContent   = '—';
+        document.getElementById('total-amount').textContent = '—';
         document.getElementById('confirm-label').textContent = 'Confirm & Pay';
         document.getElementById('confirm-btn').disabled = true;
         return;
       }
-      const hours   = Math.max(1, Math.ceil((d - a) / 3600000));
-      const rate    = listingData.price_hourly || 0;
-      const base    = rate * hours;
-      const fee     = Math.round(base * 0.15 * 100) / 100;
-      const total   = base + fee;
+      const hours = Math.max(1, Math.ceil((d - a) / 3600000));
+      const rate  = listingData.price_hourly || 0;
+      const base  = rate * hours;
+      const fee   = Math.round(base * 0.15 * 100) / 100;
+      const total = base + fee;
 
       document.getElementById('rate-label').textContent   = '$' + rate + '/hr × ' + hours + ' hour' + (hours !== 1 ? 's' : '');
       document.getElementById('base-amount').textContent  = '$' + base.toFixed(2);
       document.getElementById('fee-amount').textContent   = '$' + fee.toFixed(2);
       document.getElementById('total-amount').textContent = '$' + total.toFixed(2);
-      document.getElementById('confirm-label').textContent= 'Confirm & Pay $' + total.toFixed(2);
-      // Only enable confirm button if cancellation policy is acknowledged
+      document.getElementById('confirm-label').textContent = 'Confirm & Pay $' + total.toFixed(2);
       const ackCheck = document.getElementById('cancel-ack-checkbox');
       document.getElementById('confirm-btn').disabled = !(ackCheck && ackCheck.checked);
     }
 
-    function updateConfirmButton() {
-      updatePriceBreakdown();
-    }
+    function updateConfirmButton() { updatePriceBreakdown(); }
 
     function updateConfirmBtn() {
-      // Called when cancellation ack checkbox changes
       const ackCheck = document.getElementById('cancel-ack-checkbox');
-      const btn = document.getElementById('confirm-btn');
+      const btn      = document.getElementById('confirm-btn');
       if (ackCheck && btn) {
-        // Re-run price calculation which sets the disabled state based on dates
         updatePriceBreakdown();
-        // Additionally disable if ack not checked
-        if (!ackCheck.checked) {
-          btn.disabled = true;
-        }
+        if (!ackCheck.checked) btn.disabled = true;
       }
     }
 
@@ -429,10 +529,18 @@ bookingPage.get('/:id', async (c) => {
     }
 
     function toggleNewCard() {
-      document.getElementById('new-card-form').classList.toggle('hidden');
+      const form = document.getElementById('new-card-form');
+      form.classList.toggle('hidden');
+      // Initialise Stripe when the card form is first shown
+      if (!form.classList.contains('hidden') && !stripeReady) {
+        initStripe();
+      }
     }
 
+    // ── Main checkout handler ─────────────────────────────────────────────
     async function confirmBooking() {
+      clearStripeError();
+
       const terms = document.getElementById('terms-check');
       if (!terms.checked) {
         terms.closest('label').classList.add('border', 'border-red-500/50', 'rounded-xl', 'p-2');
@@ -440,7 +548,6 @@ bookingPage.get('/:id', async (c) => {
         return;
       }
 
-      // Cancellation Policy acknowledgment gate
       const ackCheck = document.getElementById('cancel-ack-checkbox');
       if (!ackCheck || !ackCheck.checked) {
         document.getElementById('cancel-ack-label')?.classList.add('ring', 'ring-red-500/40', 'rounded-xl', 'p-2');
@@ -454,47 +561,135 @@ bookingPage.get('/:id', async (c) => {
 
       const btn = document.getElementById('confirm-btn');
       btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Processing...';
-      btn.disabled = true;
+      btn.disabled  = true;
 
       try {
-        const res = await fetch('/api/bookings', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            listing_id:     LISTING_ID,
-            start_datetime: arrive,
-            end_datetime:   depart,
-            vehicle_plate:  document.getElementById('vehicle-plate').value.trim() || null,
-            cancellation_acknowledged: true,
-            cancellation_policy_version: '1.0',
-          })
-        });
-        const data = await res.json();
+        const firstName  = document.getElementById('contact-first').value.trim();
+        const lastName   = document.getElementById('contact-last').value.trim();
+        const phone      = document.getElementById('contact-phone').value.trim();
+        const email      = document.getElementById('contact-email').value.trim();
+        const driverName = [firstName, lastName].filter(Boolean).join(' ') || 'Guest';
 
-        if (!res.ok) {
-          alert(data.error || 'Booking failed. Please try again.');
-          btn.innerHTML = '<i class="fas fa-lock"></i> <span id="confirm-label">Confirm & Pay</span>';
-          btn.disabled = false;
+        // ── Path A: Stripe card form is open and ready ────────────────────
+        if (stripe && stripeReady && !document.getElementById('new-card-form').classList.contains('hidden')) {
+          // Confirm the card payment via Stripe.js
+          const { error, paymentIntent } = await stripe.confirmPayment({
+            elements: stripeElements,
+            redirect: 'if_required',
+            confirmParams: {
+              payment_method_data: {
+                billing_details: { name: driverName, phone }
+              }
+            }
+          });
+
+          if (error) {
+            showStripeError(error.message || 'Payment failed.');
+            btn.innerHTML = '<i class="fas fa-lock"></i> <span id="confirm-label">Confirm & Pay</span>';
+            btn.disabled  = false;
+            updateConfirmButton();
+            return;
+          }
+
+          if (paymentIntent?.status !== 'succeeded') {
+            showStripeError('Payment not completed. Status: ' + paymentIntent?.status);
+            btn.innerHTML = '<i class="fas fa-lock"></i> <span id="confirm-label">Confirm & Pay</span>';
+            btn.disabled  = false;
+            updateConfirmButton();
+            return;
+          }
+
+          // ── Confirm booking in D1 via server ──────────────────────────
+          const cfRes = await fetch('/api/payments/confirm', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+              payment_intent_id:           paymentIntent.id,
+              booking_id:                  dbBookingId,
+              listing_id:                  LISTING_ID,
+              driver_name:                 driverName,
+              driver_email:                email || null,
+              driver_phone:                phone || null,
+              start_datetime:              arrive,
+              end_datetime:                depart,
+              vehicle_plate:               document.getElementById('vehicle-plate').value.trim() || null,
+              cancellation_acknowledged:   true,
+              cancellation_policy_version: '1.0',
+            })
+          });
+          const cfData = await cfRes.json();
+          if (!cfRes.ok) {
+            showStripeError(cfData.error || 'Booking confirmation failed.');
+            btn.innerHTML = '<i class="fas fa-lock"></i> <span id="confirm-label">Confirm & Pay</span>';
+            btn.disabled  = false;
+            updateConfirmButton();
+            return;
+          }
+
+          showSuccessModal(cfData.booking_id || dbBookingId, arrive, depart);
           return;
         }
 
-        // Show success modal
-        document.getElementById('success-booking-id').textContent = 'Booking #' + (data.id || '');
-        const arriveDate = new Date(arrive);
-        const departDate = new Date(depart);
-        document.getElementById('success-time').textContent =
-          arriveDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' · ' +
-          arriveDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) + ' – ' +
-          departDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+        // ── Path B: No card form shown — create booking (reserve only) ───
+        // This path is used when the user hasn't opened the card form yet,
+        // i.e., they are using a saved card flow or Apple/Google Pay (future).
+        // For now, create the booking reservation and prompt to add a card.
+        if (!dbBookingId) {
+          const csrfRes = await fetch('/api/auth/csrf', { credentials: 'include' }).catch(() => null);
+          const csrfToken = csrfRes?.ok ? (await csrfRes.json()).csrf_token : null;
 
-        document.getElementById('success-modal').classList.remove('hidden');
+          const res = await fetch('/api/bookings', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {})
+            },
+            credentials: 'include',
+            body: JSON.stringify({
+              listing_id:              LISTING_ID,
+              start_datetime:          arrive,
+              end_datetime:            depart,
+              vehicle_plate:           document.getElementById('vehicle-plate').value.trim() || null,
+              cancellation_acknowledged:       true,
+              cancellation_policy_version:     '1.0',
+            })
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            alert(data.error || 'Booking failed. Please try again.');
+            btn.innerHTML = '<i class="fas fa-lock"></i> <span id="confirm-label">Confirm & Pay</span>';
+            btn.disabled  = false;
+            return;
+          }
+          dbBookingId = data.db_id;
+        }
+
+        // Prompt to open card form to complete payment
+        document.getElementById('new-card-form').classList.remove('hidden');
+        document.getElementById('add-card-btn').classList.add('hidden');
+        if (!stripeReady) await initStripe();
+        btn.innerHTML = '<i class="fas fa-lock"></i> <span id="confirm-label">Complete Payment</span>';
+        btn.disabled  = false;
+        document.getElementById('new-card-form').scrollIntoView({ behavior: 'smooth', block: 'center' });
+
       } catch(e) {
-        alert('Network error. Please try again.');
-      } finally {
+        showStripeError('Network error: ' + (e.message || 'Please try again.'));
         btn.innerHTML = '<i class="fas fa-lock"></i> Confirm & Pay';
-        btn.disabled = false;
+        btn.disabled  = false;
         updateConfirmButton();
       }
+    }
+
+    function showSuccessModal(bookingId, arrive, depart) {
+      document.getElementById('success-booking-id').textContent = 'Booking #' + (bookingId || '');
+      const arriveDate = new Date(arrive);
+      const departDate = new Date(depart);
+      document.getElementById('success-time').textContent =
+        arriveDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' · ' +
+        arriveDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) + ' – ' +
+        departDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+      document.getElementById('success-modal').classList.remove('hidden');
     }
 
     // Init

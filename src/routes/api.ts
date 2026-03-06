@@ -723,7 +723,7 @@ apiRoutes.post('/payments/create-intent', async (c) => {
     return c.json({ error: 'Invalid JSON body' }, 400)
   }
 
-  const { listing_id, start_datetime, end_datetime, driver_email, driver_name, vehicle_plate } = body
+  const { listing_id, start_datetime, end_datetime, driver_email, driver_name, vehicle_plate, booking_id } = body
 
   if (!listing_id || !start_datetime || !end_datetime || !driver_email) {
     return c.json({ error: 'Missing required fields: listing_id, start_datetime, end_datetime, driver_email' }, 400)
@@ -761,6 +761,7 @@ apiRoutes.post('/payments/create-intent', async (c) => {
       'usd',
       {
         listing_id: String(listing_id),
+        booking_id: booking_id ? String(booking_id) : '',
         driver_email,
         vehicle_plate: vehicle_plate || '',
         start_datetime,
@@ -768,6 +769,20 @@ apiRoutes.post('/payments/create-intent', async (c) => {
         platform: 'parkpeer'
       }
     )
+
+    // ── Stamp stripe_payment_intent_id onto the existing booking row ─────
+    // This is the critical link: the webhook uses this to confirm the booking.
+    if (db && booking_id) {
+      try {
+        await db.prepare(
+          `UPDATE bookings SET stripe_payment_intent_id = ?, updated_at = datetime('now')
+           WHERE id = ? AND stripe_payment_intent_id IS NULL`
+        ).bind(paymentIntentId, String(booking_id)).run()
+      } catch (dbErr: any) {
+        // Non-fatal: log but don't fail the intent creation
+        console.error('[Stripe] Failed to stamp PI on booking:', dbErr.message)
+      }
+    }
 
     return c.json({
       clientSecret,
@@ -791,7 +806,17 @@ apiRoutes.post('/payments/create-intent', async (c) => {
 // ════════════════════════════════════════════════════════════════════════════
 // STRIPE — Confirm Booking after successful payment
 // POST /api/payments/confirm
-// Body: { payment_intent_id, listing_id, driver_email, driver_name, start_datetime, end_datetime, vehicle_plate }
+// Body: { payment_intent_id, booking_id?, listing_id, driver_email, driver_name,
+//         start_datetime, end_datetime, vehicle_plate, cancellation_acknowledged,
+//         driver_id?, driver_phone? }
+//
+// Flow:
+//   1. Verify Stripe PI status = 'succeeded'
+//   2. Look up existing booking row by stripe_payment_intent_id OR booking_id
+//   3. UPDATE bookings SET status='confirmed', stripe_payment_intent_id (D1)
+//   4. INSERT INTO payments row (D1)
+//   5. Send confirmation email / SMS
+//   6. Fire in-app notification (async, non-blocking)
 // ════════════════════════════════════════════════════════════════════════════
 apiRoutes.post('/payments/confirm', async (c) => {
   const env = c.env
@@ -805,7 +830,7 @@ apiRoutes.post('/payments/confirm', async (c) => {
   }
 
   const {
-    payment_intent_id, listing_id, driver_email, driver_name,
+    payment_intent_id, booking_id, listing_id, driver_email, driver_name,
     start_datetime, end_datetime, vehicle_plate
   } = body
 
@@ -814,8 +839,6 @@ apiRoutes.post('/payments/confirm', async (c) => {
   }
 
   // ── Cancellation Policy acknowledgment enforcement ──────────────────────
-  // Drivers must explicitly acknowledge the cancellation policy at checkout.
-  // body.cancellation_acknowledged = true (sent by frontend checkbox)
   if (!body.cancellation_acknowledged) {
     return c.json({
       error: 'You must acknowledge the cancellation policy before confirming a booking.',
@@ -824,93 +847,201 @@ apiRoutes.post('/payments/confirm', async (c) => {
     }, 400)
   }
 
+  const db = c.env?.DB
+
   try {
-    // Verify payment succeeded with Stripe
+    // ── 1. Verify payment succeeded with Stripe ─────────────────────────
     const pi = await getPaymentIntent(env as any, payment_intent_id)
     if (pi.status !== 'succeeded') {
       return c.json({ error: `Payment not completed. Status: ${pi.status}` }, 402)
     }
 
-    const amountPaid   = pi.amount / 100
-    const platformFee  = Math.round(amountPaid * 0.15 * 100) / 100
-    const hostPayout   = amountPaid - platformFee
-    const bookingId    = Math.floor(100000 + Math.random() * 900000)
+    const amountPaid  = pi.amount / 100
+    const platformFee = Math.round(amountPaid * 0.15 * 100) / 100
+    const hostPayout  = Math.round((amountPaid - platformFee) * 100) / 100
 
-    // Send confirmation emails + SMS in parallel
-    // Fetch real listing title + address from D1
+    // ── 2. Resolve the booking row in D1 ──────────────────────────────────
+    // Priority: look up by stripe_payment_intent_id first (set in create-intent),
+    // then fall back to explicit booking_id param.
+    let dbBookingId: number | null = null
+    let resolvedHostId: number | null = null
+    let resolvedDriverId: number | null = body.driver_id ? Number(body.driver_id) : null
     let listingTitle   = 'Parking Space'
     let listingAddress = ''
-    const dbConfirm = c.env?.DB
-    if (dbConfirm && listing_id) {
-      try {
-        const row = await dbConfirm.prepare('SELECT title, address, city FROM listings WHERE id = ?')
-          .bind(String(listing_id)).first<any>()
-        if (row) {
-          listingTitle   = row.title   || listingTitle
-          listingAddress = [row.address, row.city].filter(Boolean).join(', ') || listingAddress
+
+    if (db) {
+      // Try to find booking by PI id (stamped during create-intent)
+      const bkByPi = await db.prepare(
+        `SELECT b.id, b.driver_id, b.host_id, b.start_time, b.end_time,
+                l.title AS listing_title, l.address, l.city
+         FROM bookings b
+         LEFT JOIN listings l ON b.listing_id = l.id
+         WHERE b.stripe_payment_intent_id = ?
+         LIMIT 1`
+      ).bind(payment_intent_id).first<any>()
+
+      if (bkByPi) {
+        dbBookingId        = bkByPi.id
+        resolvedDriverId   = bkByPi.driver_id   || resolvedDriverId
+        resolvedHostId     = bkByPi.host_id
+        listingTitle       = bkByPi.listing_title || listingTitle
+        listingAddress     = [bkByPi.address, bkByPi.city].filter(Boolean).join(', ')
+      } else if (booking_id) {
+        // Fallback: look up by explicit booking_id (e.g., legacy or direct call)
+        const bkById = await db.prepare(
+          `SELECT b.id, b.driver_id, b.host_id, b.start_time, b.end_time,
+                  l.title AS listing_title, l.address, l.city
+           FROM bookings b
+           LEFT JOIN listings l ON b.listing_id = l.id
+           WHERE b.id = ?
+           LIMIT 1`
+        ).bind(String(booking_id)).first<any>()
+
+        if (bkById) {
+          dbBookingId      = bkById.id
+          resolvedDriverId = bkById.driver_id   || resolvedDriverId
+          resolvedHostId   = bkById.host_id
+          listingTitle     = bkById.listing_title || listingTitle
+          listingAddress   = [bkById.address, bkById.city].filter(Boolean).join(', ')
         }
-      } catch {}
+      }
+
+      // If still no listing info, try listing_id param directly
+      if (!listingTitle || listingTitle === 'Parking Space') {
+        if (listing_id) {
+          try {
+            const row = await db.prepare('SELECT title, address, city FROM listings WHERE id = ?')
+              .bind(String(listing_id)).first<any>()
+            if (row) {
+              listingTitle   = row.title   || listingTitle
+              listingAddress = [row.address, row.city].filter(Boolean).join(', ') || listingAddress
+            }
+          } catch {}
+        }
+      }
     }
-    const startFormatted = new Date(start_datetime).toLocaleString('en-US')
-    const endFormatted   = new Date(end_datetime).toLocaleString('en-US')
+
+    // ── 3. UPDATE booking in D1: confirmed + stamp PI id if not already set ─
+    const bookingRef = dbBookingId
+      ? 'PP-' + new Date().getFullYear() + '-' + String(dbBookingId).padStart(4, '0')
+      : `PP-${Math.floor(100000 + Math.random() * 900000)}`
+
+    if (db && dbBookingId) {
+      try {
+        await db.prepare(
+          `UPDATE bookings
+           SET status = 'confirmed',
+               stripe_payment_intent_id = COALESCE(stripe_payment_intent_id, ?),
+               stripe_charge_id         = COALESCE(stripe_charge_id, ?),
+               updated_at               = datetime('now')
+           WHERE id = ? AND status IN ('pending','confirmed')`
+        ).bind(
+          payment_intent_id,
+          pi.latest_charge || null,
+          dbBookingId
+        ).run()
+      } catch (dbErr: any) {
+        console.error('[Stripe confirm] booking UPDATE error:', dbErr.message)
+      }
+    }
+
+    // ── 4. INSERT payments row (idempotent: skip if PI already recorded) ──
+    if (db && dbBookingId && resolvedDriverId && resolvedHostId) {
+      try {
+        const existingPmt = await db.prepare(
+          'SELECT id FROM payments WHERE stripe_payment_intent_id = ? LIMIT 1'
+        ).bind(payment_intent_id).first<{ id: number }>()
+
+        if (!existingPmt) {
+          await db.prepare(
+            `INSERT INTO payments
+               (booking_id, driver_id, host_id, amount, platform_fee, host_payout,
+                currency, stripe_payment_intent_id, stripe_charge_id, type, status)
+             VALUES (?, ?, ?, ?, ?, ?, 'usd', ?, ?, 'charge', 'succeeded')`
+          ).bind(
+            dbBookingId,
+            resolvedDriverId,
+            resolvedHostId,
+            amountPaid,
+            platformFee,
+            hostPayout,
+            payment_intent_id,
+            pi.latest_charge || null
+          ).run()
+        }
+      } catch (dbErr: any) {
+        console.error('[Stripe confirm] payments INSERT error:', dbErr.message)
+      }
+    }
+
+    // ── 5. Send confirmation emails + SMS ────────────────────────────────
+    const startFormatted = start_datetime ? new Date(start_datetime).toLocaleString('en-US') : ''
+    const endFormatted   = end_datetime   ? new Date(end_datetime).toLocaleString('en-US')   : ''
+    const numericBookingId = dbBookingId ?? Math.floor(100000 + Math.random() * 900000)
 
     await Promise.all([
-      sendBookingConfirmation(env as any, {
+      driver_email ? sendBookingConfirmation(env as any, {
         driverEmail: driver_email,
-        driverName: driver_name || driver_email,
-        bookingId,
+        driverName:  driver_name || driver_email,
+        bookingId:   numericBookingId,
         listingTitle,
         listingAddress,
-        startTime: startFormatted,
-        endTime:   endFormatted,
+        startTime:    startFormatted,
+        endTime:      endFormatted,
         totalCharged: amountPaid,
         vehiclePlate: vehicle_plate || 'Not provided'
-      }),
-      sendPaymentReceipt(env as any, {
-        toEmail: driver_email,
-        toName:  driver_name || driver_email,
-        bookingId,
-        amount: amountPaid,
-        last4:  pi.payment_method_details?.card?.last4,
+      }) : Promise.resolve(true),
+      driver_email ? sendPaymentReceipt(env as any, {
+        toEmail:      driver_email,
+        toName:       driver_name || driver_email,
+        bookingId:    numericBookingId,
+        amount:       amountPaid,
+        last4:        pi.payment_method_details?.card?.last4,
         listingTitle
-      }),
-      // SMS confirmation — only if phone provided
+      }) : Promise.resolve(true),
       body.driver_phone ? smsSendBookingConfirmation(env as any, {
-        toPhone: body.driver_phone,
-        driverName: driver_name || 'Driver',
-        bookingId,
+        toPhone:      body.driver_phone,
+        driverName:   driver_name || 'Driver',
+        bookingId:    numericBookingId,
         listingTitle,
         listingAddress,
-        startTime: startFormatted,
-        endTime:   endFormatted,
+        startTime:    startFormatted,
+        endTime:      endFormatted,
         totalCharged: amountPaid
       }) : Promise.resolve(true)
     ])
 
-    // ── In-app notification: booking confirmed ───────────────────────────
-    if (dbConfirm && body.driver_id) {
+    // ── 6. In-app notification: booking confirmed (async, non-blocking) ──
+    if (db && resolvedDriverId) {
       ;(async () => {
         try {
-          const driver = await dbConfirm.prepare('SELECT full_name, email, phone FROM users WHERE id = ?')
-            .bind(body.driver_id).first<any>()
-          const hostRow = await dbConfirm.prepare('SELECT id, full_name, email, phone FROM listings l JOIN users u ON l.host_id = u.id WHERE l.id = ? LIMIT 1')
-            .bind(listing_id).first<any>()
+          const [driver, hostRow] = await Promise.all([
+            db.prepare('SELECT full_name, email, phone FROM users WHERE id = ?')
+              .bind(resolvedDriverId).first<any>(),
+            resolvedHostId
+              ? db.prepare('SELECT id, full_name, email, phone FROM users WHERE id = ?')
+                  .bind(resolvedHostId).first<any>()
+              : listing_id
+                ? db.prepare('SELECT id, full_name, email, phone FROM listings l JOIN users u ON l.host_id = u.id WHERE l.id = ? LIMIT 1')
+                    .bind(String(listing_id)).first<any>()
+                : Promise.resolve(null)
+          ])
           await notifyBookingConfirmed(env as any, {
-            driverId: Number(body.driver_id),
-            driverName: driver?.full_name || driver_name || 'Driver',
-            driverEmail: driver?.email || body.driver_email || '',
-            driverPhone: driver?.phone || body.driver_phone || null,
-            hostId: hostRow?.id || 0,
-            hostName: hostRow?.full_name || 'Host',
-            hostEmail: hostRow?.email || '',
-            hostPhone: hostRow?.phone || null,
-            bookingId: Number(bookingId),
+            driverId:       resolvedDriverId as number,
+            driverName:     driver?.full_name  || driver_name  || 'Driver',
+            driverEmail:    driver?.email      || driver_email || '',
+            driverPhone:    driver?.phone      || body.driver_phone || null,
+            hostId:         hostRow?.id        || 0,
+            hostName:       hostRow?.full_name || 'Host',
+            hostEmail:      hostRow?.email     || '',
+            hostPhone:      hostRow?.phone     || null,
+            bookingId:      numericBookingId,
             listingTitle,
             listingAddress,
-            startTime: startFormatted,
-            endTime: endFormatted,
-            totalCharged: amountPaid,
-            hostPayout: hostPayout,
+            startTime:      startFormatted,
+            endTime:        endFormatted,
+            totalCharged:   amountPaid,
+            hostPayout,
           })
         } catch (ne: any) { console.error('[notify booking confirmed]', ne.message) }
       })()
@@ -918,7 +1049,8 @@ apiRoutes.post('/payments/confirm', async (c) => {
 
     return c.json({
       success: true,
-      booking_id: `PP-${bookingId}`,
+      booking_id: bookingRef,
+      db_booking_id: dbBookingId,
       status: 'confirmed',
       amount_paid: amountPaid,
       host_payout: hostPayout,
