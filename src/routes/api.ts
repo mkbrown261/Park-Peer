@@ -2964,21 +2964,45 @@ apiRoutes.post('/holds', async (c) => {
   if (sessionToken) {
     try {
       const existing = await db.prepare(`
-        SELECT id, session_token, hold_expires_at, status, listing_id
-        FROM reservation_holds
-        WHERE session_token = ?
-          AND status = 'active'
-          AND datetime(hold_expires_at) > datetime('now')
+        SELECT rh.id, rh.session_token, rh.hold_expires_at, rh.status,
+               rh.listing_id, rh.start_time, rh.end_time, l.rate_hourly
+        FROM reservation_holds rh
+        LEFT JOIN listings l ON l.id = rh.listing_id
+        WHERE rh.session_token = ?
+          AND rh.status = 'active'
+          AND datetime(rh.hold_expires_at) > datetime('now')
         LIMIT 1
       `).bind(sessionToken).first<any>()
 
       if (existing && existing.listing_id === listing_id) {
+        // Re-calculate pricing so the idempotent response matches the fresh one
+        const iStart   = new Date(existing.start_time)
+        const iEnd     = new Date(existing.end_time)
+        const iRawMins = (iEnd.getTime() - iStart.getTime()) / 60_000
+        const iRndMins = Math.max(15, Math.ceil(iRawMins / 15) * 15)
+        const iHours   = Math.round((iRndMins / 60) * 100) / 100
+        const iRate    = existing.rate_hourly || 12
+        const iBase    = Math.round(iRate * iHours * 100) / 100
+        const iFee     = Math.round(iBase * 0.15 * 100) / 100
+        const iTotal   = Math.round((iBase + iFee) * 100) / 100
         return c.json({
           hold_id:        existing.id,
           session_token:  existing.session_token,
           expires_at:     existing.hold_expires_at,
-          status:         'active',
-          idempotent:     true,
+          listing_id:     existing.listing_id,
+          start_time:     existing.start_time,
+          end_time:       existing.end_time,
+          pricing: {
+            hours:         iHours,
+            rate_per_hour: iRate,
+            subtotal:      iBase,
+            platform_fee:  iFee,
+            total:         iTotal,
+            total_cents:   Math.round(iTotal * 100),
+            currency:      'usd',
+          },
+          status:     'active',
+          idempotent: true,
         })
       }
     } catch {}

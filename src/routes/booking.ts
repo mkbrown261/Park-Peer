@@ -1624,32 +1624,54 @@ bookingPage.get('/:id', async (c) => {
   // ════════════════════════════════════════════════════════════════════════════
 
   function releaseHoldSilently() {
-    // Only release if we have an active hold that hasn't been converted
+    // Only release if we have an active hold that hasn't been converted to a booking
     if (!holdSessionToken || dbBookingId) return;
     try {
-      // Use sendBeacon (works during page unload) or fetch as fallback
       const url = '/api/holds/' + holdSessionToken + '/release';
+      // sendBeacon is the most reliable way to fire a request during page unload.
+      // Pass a Blob so the browser sets Content-Type: application/json correctly.
       if (navigator.sendBeacon) {
-        navigator.sendBeacon(url, JSON.stringify({}));
+        const payload = new Blob([JSON.stringify({ released_by: 'page_unload' })], { type: 'application/json' });
+        navigator.sendBeacon(url, payload);
       } else {
-        fetch(url, { method: 'POST', keepalive: true }).catch(() => {});
+        // keepalive ensures the fetch survives page navigation
+        fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ released_by: 'page_unload' }),
+          keepalive: true,
+        }).catch(() => {});
       }
     } catch(e) {}
   }
 
-  // Release hold when user closes tab, navigates away, or hits back
-  window.addEventListener('beforeunload', function(e) {
+  // ── beforeunload: fires when closing tab or navigating away ──────────────
+  window.addEventListener('beforeunload', function() {
     releaseHoldSilently();
   });
 
-  // Release hold when tab goes hidden (mobile background / switch tab)
+  // ── pagehide: fires on mobile Safari / bfcache navigation (more reliable
+  //    than beforeunload on iOS) ────────────────────────────────────────────
+  window.addEventListener('pagehide', function(e) {
+    // e.persisted = true means page is going into bfcache (back/forward nav);
+    // still release the hold — user navigated away from the booking flow.
+    releaseHoldSilently();
+  });
+
+  // ── visibilitychange: tab switch / app backgrounded on mobile ────────────
+  // Only release when the document is being *discarded* (freeze → not visible),
+  // NOT on a simple tab switch (user might come back).
   document.addEventListener('visibilitychange', function() {
     if (document.visibilityState === 'hidden') {
-      releaseHoldSilently();
+      // Use a short grace period: if the user comes back within 30 s we do
+      // NOT want to have released the hold.  The 10-min server TTL handles
+      // the case where they genuinely abandon; here we only trigger on
+      // pagehide/beforeunload for an immediate release.
+      // Nothing to do on visibilitychange — server TTL is the safety net.
     }
   });
 
-  // Also release hold if user explicitly navigates back using the breadcrumb
+  // ── Explicit back-link clicks inside the page ─────────────────────────────
   document.querySelectorAll('a[href*="/listing/"]').forEach(function(link) {
     link.addEventListener('click', function() {
       releaseHoldSilently();
