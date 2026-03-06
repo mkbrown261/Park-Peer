@@ -1559,6 +1559,43 @@ bookingPage.get('/:id', async (c) => {
   }
 
   // ════════════════════════════════════════════════════════════════════════════
+  // HOLD RELEASE — free the slot if user leaves without paying
+  // ════════════════════════════════════════════════════════════════════════════
+
+  function releaseHoldSilently() {
+    // Only release if we have an active hold that hasn't been converted
+    if (!holdSessionToken || dbBookingId) return;
+    try {
+      // Use sendBeacon (works during page unload) or fetch as fallback
+      const url = '/api/holds/' + holdSessionToken + '/release';
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon(url, JSON.stringify({}));
+      } else {
+        fetch(url, { method: 'POST', keepalive: true }).catch(() => {});
+      }
+    } catch(e) {}
+  }
+
+  // Release hold when user closes tab, navigates away, or hits back
+  window.addEventListener('beforeunload', function(e) {
+    releaseHoldSilently();
+  });
+
+  // Release hold when tab goes hidden (mobile background / switch tab)
+  document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState === 'hidden') {
+      releaseHoldSilently();
+    }
+  });
+
+  // Also release hold if user explicitly navigates back using the breadcrumb
+  document.querySelectorAll('a[href*="/listing/"]').forEach(function(link) {
+    link.addEventListener('click', function() {
+      releaseHoldSilently();
+    });
+  });
+
+  // ════════════════════════════════════════════════════════════════════════════
   // BOOT
   // ════════════════════════════════════════════════════════════════════════════
   loadListing();

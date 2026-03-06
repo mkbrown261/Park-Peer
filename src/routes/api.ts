@@ -128,6 +128,40 @@ const HOLDS_RL_WINDOW_MS   = 60_000
 const HOLDS_RL_MAX         = 20       // max 20 hold requests per IP per minute (higher for retries)
 
 // ════════════════════════════════════════════════════════════════════════════
+// GHOST BOOKING PREVENTION — inline cleanup helpers
+// ════════════════════════════════════════════════════════════════════════════
+
+// Auto-cancel 'pending' bookings older than 30 minutes (never paid).
+// Called inline from time-slots, validate-slot, and holds endpoints so stale
+// rows are swept before any conflict check runs.
+async function sweepStalePendingBookings(db: D1Database): Promise<void> {
+  try {
+    await db.prepare(`
+      UPDATE bookings
+      SET    status       = 'cancelled',
+             cancel_reason = 'Auto-cancelled: payment not completed within 30 minutes',
+             updated_at   = datetime('now')
+      WHERE  status       = 'pending'
+        AND  datetime(created_at) < datetime('now', '-30 minutes')
+    `).run()
+  } catch { /* non-fatal — log but don't block the main request */ }
+}
+
+// Auto-expire reservation holds whose TTL has lapsed.
+// Keeps the holds table clean and prevents old holds from blocking new ones.
+async function sweepExpiredHolds(db: D1Database): Promise<void> {
+  try {
+    await db.prepare(`
+      UPDATE reservation_holds
+      SET    status     = 'expired',
+             updated_at = datetime('now')
+      WHERE  status     = 'active'
+        AND  datetime(hold_expires_at) <= datetime('now')
+    `).run()
+  } catch { /* non-fatal */ }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // AUTH — Registration, Login, Logout, Token Refresh, CSRF
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -2303,7 +2337,7 @@ apiRoutes.get('/listings/:id/availability-schedule', async (c) => {
     let schedule = (rows.results || []).map((r: any) => ({
       day_of_week:  r.day_of_week,
       day_name:     DAY_NAMES[r.day_of_week],
-      is_available: r.is_available === 1,
+      is_available: !!(r.is_available),
       open_time:    r.open_time  || '07:00',
       close_time:   r.close_time || '22:00',
     }))
@@ -2388,6 +2422,14 @@ apiRoutes.get('/listings/:id/time-slots', async (c) => {
     const dayOfWeek  = dateObj.getUTCDay()   // 0=Sun … 6=Sat
     const now        = new Date()
 
+    // ── Inline sweep: cancel stale pending bookings + expire old holds ───
+    // Runs non-blocking before the conflict queries so stale rows never
+    // appear as 'booked' or 'held' to other users.
+    await Promise.all([
+      sweepStalePendingBookings(db),
+      sweepExpiredHolds(db),
+    ])
+
     // ── 2. Fetch host schedule for this weekday ──────────────────────────
     const schedRow = await db.prepare(`
       SELECT is_available, open_time, close_time
@@ -2396,7 +2438,7 @@ apiRoutes.get('/listings/:id/time-slots', async (c) => {
     `).bind(listingId, dayOfWeek).first<any>().catch(() => null)
 
     // Default schedule if not found: 07:00–22:00
-    const hostAvail    = schedRow ? schedRow.is_available === 1 : true
+    const hostAvail    = schedRow ? !!(schedRow.is_available) : true
     const openTimeStr  = schedRow?.open_time  || '07:00'
     const closeTimeStr = schedRow?.close_time || '22:00'
 
@@ -2558,6 +2600,12 @@ apiRoutes.post('/listings/:id/validate-slot', async (c) => {
   }
 
   try {
+    // ── Inline sweep before conflict checks ──────────────────────────────
+    await Promise.all([
+      sweepStalePendingBookings(db),
+      sweepExpiredHolds(db),
+    ])
+
     // ── 1. Host schedule check ────────────────────────────────────────────
     // Check every calendar day the booking spans
     const msPerDay = 86_400_000
@@ -2574,7 +2622,7 @@ apiRoutes.post('/listings/:id/validate-slot', async (c) => {
         WHERE listing_id = ? AND day_of_week = ?
       `).bind(listingId, dow).first<any>().catch(() => null)
 
-      const isAvail   = schedRow ? schedRow.is_available === 1 : true
+      const isAvail   = schedRow ? !!(schedRow.is_available) : true
       const openTime  = schedRow?.open_time  || '07:00'
       const closeTime = schedRow?.close_time || '22:00'
 
@@ -2791,6 +2839,12 @@ apiRoutes.post('/holds', async (c) => {
   }
 
   try {
+    // ── Inline sweep before ALL conflict checks ──────────────────────────
+    await Promise.all([
+      sweepStalePendingBookings(db),
+      sweepExpiredHolds(db),
+    ])
+
     // ── 0. Host availability schedule check ─────────────────────────────
     {
       const toMins = (t: string) => { const [h,m] = t.split(':').map(Number); return h*60+(m||0) }
@@ -2804,7 +2858,7 @@ apiRoutes.post('/holds', async (c) => {
         const schedRow = await db.prepare(
           'SELECT is_available, open_time, close_time FROM host_availability_schedule WHERE listing_id = ? AND day_of_week = ?'
         ).bind(listing_id, dow).first<any>().catch(() => null)
-        const isAvail   = schedRow ? schedRow.is_available === 1 : true
+        const isAvail   = schedRow ? !!(schedRow.is_available) : true
         const openStr   = schedRow?.open_time  || '07:00'
         const closeStr  = schedRow?.close_time || '22:00'
         if (!isAvail) {
@@ -2985,161 +3039,26 @@ apiRoutes.post('/holds/:token/release', async (c) => {
 })
 
 // ════════════════════════════════════════════════════════════════════════════
-// BOOKINGS — Create booking (now called ONLY from payments/confirm)
-// POST /api/bookings  — kept for backward compat / host instant-book
+// BOOKINGS — Create booking (DISABLED for direct client use)
 //
-// IMPORTANT: The new production flow is:
+// The ONLY valid booking creation path is:
 //   POST /api/holds → POST /api/payments/create-intent → stripe.confirmPayment()
 //   → POST /api/payments/confirm  (which creates the booking atomically)
 //
-// This route now primarily handles non-Stripe instant-book scenarios
-// and is idempotent via checkout_token.
+// This route is intentionally disabled to prevent ghost bookings, slot
+// squatting, and bypassing the payment pipeline.
 // ════════════════════════════════════════════════════════════════════════════
 apiRoutes.post('/bookings', async (c) => {
-  const db   = c.env?.DB
-  if (!db)   return c.json({ error: 'Database unavailable' }, 503)
-
-  // Optional auth — allow guest checkouts
-  const session    = c.get('user') as any
-  const driver_id  = session?.userId ?? null
-
-  const body = await c.req.json().catch(() => ({})) as any
-
-  // ── Idempotency: return existing booking for same checkout_token ──────
-  const checkoutToken = String(body.checkout_token || '').slice(0, 64) || null
-  if (checkoutToken) {
-    try {
-      const existing = await db.prepare(
-        'SELECT id, status FROM bookings WHERE checkout_token = ? LIMIT 1'
-      ).bind(checkoutToken).first<any>()
-      if (existing) {
-        const bookingRef = 'PP-' + new Date().getFullYear() + '-' + String(existing.id).padStart(4, '0')
-        return c.json({ id: bookingRef, db_id: existing.id, status: existing.status, idempotent: true }, 200)
-      }
-    } catch {}
-  }
-
-  // ── Input validation ──────────────────────────────────────────────────
-  let listing_id: number, start_datetime: string, end_datetime: string
-  try {
-    listing_id     = parseInt(String(body.listing_id || ''))
-    start_datetime = String(body.start_datetime || '').slice(0, 30)
-    end_datetime   = String(body.end_datetime   || '').slice(0, 30)
-    if (isNaN(listing_id) || listing_id < 1) throw new Error('listing_id required')
-  } catch (e: any) {
-    return c.json({ error: e.message }, 400)
-  }
-
-  const start = new Date(start_datetime)
-  const end   = new Date(end_datetime)
-  if (isNaN(start.getTime()) || isNaN(end.getTime()) || end <= start) {
-    return c.json({ error: 'Invalid date range' }, 400)
-  }
-
-  const hours          = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / 3600000))
-  const vehicle_plate  = String(body.vehicle_plate || '').slice(0, 20) || null
-  const cancelAck      = body.cancellation_acknowledged === true || body.cancellation_acknowledged === 1
-  const cancelPolicyVer = cancelAck ? (body.cancellation_policy_version || CURRENT_VERSIONS.cancellation_policy) : null
-  const cancelAckIp    = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || null
-  const holdId         = body.hold_id ? parseInt(String(body.hold_id)) : null
-  const sessionToken   = String(body.session_token || '').slice(0, 64) || null
-
-  try {
-    // ── Validate hold if provided ─────────────────────────────────────
-    if (holdId) {
-      const hold = await db.prepare(`
-        SELECT id, status, hold_expires_at, listing_id, start_time, end_time
-        FROM reservation_holds WHERE id = ?
-      `).bind(holdId).first<any>()
-
-      if (!hold) return c.json({ error: 'Reservation hold not found', code: 'HOLD_NOT_FOUND' }, 409)
-      if (hold.status === 'converted') return c.json({ error: 'This slot is already booked', code: 'HOLD_CONVERTED' }, 409)
-      if (hold.status !== 'active' || new Date(hold.hold_expires_at) <= new Date()) {
-        return c.json({
-          error: 'Your reservation hold has expired. Please start over.',
-          code: 'HOLD_EXPIRED',
-        }, 409)
-      }
-    } else {
-      // No hold — run direct conflict check (only confirmed/active, NOT pending)
-      const conflict = await db.prepare(`
-        SELECT id FROM bookings
-        WHERE listing_id = ? AND status IN ('confirmed','active')
-          AND start_time < ? AND end_time > ?
-        LIMIT 1
-      `).bind(listing_id, end_datetime, start_datetime).first<{ id: number }>()
-
-      if (conflict) {
-        return c.json({
-          error: 'This spot is already booked for the selected time. Please choose different dates.',
-          code:  'SLOT_BOOKED',
-        }, 409)
-      }
-    }
-
-    // ── Fetch real rate / host ────────────────────────────────────────
-    const listing = await db.prepare(
-      'SELECT rate_hourly, status, host_id FROM listings WHERE id = ? AND status = ?'
-    ).bind(listing_id, 'active').first<any>()
-    if (!listing) return c.json({ error: 'Listing not found or unavailable' }, 404)
-
-    const rate   = listing.rate_hourly || 12
-    const base   = Math.round(rate * hours * 100) / 100
-    const fee    = Math.round(base * 0.15 * 100) / 100
-    const hPay   = Math.round((base - fee) * 100) / 100
-    const total  = Math.round((base + fee) * 100) / 100
-
-    // ── INSERT booking row ────────────────────────────────────────────
-    const ins = await db.prepare(`
-      INSERT INTO bookings
-        (listing_id, driver_id, host_id, start_time, end_time,
-         duration_hours, status, subtotal, platform_fee, host_payout,
-         total_charged, vehicle_plate, vehicle_description,
-         cancellation_acknowledged, cancellation_ack_version,
-         cancellation_ack_at, cancellation_ack_ip,
-         checkout_token, hold_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?,
-              ?, ?,
-              CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END, ?,
-              ?, ?, datetime('now'), datetime('now'))
-    `).bind(
-      listing_id, driver_id, listing.host_id,
-      start_datetime, end_datetime, hours,
-      base, fee, hPay, total,
-      vehicle_plate, vehicle_plate,
-      cancelAck ? 1 : 0, cancelPolicyVer,
-      cancelAck ? 1 : 0, cancelAckIp,
-      checkoutToken, holdId
-    ).run()
-
-    const dbBookingId = ins.meta?.last_row_id ?? 0
-    const bookingRef  = 'PP-' + new Date().getFullYear() + '-' + String(dbBookingId).padStart(4, '0')
-
-    // ── Register idempotency record ───────────────────────────────────
-    if (checkoutToken) {
-      try {
-        await db.prepare(`
-          INSERT OR IGNORE INTO booking_idempotency (checkout_token, booking_id, hold_id)
-          VALUES (?, ?, ?)
-        `).bind(checkoutToken, dbBookingId, holdId).run()
-      } catch {}
-    }
-
-    console.log(`[Booking] Created booking ${dbBookingId} listing=${listing_id} hold=${holdId}`)
-
-    return c.json({
-      id: bookingRef, db_id: dbBookingId, listing_id,
-      start_time: start_datetime, end_time: end_datetime, hours,
-      vehicle_description: vehicle_plate,
-      pricing: { rate_per_hour: rate, base, service_fee: fee, total },
-      status: 'pending',
-      created_at: new Date().toISOString()
-    }, 201)
-
-  } catch (e: any) {
-    console.error('[bookings POST]', e.message)
-    return c.json({ error: 'Failed to create booking. Please try again.' }, 500)
-  }
+  // Hard-block: direct booking creation without going through the payment
+  // pipeline is not permitted. All bookings must flow through:
+  //   1. POST /api/holds        — slot lock (10 min TTL)
+  //   2. POST /api/payments/create-intent — create Stripe PI
+  //   3. stripe.confirmPayment() — card charge
+  //   4. POST /api/payments/confirm — atomic DB write on success
+  return c.json({
+    error: 'Direct booking creation is not supported. Please use the checkout flow.',
+    code:  'USE_CHECKOUT_FLOW',
+  }, 405)
 })
 
 // ════════════════════════════════════════════════════════════════════════════
