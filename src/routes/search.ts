@@ -400,6 +400,8 @@ searchPage.get('/', async (c) => {
     .mapboxgl-popup-close-button:hover { color: #fff; background: transparent; }
     .mapboxgl-ctrl-group { background: rgba(26,26,26,0.9) !important; border: 1px solid rgba(255,255,255,0.1) !important; border-radius: 12px !important; }
     .mapboxgl-ctrl-group button { color: #fff !important; }
+    /* ── Critical: prevent Mapbox marker wrapper from stretching ── */
+    .mapboxgl-marker { width: fit-content !important; max-width: fit-content !important; }
     .active-map-btn { background: rgba(91,46,255,0.3) !important; border: 1px solid rgba(91,46,255,0.5) !important; }
     .listing-card { cursor: pointer; transition: all 0.2s; }
     .listing-card:hover { border-color: rgba(91,46,255,0.4) !important; transform: translateY(-1px); }
@@ -417,6 +419,11 @@ searchPage.get('/', async (c) => {
       white-space: nowrap;
       transition: all 0.15s;
       font-family: 'Inter', sans-serif;
+      /* Prevent marker from stretching to map width */
+      display: inline-flex;
+      width: fit-content;
+      max-width: 120px;
+      box-sizing: border-box;
     }
     .park-pin:hover, .park-pin.active { background: #C6FF00 !important; color: #121212 !important; transform: scale(1.15); border-color: #C6FF00; }
     .park-pin.pri-green  { background: #16a34a; }
@@ -454,12 +461,15 @@ searchPage.get('/', async (c) => {
 
     /* ── Walk Score Marker Pins ────────────────────────────── */
     .park-pin.walk-pin {
-      display: flex;
+      display: inline-flex;
       flex-direction: column;
       align-items: center;
       padding: 4px 9px 3px;
       gap: 0;
-      min-width: 52px;
+      width: fit-content;
+      max-width: 80px;
+      min-width: 44px;
+      box-sizing: border-box;
     }
     .ws-time {
       font-size: 11px;
@@ -1076,6 +1086,8 @@ searchPage.get('/', async (c) => {
       // Store meta on element for walk badge updates
       el._priceHr  = l.price_hourly || 0
       el._priScore = l.pri_score
+      // Force width so Mapbox marker wrapper never stretches to full map width
+      el.style.cssText = 'width:fit-content;max-width:90px;display:inline-flex;box-sizing:border-box;'
 
       const score   = WS.scores.get(l.id)
       const isBest  = (l.id == WS.closestId)
@@ -1083,6 +1095,7 @@ searchPage.get('/', async (c) => {
       if (score && WS.destCoords) {
         const cls = wsColor(score.durationS)
         el.className = 'park-pin walk-pin ' + priPinClass(l.pri_score) + ' ' + cls + (isBest ? ' ws-best' : '')
+        el.style.cssText = 'width:fit-content;max-width:90px;display:inline-flex;flex-direction:column;align-items:center;box-sizing:border-box;'
         el.innerHTML =
           '<span class="ws-time">' + fmtDur(score.durationS) + '</span>' +
           '<span class="ws-price">$' + (l.price_hourly || 0).toFixed(0) + '</span>' +
@@ -1648,6 +1661,7 @@ searchPage.get('/', async (c) => {
     const isBest = (listingId == WS.closestId)
     // Rebuild pin element
     m.el.className = 'park-pin walk-pin ' + priPinClass(m.el._priScore) + ' ' + cls + (isBest ? ' ws-best' : '')
+    m.el.style.cssText = 'width:fit-content;max-width:90px;display:inline-flex;flex-direction:column;align-items:center;box-sizing:border-box;'
     m.el.innerHTML =
       '<span class="ws-time">' + label + '</span>' +
       '<span class="ws-price">$' + (m.el._priceHr || 0).toFixed(0) + '</span>'
