@@ -92,6 +92,7 @@ export async function smsSendBookingConfirmation(env: Env, data: {
   startTime: string
   endTime: string
   totalCharged: number
+  qrCheckinUrl?: string
 }): Promise<boolean> {
   const msg =
     `✅ ParkPeer Booking Confirmed!\n` +
@@ -100,6 +101,7 @@ export async function smsSendBookingConfirmation(env: Env, data: {
     `🕐 In: ${data.startTime}\n` +
     `🕐 Out: ${data.endTime}\n` +
     `💳 $${data.totalCharged.toFixed(2)} charged\n` +
+    (data.qrCheckinUrl ? `📱 QR Check-in: ${data.qrCheckinUrl}\n` : '') +
     `Manage: parkpeer.pages.dev/dashboard`
 
   return sendSMS(env, data.toPhone, msg)

@@ -113,7 +113,20 @@ export async function sendBookingConfirmation(env: Env, data: {
   endTime: string
   totalCharged: number
   vehiclePlate: string
+  qrCodeImageUrl?: string
+  qrCheckinUrl?:  string
 }): Promise<boolean> {
+  const qrSection = data.qrCodeImageUrl ? `
+    <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;padding:24px;margin-bottom:24px;text-align:center;">
+      <p style="color:#166534;font-size:13px;font-weight:700;margin:0 0 12px;">📱 Your QR Check-in Code</p>
+      <img src="${data.qrCodeImageUrl}" width="160" height="160" alt="QR Check-in Code"
+        style="border-radius:8px;border:4px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.12);"/>
+      <p style="color:#4b5563;font-size:12px;margin:12px 0 0;">Show this QR code when you arrive at the parking spot.<br/>
+        <a href="${data.qrCheckinUrl || '#'}" style="color:#5B2EFF;">Tap here to open check-in on mobile →</a>
+      </p>
+    </div>
+  ` : ''
+
   const html = emailWrapper(`
     <h2 style="color:#121212;font-size:22px;font-weight:800;margin:0 0 8px;">✅ Booking Confirmed!</h2>
     <p style="color:#6b7280;font-size:15px;margin:0 0 28px;">Your parking spot is reserved. Here are your details:</p>
@@ -137,6 +150,8 @@ export async function sendBookingConfirmation(env: Env, data: {
       </table>
     </div>
 
+    ${qrSection}
+
     <a href="https://parkpeer.pages.dev/dashboard" style="display:inline-block;background:linear-gradient(135deg,#5B2EFF,#4a20f0);color:#fff;font-weight:700;font-size:14px;padding:14px 28px;border-radius:10px;text-decoration:none;">View My Booking →</a>
     <p style="color:#9ca3af;font-size:13px;margin-top:24px;">Need help? Visit your dashboard to manage your booking.</p>
   `)
@@ -146,7 +161,7 @@ export async function sendBookingConfirmation(env: Env, data: {
     toName: data.driverName,
     subject: `✅ Booking Confirmed — ${data.listingTitle} · #PP-${String(data.bookingId).padStart(6,'0')}`,
     htmlContent: html,
-    textContent: `Booking Confirmed! #PP-${String(data.bookingId).padStart(6,'0')} at ${data.listingTitle}, ${data.listingAddress}. From ${data.startTime} to ${data.endTime}. Total: $${data.totalCharged.toFixed(2)}.`
+    textContent: `Booking Confirmed! #PP-${String(data.bookingId).padStart(6,'0')} at ${data.listingTitle}, ${data.listingAddress}. From ${data.startTime} to ${data.endTime}. Total: $${data.totalCharged.toFixed(2)}.${data.qrCheckinUrl ? '\n\nQR Check-in: ' + data.qrCheckinUrl : ''}`
   })
 }
 

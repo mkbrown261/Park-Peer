@@ -117,6 +117,13 @@ bookingPage.get('/:id', async (c) => {
       0%   { background-position: -200% 0; }
       100% { background-position:  200% 0; }
     }
+    @keyframes shake {
+      0%,100% { transform: translateX(0); }
+      20%     { transform: translateX(-6px); }
+      40%     { transform: translateX(6px); }
+      60%     { transform: translateX(-4px); }
+      80%     { transform: translateX(4px); }
+    }
     .shimmer {
       background: linear-gradient(90deg, #1e1e2e 25%, #2a2a3e 50%, #1e1e2e 75%);
       background-size: 200% 100%; animation: shimmer 1.2s infinite; border-radius: 10px;
@@ -299,6 +306,38 @@ bookingPage.get('/:id', async (c) => {
             </div>
           </div>
 
+          <!-- ══ OTP Verification Modal ══ -->
+          <div id="otp-modal" class="fixed inset-0 z-50 flex items-center justify-center p-4 hidden" style="background:rgba(0,0,0,.75);backdrop-filter:blur(4px)">
+            <div class="bg-[#1a1a2e] border border-white/10 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
+              <div class="flex items-center justify-between mb-5">
+                <div>
+                  <h3 class="font-bold text-white text-lg" id="otp-modal-title">Verify your contact</h3>
+                  <p class="text-gray-400 text-sm mt-0.5" id="otp-modal-subtitle">Enter the 6-digit code we sent</p>
+                </div>
+                <button onclick="closeOtpModal()" class="text-gray-500 hover:text-white transition-colors p-1">
+                  <i class="fas fa-xmark text-lg"></i>
+                </button>
+              </div>
+              <div class="bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 mb-4 flex items-center gap-2">
+                <i id="otp-modal-icon" class="fas fa-envelope text-indigo-400 text-sm"></i>
+                <span id="otp-modal-dest" class="text-white text-sm font-mono"></span>
+              </div>
+              <div class="flex gap-2 justify-center mb-4" id="otp-digit-row"></div>
+              <p id="otp-error-msg" class="text-red-400 text-xs text-center mb-3 hidden"></p>
+              <p id="otp-success-msg" class="text-green-400 text-xs text-center mb-3 hidden"></p>
+              <button id="otp-verify-btn" onclick="submitOtpCode()" disabled
+                class="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold text-sm py-3 rounded-xl transition-colors mb-3">
+                <i class="fas fa-check mr-1.5"></i>Verify Code
+              </button>
+              <div class="flex items-center justify-between">
+                <button id="otp-resend-btn" onclick="resendOtpCode()" class="text-indigo-400 hover:text-indigo-300 text-xs transition-colors">
+                  <i class="fas fa-rotate-right mr-1"></i>Resend code
+                </button>
+                <span id="otp-resend-timer" class="text-gray-500 text-xs hidden"></span>
+              </div>
+            </div>
+          </div>
+
           <!-- ══ Contact Info ══ -->
           <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-5">
             <h2 class="font-bold text-white text-lg mb-4 flex items-center gap-2">
@@ -308,22 +347,56 @@ bookingPage.get('/:id', async (c) => {
               <div>
                 <label class="text-xs text-gray-500 block mb-1.5">First Name</label>
                 <input type="text" id="contact-first" placeholder="First name"
+                  autocomplete="given-name"
                   class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
               </div>
               <div>
                 <label class="text-xs text-gray-500 block mb-1.5">Last Name</label>
                 <input type="text" id="contact-last" placeholder="Last name"
+                  autocomplete="family-name"
                   class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
               </div>
+
+              <!-- Email with inline verification -->
               <div class="col-span-2">
-                <label class="text-xs text-gray-500 block mb-1.5">Email (for confirmation)</label>
-                <input type="email" id="contact-email" placeholder="you@example.com"
-                  class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
+                <div class="flex items-center justify-between mb-1.5">
+                  <label class="text-xs text-gray-500">Email <span class="text-gray-600">(confirmation + QR code)</span></label>
+                  <span id="email-verify-badge" class="hidden text-xs font-semibold px-2 py-0.5 rounded-full bg-green-900/40 text-green-400 border border-green-700/40">
+                    <i class="fas fa-check-circle mr-1"></i>Verified
+                  </span>
+                </div>
+                <div class="relative">
+                  <input type="email" id="contact-email" placeholder="you@example.com"
+                    autocomplete="email"
+                    oninput="onEmailInput()"
+                    class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 pr-24"/>
+                  <button id="email-verify-btn" onclick="startEmailVerify()" type="button"
+                    class="absolute right-2 top-1/2 -translate-y-1/2 text-xs font-semibold px-2.5 py-1 rounded-lg bg-indigo-600/80 text-white hover:bg-indigo-500 transition-colors hidden">
+                    Verify →
+                  </button>
+                </div>
+                <p id="email-hint" class="text-xs mt-1 hidden"></p>
               </div>
+
+              <!-- Phone with inline verification -->
               <div class="col-span-2">
-                <label class="text-xs text-gray-500 block mb-1.5">Phone (for QR code delivery)</label>
-                <input type="tel" id="contact-phone" placeholder="+1 (555) 000-0000"
-                  class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"/>
+                <div class="flex items-center justify-between mb-1.5">
+                  <label class="text-xs text-gray-500">Phone <span class="text-gray-600">(SMS with QR check-in link — optional)</span></label>
+                  <span id="phone-verify-badge" class="hidden text-xs font-semibold px-2 py-0.5 rounded-full bg-green-900/40 text-green-400 border border-green-700/40">
+                    <i class="fas fa-check-circle mr-1"></i>Verified
+                  </span>
+                </div>
+                <div class="relative">
+                  <input type="tel" id="contact-phone" placeholder="+1 (555) 000-0000"
+                    autocomplete="tel"
+                    oninput="onPhoneInput()"
+                    class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 pr-24"/>
+                  <button id="phone-verify-btn" onclick="startPhoneVerify()" type="button"
+                    class="absolute right-2 top-1/2 -translate-y-1/2 text-xs font-semibold px-2.5 py-1 rounded-lg bg-indigo-600/80 text-white hover:bg-indigo-500 transition-colors hidden">
+                    Verify →
+                  </button>
+                </div>
+                <p id="phone-hint" class="text-xs mt-1 hidden"></p>
               </div>
             </div>
           </div>
@@ -1677,6 +1750,448 @@ bookingPage.get('/:id', async (c) => {
       releaseHoldSilently();
     });
   });
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // CONTACT VERIFICATION — Email & Phone OTP
+  // ════════════════════════════════════════════════════════════════════════════
+
+  // ── Verification state ────────────────────────────────────────────────────
+  let emailVerified    = false;   // true once OTP confirmed
+  let phoneVerified    = false;
+  let otpMode          = null;    // 'email' | 'phone'
+  let otpResendTimer   = null;    // setInterval handle
+  let otpResendSeconds = 0;
+
+  // ── Email input — real-time format hint ──────────────────────────────────
+  function onEmailInput() {
+    const inp  = document.getElementById('contact-email');
+    const hint = document.getElementById('email-hint');
+    const btn  = document.getElementById('email-verify-btn');
+    const badge= document.getElementById('email-verify-badge');
+    const val  = inp.value.trim();
+    const re   = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+    // If user edits after verification, reset
+    if (emailVerified) {
+      emailVerified = false;
+      badge.classList.add('hidden');
+      inp.style.borderColor = '';
+    }
+
+    if (val.length === 0) {
+      hint.classList.add('hidden');
+      btn.classList.add('hidden');
+      inp.style.borderColor = '';
+      return;
+    }
+    if (re.test(val) && val.length <= 254) {
+      hint.textContent = '';
+      hint.classList.add('hidden');
+      btn.classList.remove('hidden');
+      inp.style.borderColor = 'rgba(99,102,241,.6)';
+    } else {
+      // Progressive hint: suggest @domain if no @
+      if (!val.includes('@')) {
+        hint.textContent = 'Include your email domain, e.g. name@example.com';
+      } else if (val.split('@').length > 2) {
+        hint.textContent = 'Email address should have only one @';
+      } else {
+        const domain = val.split('@')[1] || '';
+        if (!domain.includes('.')) {
+          hint.textContent = 'Add a domain extension, e.g. .com or .org';
+        } else {
+          hint.textContent = 'Check your email address format';
+        }
+      }
+      hint.className = 'text-xs mt-1 text-amber-400';
+      hint.classList.remove('hidden');
+      btn.classList.add('hidden');
+      inp.style.borderColor = 'rgba(251,191,36,.5)';
+    }
+  }
+
+  // ── Phone input — auto-format US numbers ─────────────────────────────────
+  function onPhoneInput() {
+    const inp   = document.getElementById('contact-phone');
+    const hint  = document.getElementById('phone-hint');
+    const btn   = document.getElementById('phone-verify-btn');
+    const badge = document.getElementById('phone-verify-badge');
+    let raw = inp.value;
+
+    // If user edits after verification, reset
+    if (phoneVerified) {
+      phoneVerified = false;
+      badge.classList.add('hidden');
+      inp.style.borderColor = '';
+    }
+
+    if (raw.length === 0) {
+      hint.classList.add('hidden');
+      btn.classList.add('hidden');
+      inp.style.borderColor = '';
+      return;
+    }
+
+    // Auto-format: (555) 123-4567 for US numbers
+    const digits = raw.replace(/\D/g,'');
+    let formatted = raw;
+    if (digits.length <= 10 && !raw.startsWith('+')) {
+      if (digits.length >= 6) {
+        formatted = '(' + digits.slice(0,3) + ') ' + digits.slice(3,6) + '-' + digits.slice(6,10);
+      } else if (digits.length >= 3) {
+        formatted = '(' + digits.slice(0,3) + ') ' + digits.slice(3);
+      }
+      // Preserve cursor by only updating if changed
+      if (formatted !== raw) {
+        const pos = inp.selectionStart;
+        inp.value = formatted;
+        // Keep cursor after last typed digit
+        try { inp.setSelectionRange(formatted.length, formatted.length); } catch(e) {}
+        raw = formatted;
+      }
+    }
+
+    // Validate
+    const cleanDigits = raw.replace(/\D/g,'');
+    const isUS10 = cleanDigits.length === 10;
+    const isIntl = raw.startsWith('+') && cleanDigits.length >= 7 && cleanDigits.length <= 15;
+    const isUS11 = cleanDigits.length === 11 && cleanDigits[0] === '1';
+
+    if (isUS10 || isIntl || isUS11) {
+      hint.classList.add('hidden');
+      btn.classList.remove('hidden');
+      inp.style.borderColor = 'rgba(99,102,241,.6)';
+    } else {
+      if (cleanDigits.length > 0 && cleanDigits.length < 10) {
+        hint.textContent = (10 - cleanDigits.length) + ' more digit' + (10 - cleanDigits.length === 1 ? '' : 's') + ' needed (or use +country-code for international)';
+        hint.className = 'text-xs mt-1 text-amber-400';
+        hint.classList.remove('hidden');
+      } else if (cleanDigits.length > 15) {
+        hint.textContent = 'Phone number is too long';
+        hint.className = 'text-xs mt-1 text-red-400';
+        hint.classList.remove('hidden');
+      }
+      btn.classList.add('hidden');
+      inp.style.borderColor = cleanDigits.length > 0 ? 'rgba(251,191,36,.5)' : '';
+    }
+  }
+
+  // ── OTP digit input builder ───────────────────────────────────────────────
+  function buildOtpDigits() {
+    const row = document.getElementById('otp-digit-row');
+    row.innerHTML = '';
+    for (let i = 0; i < 6; i++) {
+      const inp = document.createElement('input');
+      inp.type = 'text';
+      inp.inputMode = 'numeric';
+      inp.maxLength = 1;
+      inp.dataset.idx = String(i);
+      inp.id = 'otp-d' + i;
+      inp.className = 'w-11 h-12 text-center text-xl font-bold text-white bg-white/5 border border-white/20 rounded-xl focus:outline-none focus:border-indigo-400 transition-colors';
+      inp.addEventListener('input', onOtpDigit);
+      inp.addEventListener('keydown', onOtpKey);
+      inp.addEventListener('paste', onOtpPaste);
+      row.appendChild(inp);
+    }
+  }
+
+  function onOtpDigit(e) {
+    const inp = e.target;
+    const idx = parseInt(inp.dataset.idx);
+    // Accept only digits
+    inp.value = inp.value.replace(/\D/g,'').slice(-1);
+    if (inp.value && idx < 5) {
+      document.getElementById('otp-d' + (idx+1))?.focus();
+    }
+    updateOtpVerifyBtn();
+  }
+
+  function onOtpKey(e) {
+    const inp = e.target;
+    const idx = parseInt(inp.dataset.idx);
+    if (e.key === 'Backspace' && !inp.value && idx > 0) {
+      const prev = document.getElementById('otp-d' + (idx-1));
+      if (prev) { prev.value = ''; prev.focus(); }
+    }
+    if (e.key === 'ArrowLeft' && idx > 0) document.getElementById('otp-d' + (idx-1))?.focus();
+    if (e.key === 'ArrowRight' && idx < 5) document.getElementById('otp-d' + (idx+1))?.focus();
+    if (e.key === 'Enter') submitOtpCode();
+  }
+
+  function onOtpPaste(e) {
+    e.preventDefault();
+    const text = (e.clipboardData || window.clipboardData).getData('text').replace(/\D/g,'').slice(0,6);
+    text.split('').forEach((ch, i) => {
+      const d = document.getElementById('otp-d' + i);
+      if (d) d.value = ch;
+    });
+    document.getElementById('otp-d' + Math.min(text.length, 5))?.focus();
+    updateOtpVerifyBtn();
+  }
+
+  function getOtpCode() {
+    return Array.from({length:6}, (_,i) => document.getElementById('otp-d'+i)?.value || '').join('');
+  }
+
+  function updateOtpVerifyBtn() {
+    const btn = document.getElementById('otp-verify-btn');
+    if (btn) btn.disabled = getOtpCode().length < 6;
+  }
+
+  // ── Open / close modal ────────────────────────────────────────────────────
+  function openOtpModal(mode, destination) {
+    otpMode = mode;
+    const modal    = document.getElementById('otp-modal');
+    const title    = document.getElementById('otp-modal-title');
+    const subtitle = document.getElementById('otp-modal-subtitle');
+    const icon     = document.getElementById('otp-modal-icon');
+    const dest     = document.getElementById('otp-modal-dest');
+    const errMsg   = document.getElementById('otp-error-msg');
+    const sucMsg   = document.getElementById('otp-success-msg');
+
+    title.textContent    = mode === 'phone' ? 'Verify your phone' : 'Verify your email';
+    subtitle.textContent = mode === 'phone'
+      ? 'We sent a 6-digit code via SMS'
+      : 'We sent a 6-digit code to your email';
+    icon.className = mode === 'phone'
+      ? 'fas fa-mobile-screen text-indigo-400 text-sm'
+      : 'fas fa-envelope text-indigo-400 text-sm';
+    dest.textContent = destination;
+    errMsg.classList.add('hidden');
+    sucMsg.classList.add('hidden');
+
+    buildOtpDigits();
+    modal.classList.remove('hidden');
+    setTimeout(() => document.getElementById('otp-d0')?.focus(), 100);
+    startResendTimer(60);
+  }
+
+  function closeOtpModal() {
+    document.getElementById('otp-modal').classList.add('hidden');
+    if (otpResendTimer) { clearInterval(otpResendTimer); otpResendTimer = null; }
+    otpMode = null;
+  }
+
+  // ── Resend timer ─────────────────────────────────────────────────────────
+  function startResendTimer(seconds) {
+    const timerEl  = document.getElementById('otp-resend-timer');
+    const resendBtn= document.getElementById('otp-resend-btn');
+    if (otpResendTimer) clearInterval(otpResendTimer);
+    otpResendSeconds = seconds;
+    resendBtn.disabled = true;
+    resendBtn.style.opacity = '0.4';
+    timerEl.classList.remove('hidden');
+    timerEl.textContent = 'Resend in ' + seconds + 's';
+    otpResendTimer = setInterval(() => {
+      otpResendSeconds--;
+      if (otpResendSeconds <= 0) {
+        clearInterval(otpResendTimer);
+        otpResendTimer = null;
+        timerEl.classList.add('hidden');
+        resendBtn.disabled = false;
+        resendBtn.style.opacity = '1';
+      } else {
+        timerEl.textContent = 'Resend in ' + otpResendSeconds + 's';
+      }
+    }, 1000);
+  }
+
+  // ── Start email verify ────────────────────────────────────────────────────
+  async function startEmailVerify() {
+    const email = document.getElementById('contact-email').value.trim();
+    const btn   = document.getElementById('email-verify-btn');
+    const hint  = document.getElementById('email-hint');
+
+    btn.disabled = true;
+    btn.textContent = 'Sending…';
+
+    try {
+      const res = await fetch('/api/verify/email/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, session_token: checkoutToken })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        hint.textContent = data.error || 'Could not send verification email. Try again.';
+        hint.className = 'text-xs mt-1 text-red-400';
+        hint.classList.remove('hidden');
+        btn.disabled = false;
+        btn.textContent = 'Verify →';
+        return;
+      }
+      hint.textContent = '✓ Check your inbox (also spam folder)';
+      hint.className = 'text-xs mt-1 text-green-400';
+      hint.classList.remove('hidden');
+      openOtpModal('email', data.masked_email || email);
+    } catch(e) {
+      hint.textContent = 'Network error. Please try again.';
+      hint.className = 'text-xs mt-1 text-red-400';
+      hint.classList.remove('hidden');
+    }
+    btn.disabled = false;
+    btn.textContent = 'Verify →';
+  }
+
+  // ── Start phone verify ────────────────────────────────────────────────────
+  async function startPhoneVerify() {
+    const phone = document.getElementById('contact-phone').value.trim();
+    const btn   = document.getElementById('phone-verify-btn');
+    const hint  = document.getElementById('phone-hint');
+
+    btn.disabled = true;
+    btn.textContent = 'Sending…';
+
+    try {
+      const res = await fetch('/api/verify/phone/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone, session_token: checkoutToken })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        hint.textContent = data.error || 'Could not send SMS. Check the number and try again.';
+        hint.className = 'text-xs mt-1 text-red-400';
+        hint.classList.remove('hidden');
+        btn.disabled = false;
+        btn.textContent = 'Verify →';
+        return;
+      }
+      hint.textContent = '✓ SMS sent — check your messages';
+      hint.className = 'text-xs mt-1 text-green-400';
+      hint.classList.remove('hidden');
+      openOtpModal('phone', data.masked_phone || phone);
+    } catch(e) {
+      hint.textContent = 'Network error. Please try again.';
+      hint.className = 'text-xs mt-1 text-red-400';
+      hint.classList.remove('hidden');
+    }
+    btn.disabled = false;
+    btn.textContent = 'Verify →';
+  }
+
+  // ── Resend OTP code ───────────────────────────────────────────────────────
+  async function resendOtpCode() {
+    if (!otpMode) return;
+    // Clear current digits
+    for (let i = 0; i < 6; i++) {
+      const d = document.getElementById('otp-d' + i);
+      if (d) d.value = '';
+    }
+    updateOtpVerifyBtn();
+    document.getElementById('otp-error-msg').classList.add('hidden');
+
+    if (otpMode === 'email') {
+      const email = document.getElementById('contact-email').value.trim();
+      await fetch('/api/verify/email/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, session_token: checkoutToken })
+      });
+    } else {
+      const phone = document.getElementById('contact-phone').value.trim();
+      await fetch('/api/verify/phone/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone, session_token: checkoutToken })
+      });
+    }
+    startResendTimer(60);
+  }
+
+  // ── Submit OTP code ───────────────────────────────────────────────────────
+  async function submitOtpCode() {
+    const code = getOtpCode();
+    if (code.length < 6) return;
+
+    const verifyBtn = document.getElementById('otp-verify-btn');
+    const errMsg    = document.getElementById('otp-error-msg');
+    const sucMsg    = document.getElementById('otp-success-msg');
+
+    verifyBtn.disabled = true;
+    verifyBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1.5"></i>Verifying…';
+    errMsg.classList.add('hidden');
+
+    try {
+      let res, data;
+      if (otpMode === 'email') {
+        const email = document.getElementById('contact-email').value.trim();
+        res  = await fetch('/api/verify/email/confirm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, session_token: checkoutToken, code })
+        });
+        data = await res.json();
+      } else {
+        const phone = document.getElementById('contact-phone').value.trim();
+        res  = await fetch('/api/verify/phone/confirm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone, session_token: checkoutToken, code })
+        });
+        data = await res.json();
+      }
+
+      if (!res.ok) {
+        errMsg.textContent = data.error || 'Incorrect code. Please try again.';
+        errMsg.classList.remove('hidden');
+        // Shake effect on wrong code
+        const row = document.getElementById('otp-digit-row');
+        row.style.animation = 'none';
+        row.offsetHeight; // reflow
+        row.style.animation = 'shake .35s ease';
+        // Clear digits for re-entry
+        for (let i = 0; i < 6; i++) {
+          const d = document.getElementById('otp-d' + i);
+          if (d) d.value = '';
+        }
+        document.getElementById('otp-d0')?.focus();
+        updateOtpVerifyBtn();
+        verifyBtn.disabled = false;
+        verifyBtn.innerHTML = '<i class="fas fa-check mr-1.5"></i>Verify Code';
+        return;
+      }
+
+      // ✅ Success
+      sucMsg.textContent = otpMode === 'email'
+        ? '✓ Email verified successfully!'
+        : '✓ Phone number verified!';
+      sucMsg.classList.remove('hidden');
+      verifyBtn.innerHTML = '<i class="fas fa-check-circle mr-1.5"></i>Verified!';
+      verifyBtn.className = verifyBtn.className.replace('bg-indigo-600','bg-green-600').replace('hover:bg-indigo-500','hover:bg-green-500');
+
+      if (otpMode === 'email') {
+        emailVerified = true;
+        const badge = document.getElementById('email-verify-badge');
+        const inp   = document.getElementById('contact-email');
+        badge.classList.remove('hidden');
+        inp.style.borderColor = 'rgba(34,197,94,.6)';
+        document.getElementById('email-verify-btn').classList.add('hidden');
+        const hint = document.getElementById('email-hint');
+        hint.textContent = '✓ Email verified — confirmation will be sent here';
+        hint.className = 'text-xs mt-1 text-green-400';
+        hint.classList.remove('hidden');
+      } else {
+        phoneVerified = true;
+        const badge = document.getElementById('phone-verify-badge');
+        const inp   = document.getElementById('contact-phone');
+        badge.classList.remove('hidden');
+        inp.style.borderColor = 'rgba(34,197,94,.6)';
+        document.getElementById('phone-verify-btn').classList.add('hidden');
+        const hint = document.getElementById('phone-hint');
+        hint.textContent = '✓ Phone verified — QR check-in link will be sent via SMS';
+        hint.className = 'text-xs mt-1 text-green-400';
+        hint.classList.remove('hidden');
+      }
+
+      setTimeout(closeOtpModal, 1400);
+    } catch(e) {
+      errMsg.textContent = 'Network error. Please check your connection and try again.';
+      errMsg.classList.remove('hidden');
+      verifyBtn.disabled = false;
+      verifyBtn.innerHTML = '<i class="fas fa-check mr-1.5"></i>Verify Code';
+    }
+  }
 
   // ════════════════════════════════════════════════════════════════════════════
   // BOOT

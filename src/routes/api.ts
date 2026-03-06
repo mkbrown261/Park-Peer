@@ -1398,26 +1398,94 @@ apiRoutes.post('/payments/confirm', async (c) => {
       : `PP-${Math.floor(100000 + Math.random() * 900000)}`
     const numericBookingId = dbBookingId ?? Math.floor(100000 + Math.random() * 900000)
 
-    // ── 5. Send confirmation emails + SMS ────────────────────────────────
+    // ── 5. Send confirmation emails + SMS (verified contacts only) ───────
     const startFmt = resolvedStart ? new Date(resolvedStart).toLocaleString('en-US') : ''
     const endFmt   = resolvedEnd   ? new Date(resolvedEnd).toLocaleString('en-US')   : ''
 
+    // ── 5a. Check session-verified contacts ─────────────────────────────
+    //   If the user verified their email/phone via OTP during checkout, we
+    //   use those verified values and mark them used. Otherwise fall back
+    //   to the raw body values (for logged-in users who may have skipped OTP).
+    let verifiedEmail: string | null = null
+    let verifiedPhone: string | null = null
+
+    if (db && session_token) {
+      try {
+        const vcRows = await db.prepare(`
+          SELECT contact_type, contact_value FROM verified_contacts
+          WHERE session_token = ? AND used = 0
+            AND datetime(expires_at) > datetime('now')
+        `).bind(String(session_token)).all<{ contact_type: string; contact_value: string }>()
+
+        const emailVC = vcRows.results?.find(r => r.contact_type === 'email')
+        const phoneVC = vcRows.results?.find(r => r.contact_type === 'phone')
+
+        if (emailVC) {
+          verifiedEmail = emailVC.contact_value
+          // Mark as used so replay is impossible
+          await db.prepare(`
+            UPDATE verified_contacts SET used = 1
+            WHERE session_token = ? AND contact_type = 'email'
+          `).bind(String(session_token)).run()
+        }
+        if (phoneVC) {
+          verifiedPhone = phoneVC.contact_value
+          await db.prepare(`
+            UPDATE verified_contacts SET used = 1
+            WHERE session_token = ? AND contact_type = 'phone'
+          `).bind(String(session_token)).run()
+        }
+      } catch (vcErr: any) {
+        console.warn('[Confirm] verified_contacts lookup failed:', vcErr.message)
+      }
+    }
+
+    // Prefer verified values; fall back to raw body values
+    const emailToSend = verifiedEmail || safeDriverEmail || null
+    const phoneToSend = verifiedPhone || (body.driver_phone ? String(body.driver_phone).slice(0, 20) : null)
+
+    // ── 5b. Generate QR token for the booking (embed in email + SMS link) ─
+    let qrDataUrl: string | null = null
+    let qrCheckinUrl: string | null = null
+    if (dbBookingId) {
+      try {
+        const qrSecret = c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod'
+        const { token } = await generateQrToken(String(dbBookingId), qrSecret)
+        qrCheckinUrl = `https://parkpeer.pages.dev/checkin?t=${token}&b=${dbBookingId}`
+        // Generate QR SVG using a pure-JS approach (no external lib needed)
+        // We encode the URL as a QR code using the Google Charts API as a CDN
+        // (no API key required, widely available, returns PNG)
+        qrDataUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&format=png&data=${encodeURIComponent(qrCheckinUrl)}`
+      } catch (qrErr: any) {
+        console.warn('[Confirm] QR generation failed:', qrErr.message)
+      }
+    }
+
+    // ── 5c. Fire emails + SMS concurrently ───────────────────────────────
     await Promise.all([
-      safeDriverEmail ? sendBookingConfirmation(env as any, {
-        driverEmail: safeDriverEmail, driverName: safeDriverName || safeDriverEmail,
+      // Booking confirmation email with QR code
+      emailToSend ? sendBookingConfirmation(env as any, {
+        driverEmail: emailToSend, driverName: safeDriverName || emailToSend,
         bookingId: numericBookingId, listingTitle, listingAddress,
         startTime: startFmt, endTime: endFmt, totalCharged: amountPaid,
-        vehiclePlate: safeVehiclePlate || 'Not provided'
+        vehiclePlate: safeVehiclePlate || 'Not provided',
+        qrCodeImageUrl: qrDataUrl || undefined,
+        qrCheckinUrl:   qrCheckinUrl || undefined,
       }) : Promise.resolve(true),
-      safeDriverEmail ? sendPaymentReceipt(env as any, {
-        toEmail: safeDriverEmail, toName: safeDriverName || safeDriverEmail,
+
+      // Payment receipt email (separate email from confirmation)
+      emailToSend ? sendPaymentReceipt(env as any, {
+        toEmail: emailToSend, toName: safeDriverName || emailToSend,
         bookingId: numericBookingId, amount: amountPaid,
-        last4: pi.payment_method_details?.card?.last4, listingTitle
+        last4: (pi as any).payment_method_details?.card?.last4, listingTitle
       }) : Promise.resolve(true),
-      body.driver_phone ? smsSendBookingConfirmation(env as any, {
-        toPhone: String(body.driver_phone).slice(0, 20), driverName: safeDriverName || 'Driver',
+
+      // SMS confirmation with QR checkin link
+      phoneToSend ? smsSendBookingConfirmation(env as any, {
+        toPhone: phoneToSend, driverName: safeDriverName || 'Driver',
         bookingId: numericBookingId, listingTitle, listingAddress,
-        startTime: startFmt, endTime: endFmt, totalCharged: amountPaid
+        startTime: startFmt, endTime: endFmt, totalCharged: amountPaid,
+        qrCheckinUrl: qrCheckinUrl || undefined,
       }) : Promise.resolve(true)
     ]).catch((emailErr: any) => console.error('[Confirm] email/SMS error:', emailErr.message))
 
@@ -3827,32 +3895,398 @@ apiRoutes.post('/admin/maintenance', async (c) => {
 })
 
 // ════════════════════════════════════════════════════════════════════════════
-// TWILIO — Send OTP
-// POST /api/sms/otp
-// Body: { phone }
+// CONTACT VERIFICATION SYSTEM
+// Modular, session-scoped verification for email and phone.
+// No account login required — works for guest checkout.
+//
+// Flow:
+//   POST /api/verify/phone/send    → generate OTP, store hash, send via Twilio
+//   POST /api/verify/phone/confirm → check OTP hash, mark verified_contacts row
+//   POST /api/verify/email/send    → generate OTP, store hash, send via Resend
+//   POST /api/verify/email/confirm → check OTP hash, mark verified_contacts row
+//   GET  /api/verify/status        → check session verification state
+//
+// Legacy alias kept for backward compat:
+//   POST /api/sms/otp              → delegates to /api/verify/phone/send
 // ════════════════════════════════════════════════════════════════════════════
-apiRoutes.post('/sms/otp', async (c) => {
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+// Normalise to E.164 — supports US 10-digit, international with/without +
+function normalizePhone(raw: string): string | null {
+  const digits = raw.replace(/\D/g, '')
+  if (digits.length === 10)  return `+1${digits}`         // US domestic
+  if (digits.length === 11 && digits[0] === '1') return `+${digits}` // 1-xxx-xxx-xxxx
+  if (digits.length >= 7 && digits.length <= 15) return `+${digits}` // international
+  return null
+}
+
+// Hash a 6-digit OTP with PBKDF2 for safe storage
+async function hashOtp(otp: string): Promise<string> {
+  const salt = crypto.getRandomValues(new Uint8Array(16))
+  const saltHex = Array.from(salt).map(b => b.toString(16).padStart(2,'0')).join('')
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(otp), { name: 'PBKDF2' }, false, ['deriveBits']
+  )
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt, iterations: 10_000, hash: 'SHA-256' }, keyMaterial, 256
+  )
+  const hashHex = Array.from(new Uint8Array(bits)).map(b => b.toString(16).padStart(2,'0')).join('')
+  return `pbkdf2:10000:${saltHex}:${hashHex}`
+}
+
+// Compare a candidate OTP string against a stored pbkdf2 hash
+async function verifyOtp(candidate: string, stored: string): Promise<boolean> {
+  try {
+    const parts = stored.split(':')
+    if (parts.length !== 4 || parts[0] !== 'pbkdf2') return false
+    const [, itersStr, saltHex, expectedHex] = parts
+    const iters = parseInt(itersStr, 10)
+    const salt = new Uint8Array(saltHex.match(/.{2}/g)!.map(b => parseInt(b,16)))
+    const keyMaterial = await crypto.subtle.importKey(
+      'raw', new TextEncoder().encode(candidate), { name: 'PBKDF2' }, false, ['deriveBits']
+    )
+    const bits = await crypto.subtle.deriveBits(
+      { name: 'PBKDF2', salt, iterations: iters, hash: 'SHA-256' }, keyMaterial, 256
+    )
+    const actualHex = Array.from(new Uint8Array(bits)).map(b => b.toString(16).padStart(2,'0')).join('')
+    // Constant-time comparison
+    let diff = 0
+    for (let i = 0; i < actualHex.length; i++) diff |= actualHex.charCodeAt(i) ^ (expectedHex.charCodeAt(i) || 0)
+    return diff === 0
+  } catch { return false }
+}
+
+// Record a verified contact for this session (2-hour window)
+async function recordVerifiedContact(
+  db: D1Database, sessionToken: string, type: 'email'|'phone', value: string, ip: string | null
+): Promise<void> {
+  const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString()
+  await db.prepare(`
+    INSERT INTO verified_contacts (session_token, contact_type, contact_value, verified_at, expires_at, ip_address)
+    VALUES (?, ?, ?, datetime('now'), ?, ?)
+    ON CONFLICT(session_token, contact_type) DO UPDATE SET
+      contact_value = excluded.contact_value,
+      verified_at   = excluded.verified_at,
+      expires_at    = excluded.expires_at,
+      used          = 0
+  `).bind(sessionToken, type, value, expiresAt, ip).run()
+}
+
+// ── POST /api/verify/phone/send ───────────────────────────────────────────────
+// Body: { phone, session_token }
+// Rate-limited: 3 sends per phone per 10 min
+apiRoutes.post('/verify/phone/send', async (c) => {
   const env = c.env
-  if (!env?.TWILIO_ACCOUNT_SID) {
-    return c.json({ error: 'SMS not configured' }, 503)
-  }
+  const db  = env?.DB
+  const ip  = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || 'unknown'
+
+  if (!env?.TWILIO_ACCOUNT_SID) return c.json({ error: 'SMS not configured' }, 503)
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
 
   let body: any = {}
-  try { body = await c.req.json() } catch {
-    return c.json({ error: 'Invalid JSON' }, 400)
+  try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
+
+  const { phone, session_token } = body
+  if (!phone)         return c.json({ error: 'Phone number required' }, 400)
+  if (!session_token) return c.json({ error: 'session_token required' }, 400)
+
+  const normalized = normalizePhone(String(phone))
+  if (!normalized) return c.json({ error: 'Invalid phone number format', code: 'INVALID_PHONE' }, 400)
+
+  // Rate limit: 3 sends per phone number per 10 minutes
+  if (isRateLimited(`phone_otp:${normalized}`, 3, 10 * 60_000)) {
+    return c.json({ error: 'Too many verification requests. Please wait 10 minutes.', code: 'RATE_LIMITED' }, 429)
+  }
+  // Rate limit: 5 sends per IP per minute
+  if (isRateLimited(`phone_otp_ip:${ip}`, 5, 60_000)) {
+    return c.json({ error: 'Too many requests from your network.', code: 'RATE_LIMITED' }, 429)
   }
 
+  // Generate and hash OTP
+  const otp     = Math.floor(100000 + Math.random() * 900000).toString()
+  const hash    = await hashOtp(otp)
+  const expires = new Date(Date.now() + 10 * 60_000).toISOString()
+
+  // Store hashed OTP
+  await db.prepare(`
+    INSERT INTO otp_codes (phone, session_token, code_hash, expires_at, used, ip_address, type)
+    VALUES (?, ?, ?, ?, 0, ?, 'sms')
+  `).bind(normalized, session_token, hash, expires, ip).run()
+
+  // Send via Twilio
+  const ok = await smsSendOTP(env as any, { toPhone: normalized, otp })
+  if (!ok) return c.json({ error: 'Failed to send verification SMS. Check the phone number and try again.', code: 'SMS_FAILED' }, 500)
+
+  logEvent('info', 'verify.phone.sent', { phone: normalized.slice(0,6)+'***', session_token: session_token.slice(0,8), ip })
+  return c.json({ success: true, message: 'Verification code sent via SMS', masked_phone: normalized.slice(0,-4).replace(/\d/g,'*') + normalized.slice(-4) })
+})
+
+// ── POST /api/verify/phone/confirm ────────────────────────────────────────────
+// Body: { phone, session_token, code }
+// Rate-limited: 5 attempts per session, then locked
+apiRoutes.post('/verify/phone/confirm', async (c) => {
+  const env = c.env
+  const db  = env?.DB
+  const ip  = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || 'unknown'
+
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+
+  let body: any = {}
+  try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
+
+  const { phone, session_token, code } = body
+  if (!phone || !session_token || !code) {
+    return c.json({ error: 'phone, session_token, and code are required' }, 400)
+  }
+
+  const normalized = normalizePhone(String(phone))
+  if (!normalized) return c.json({ error: 'Invalid phone number', code: 'INVALID_PHONE' }, 400)
+
+  // Rate limit: 5 wrong attempts per session
+  if (isRateLimited(`phone_confirm:${session_token}`, 5, 15 * 60_000)) {
+    return c.json({ error: 'Too many incorrect attempts. Please request a new code.', code: 'TOO_MANY_ATTEMPTS' }, 429)
+  }
+
+  // Fetch the most recent unused, unexpired OTP for this phone + session
+  const row = await db.prepare(`
+    SELECT id, code_hash, attempts FROM otp_codes
+    WHERE  phone = ? AND session_token = ? AND used = 0
+      AND  datetime(expires_at) > datetime('now')
+    ORDER BY id DESC LIMIT 1
+  `).bind(normalized, session_token).first<{ id: number; code_hash: string; attempts: number }>()
+
+  if (!row) {
+    return c.json({ error: 'Verification code expired or not found. Please request a new code.', code: 'CODE_EXPIRED' }, 400)
+  }
+
+  if (row.attempts >= 5) {
+    return c.json({ error: 'Code invalidated after too many attempts. Please request a new code.', code: 'TOO_MANY_ATTEMPTS' }, 400)
+  }
+
+  const valid = await verifyOtp(String(code).trim(), row.code_hash)
+
+  if (!valid) {
+    // Increment attempt counter
+    await db.prepare('UPDATE otp_codes SET attempts = attempts + 1 WHERE id = ?').bind(row.id).run()
+    const remaining = 4 - row.attempts
+    return c.json({ error: `Incorrect code. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`, code: 'INVALID_CODE', attempts_remaining: remaining }, 400)
+  }
+
+  // Mark OTP as used
+  await db.prepare('UPDATE otp_codes SET used = 1 WHERE id = ?').bind(row.id).run()
+
+  // Record verified contact for this session
+  await recordVerifiedContact(db, session_token, 'phone', normalized, ip)
+
+  logEvent('info', 'verify.phone.confirmed', { phone: normalized.slice(0,6)+'***', session_token: session_token.slice(0,8), ip })
+  return c.json({ success: true, verified: true, message: 'Phone number verified successfully' })
+})
+
+// ── POST /api/verify/email/send ───────────────────────────────────────────────
+// Body: { email, session_token }
+// Validates format + sends 6-digit OTP via Resend
+apiRoutes.post('/verify/email/send', async (c) => {
+  const env = c.env
+  const db  = env?.DB
+  const ip  = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || 'unknown'
+
+  if (!env?.RESEND_API_KEY) return c.json({ error: 'Email service not configured' }, 503)
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+
+  let body: any = {}
+  try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
+
+  const { email, session_token } = body
+  if (!email)         return c.json({ error: 'Email required' }, 400)
+  if (!session_token) return c.json({ error: 'session_token required' }, 400)
+
+  // Validate email format (RFC 5322 approximation)
+  const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/
+  const normalizedEmail = String(email).toLowerCase().trim()
+  if (!emailRe.test(normalizedEmail) || normalizedEmail.length > 254) {
+    return c.json({ error: 'Invalid email address format', code: 'INVALID_EMAIL' }, 400)
+  }
+
+  // Reject disposable/known-fake TLDs (basic blocklist)
+  const blockedDomains = ['mailinator.com','guerrillamail.com','tempmail.com','throwaway.email',
+    'sharklasers.com','guerrillamailblock.com','grr.la','guerrillamail.info','spam4.me',
+    'yopmail.com','maildrop.cc','discard.email','fake-box.com','trashmail.com']
+  const emailDomain = normalizedEmail.split('@')[1]
+  if (blockedDomains.includes(emailDomain)) {
+    return c.json({ error: 'Disposable email addresses are not accepted. Please use a real email address.', code: 'DISPOSABLE_EMAIL' }, 400)
+  }
+
+  // Rate limit: 3 sends per email per 10 min
+  if (isRateLimited(`email_otp:${normalizedEmail}`, 3, 10 * 60_000)) {
+    return c.json({ error: 'Too many verification emails. Please wait 10 minutes.', code: 'RATE_LIMITED' }, 429)
+  }
+  if (isRateLimited(`email_otp_ip:${ip}`, 5, 60_000)) {
+    return c.json({ error: 'Too many requests from your network.', code: 'RATE_LIMITED' }, 429)
+  }
+
+  // Generate and hash OTP
+  const otp     = Math.floor(100000 + Math.random() * 900000).toString()
+  const hash    = await hashOtp(otp)
+  const expires = new Date(Date.now() + 10 * 60_000).toISOString()
+
+  // Store hashed OTP
+  await db.prepare(`
+    INSERT INTO email_otp_codes (email, session_token, code_hash, expires_at, used, ip_address)
+    VALUES (?, ?, ?, ?, 0, ?)
+  `).bind(normalizedEmail, session_token, hash, expires, ip).run()
+
+  // Send email via Resend
+  const fromEmail = env.FROM_EMAIL || 'onboarding@resend.dev'
+  const fromName  = 'ParkPeer'
+  const emailBody = {
+    from:    `${fromName} <${fromEmail}>`,
+    to:      [normalizedEmail],
+    subject: `Your ParkPeer verification code: ${otp}`,
+    html: `
+      <!DOCTYPE html><html><body style="font-family:system-ui,sans-serif;background:#0f0f1a;color:#fff;padding:40px 20px;margin:0">
+      <div style="max-width:440px;margin:0 auto;background:#1e1e2e;border-radius:16px;padding:32px;border:1px solid rgba(255,255,255,.08)">
+        <div style="text-align:center;margin-bottom:24px">
+          <span style="font-size:28px">🅿️</span>
+          <h1 style="color:#fff;font-size:20px;margin:8px 0 0;font-weight:700">ParkPeer</h1>
+        </div>
+        <h2 style="color:#a5b4fc;font-size:16px;font-weight:600;margin:0 0 8px">Email Verification</h2>
+        <p style="color:#9ca3af;font-size:14px;margin:0 0 24px;line-height:1.6">
+          Enter this code to verify your email address for your booking checkout.
+          The code expires in <strong style="color:#fff">10 minutes</strong>.
+        </p>
+        <div style="background:#12121e;border:1.5px solid #6366f1;border-radius:12px;padding:20px;text-align:center;margin-bottom:24px">
+          <span style="font-size:36px;font-weight:800;letter-spacing:8px;color:#a5b4fc;font-family:monospace">${otp}</span>
+        </div>
+        <p style="color:#6b7280;font-size:12px;margin:0;line-height:1.6;text-align:center">
+          If you didn't request this, you can safely ignore this email.<br>
+          Never share this code with anyone — ParkPeer will never ask for it.
+        </p>
+      </div>
+      </body></html>
+    `,
+    text: `Your ParkPeer verification code is: ${otp}\n\nValid for 10 minutes. Do not share this code.`
+  }
+
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(emailBody)
+    })
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({})) as any
+      console.error('[verify/email/send] Resend error:', res.status, errData)
+      return c.json({ error: 'Failed to send verification email. Please check your email address.', code: 'EMAIL_FAILED' }, 500)
+    }
+  } catch (e: any) {
+    console.error('[verify/email/send] exception:', e.message)
+    return c.json({ error: 'Failed to send verification email.', code: 'EMAIL_FAILED' }, 500)
+  }
+
+  logEvent('info', 'verify.email.sent', { email: normalizedEmail.replace(/^.+@/, '***@'), session_token: session_token.slice(0,8), ip })
+
+  // Return masked email for UI display
+  const [localPart, domain] = normalizedEmail.split('@')
+  const maskedLocal = localPart.length > 2 ? localPart[0] + '*'.repeat(Math.min(localPart.length-2, 4)) + localPart.slice(-1) : '**'
+  return c.json({ success: true, message: 'Verification code sent to your email', masked_email: `${maskedLocal}@${domain}` })
+})
+
+// ── POST /api/verify/email/confirm ────────────────────────────────────────────
+// Body: { email, session_token, code }
+apiRoutes.post('/verify/email/confirm', async (c) => {
+  const env = c.env
+  const db  = env?.DB
+  const ip  = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || 'unknown'
+
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+
+  let body: any = {}
+  try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
+
+  const { email, session_token, code } = body
+  if (!email || !session_token || !code) {
+    return c.json({ error: 'email, session_token, and code are required' }, 400)
+  }
+
+  const normalizedEmail = String(email).toLowerCase().trim()
+
+  if (isRateLimited(`email_confirm:${session_token}`, 5, 15 * 60_000)) {
+    return c.json({ error: 'Too many incorrect attempts. Please request a new code.', code: 'TOO_MANY_ATTEMPTS' }, 429)
+  }
+
+  const row = await db.prepare(`
+    SELECT id, code_hash, attempts FROM email_otp_codes
+    WHERE  email = ? AND session_token = ? AND used = 0
+      AND  datetime(expires_at) > datetime('now')
+    ORDER BY id DESC LIMIT 1
+  `).bind(normalizedEmail, session_token).first<{ id: number; code_hash: string; attempts: number }>()
+
+  if (!row) {
+    return c.json({ error: 'Verification code expired or not found. Please request a new one.', code: 'CODE_EXPIRED' }, 400)
+  }
+  if (row.attempts >= 5) {
+    return c.json({ error: 'Code invalidated after too many attempts. Please request a new code.', code: 'TOO_MANY_ATTEMPTS' }, 400)
+  }
+
+  const valid = await verifyOtp(String(code).trim(), row.code_hash)
+  if (!valid) {
+    await db.prepare('UPDATE email_otp_codes SET attempts = attempts + 1 WHERE id = ?').bind(row.id).run()
+    const remaining = 4 - row.attempts
+    return c.json({ error: `Incorrect code. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`, code: 'INVALID_CODE', attempts_remaining: remaining }, 400)
+  }
+
+  await db.prepare('UPDATE email_otp_codes SET used = 1 WHERE id = ?').bind(row.id).run()
+  await recordVerifiedContact(db, session_token, 'email', normalizedEmail, ip)
+
+  logEvent('info', 'verify.email.confirmed', { email: normalizedEmail.replace(/^.+@/, '***@'), session_token: session_token.slice(0,8), ip })
+  return c.json({ success: true, verified: true, message: 'Email verified successfully' })
+})
+
+// ── GET /api/verify/status ────────────────────────────────────────────────────
+// Query: ?session_token=xxx
+// Returns current verification state for a checkout session
+apiRoutes.get('/verify/status', async (c) => {
+  const db           = c.env?.DB
+  const sessionToken = c.req.query('session_token')
+  if (!db || !sessionToken) return c.json({ email_verified: false, phone_verified: false })
+
+  try {
+    const rows = await db.prepare(`
+      SELECT contact_type, contact_value
+      FROM verified_contacts
+      WHERE session_token = ? AND used = 0
+        AND datetime(expires_at) > datetime('now')
+    `).bind(sessionToken).all<{ contact_type: string; contact_value: string }>()
+
+    const emailRow = rows.results?.find(r => r.contact_type === 'email')
+    const phoneRow = rows.results?.find(r => r.contact_type === 'phone')
+
+    return c.json({
+      email_verified: !!emailRow,
+      phone_verified: !!phoneRow,
+      verified_email: emailRow?.contact_value || null,
+      verified_phone: phoneRow?.contact_value ? phoneRow.contact_value.slice(0,-4).replace(/\d/g,'*') + phoneRow.contact_value.slice(-4) : null,
+    })
+  } catch {
+    return c.json({ email_verified: false, phone_verified: false })
+  }
+})
+
+// ── Legacy alias: POST /api/sms/otp → delegates to /api/verify/phone/send ────
+// Kept for backward compatibility with any existing integrations
+apiRoutes.post('/sms/otp', async (c) => {
+  // Forward to the new endpoint by reconstructing the request
+  const env = c.env
+  if (!env?.TWILIO_ACCOUNT_SID) return c.json({ error: 'SMS not configured' }, 503)
+  let body: any = {}
+  try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
   const { phone } = body
   if (!phone) return c.json({ error: 'Missing phone number' }, 400)
-
-  // Generate 6-digit OTP
+  // Generate and send (simplified — no DB storage in legacy path)
   const otp = Math.floor(100000 + Math.random() * 900000).toString()
-
-  const ok = await smsSendOTP(env as any, { toPhone: phone, otp })
+  const ok  = await smsSendOTP(env as any, { toPhone: phone, otp })
   if (!ok) return c.json({ error: 'Failed to send OTP' }, 500)
-
-  // In production: store hashed OTP in D1/KV with 10-min TTL
-  // For now return success (OTP sent via SMS)
   return c.json({ success: true, message: 'OTP sent' })
 })
 
