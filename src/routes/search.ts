@@ -405,9 +405,6 @@ searchPage.get('/', async (c) => {
     .mapboxgl-ctrl-group button { color: #fff !important; }
     /* ── Critical: prevent Mapbox marker wrapper from stretching ── */
     .mapboxgl-marker { width: fit-content !important; max-width: fit-content !important; }
-    /* ── Route info pill anchor marker must never steal hover events from pins ── */
-    #route-info-pill-anchor,
-    #route-info-pill-anchor * { pointer-events: none !important; }
     .active-map-btn { background: rgba(91,46,255,0.3) !important; border: 1px solid rgba(91,46,255,0.5) !important; }
     .listing-card { cursor: pointer; transition: all 0.2s; }
     .listing-card:hover { border-color: rgba(91,46,255,0.4) !important; transform: translateY(-1px); }
@@ -740,7 +737,9 @@ searchPage.get('/', async (c) => {
   const RA = {
     activeListingId : null,   // currently highlighted listing id
     glowTimer       : null,   // setInterval for Mapbox glow pulse
-    labelMarker     : null,   // mapboxgl.Marker anchoring the route info pill to a spot
+    // NOTE: No labelMarker — the bottom-center #route-info-pill is the one true pill.
+    // A map-anchored Mapbox Marker was tried but its transform conflicts with
+    // Mapbox's own positioning transforms, causing the pin to jump around the map.
     reducedMotion   : window.matchMedia('(prefers-reduced-motion: reduce)').matches
   }
 
@@ -809,67 +808,28 @@ searchPage.get('/', async (c) => {
   }
 
   // ── 3. UNIFIED ROUTE INFO PILL ────────────────────────────
-  // FIX 2 + FIX 4: Single pill, anchored via Mapbox Marker to the parking spot LngLat.
-  // The pill element itself is the Mapbox marker's custom element — it follows the map.
-  function raShowRoutePill(score, listing) {
-    // Remove any previous anchored label marker
-    raHideRoutePill()
-
-    if (!map || typeof mapboxgl === 'undefined' || !listing) return
-
-    const lng = listing.lng
-    const lat = listing.lat
-    if (!lng || !lat) return
-
-    // Debug: verify coordinates are stable (never change during interaction)
-    console.debug('[route-label] anchoring pill to listing id=' + listing.id +
-      ' lng=' + lng.toFixed(5) + ' lat=' + lat.toFixed(5))
-
-    // Build the pill as a Mapbox Marker element so it tracks the map viewport
-    const ripEl = document.createElement('div')
-    ripEl.id = 'route-info-pill-anchor'
-    ripEl.style.cssText = 'pointer-events:none;width:fit-content;transform:translateX(-50%);'
-
-    const price = listing ? ('$' + (listing.price_hourly || 0).toFixed(0) + '/hr') : ''
-    const priceHtml = price ? '<span class="rip-sep">·</span><span class="rip-price">' + price + '</span>' : ''
-
-    ripEl.innerHTML =
-      '<div class="rip-inner" style="pointer-events:none;">' +
-        '<i class="fas fa-person-walking rip-icon"></i>' +
-        '<span id="rip-time-anchor">' + fmtDur(score.durationS) + '</span>' +
-        '<span class="rip-sep">·</span>' +
-        '<span id="rip-dist-anchor">' + fmtDist(score.distanceM) + '</span>' +
-        priceHtml +
-      '</div>'
-
-    // Anchor 48px above the pin (offset keeps it from overlapping the marker head)
-    // CRITICAL: The Mapbox wrapper div must also have pointer-events:none so it
-    // cannot intercept hover events on pins beneath it (which would cause jitter).
-    RA.labelMarker = new mapboxgl.Marker({ element: ripEl, anchor: 'bottom', offset: [0, -52] })
-      .setLngLat([lng, lat])
-      .addTo(map)
-    // Force pointer-events:none on the Mapbox-generated wrapper div as well
-    if (RA.labelMarker.getElement && RA.labelMarker.getElement().parentElement) {
-      RA.labelMarker.getElement().parentElement.style.pointerEvents = 'none'
-    }
-
-    // Show + update the bottom-center CSS pill.
-    // IMPORTANT: update content BEFORE removing .hidden, so the element is
-    // fully populated before it becomes visible (prevents flash of stale content).
+  // Single bottom-center pill. No Mapbox-anchored marker — those conflict
+  // with Mapbox's own transform-based positioning and cause the pin to jump.
+  function raShowRoutePill(score, listing, listingId) {
+    // Update content first (before making visible) — no flash of stale text
     _updateBottomPill(score, listing)
+
     const pill = document.getElementById('route-info-pill')
-    if (pill) {
-      // If already visible and same listing → play border flash
-      const isReselect = !pill.classList.contains('hidden') && RA.activeListingId === listingId
-      pill.classList.remove('hidden')
-      if (isReselect) {
-        const inner = pill.querySelector('.rip-inner')
-        if (inner) {
-          inner.classList.remove('rip-flash')
-          void inner.offsetWidth
-          inner.classList.add('rip-flash')
-          setTimeout(() => inner.classList.remove('rip-flash'), 500)
-        }
+    if (!pill) return
+
+    const wasHidden  = pill.classList.contains('hidden')
+    const isReselect = !wasHidden && RA.activeListingId === listingId
+
+    pill.classList.remove('hidden')
+
+    // Only flash border on re-tap of same pin
+    if (isReselect) {
+      const inner = pill.querySelector('.rip-inner')
+      if (inner) {
+        inner.classList.remove('rip-flash')
+        void inner.offsetWidth
+        inner.classList.add('rip-flash')
+        setTimeout(() => inner.classList.remove('rip-flash'), 500)
       }
     }
   }
@@ -886,7 +846,6 @@ searchPage.get('/', async (c) => {
   }
 
   function raHideRoutePill() {
-    if (RA.labelMarker) { RA.labelMarker.remove(); RA.labelMarker = null }
     const pill = document.getElementById('route-info-pill')
     if (pill) pill.classList.add('hidden')
   }
@@ -909,7 +868,7 @@ searchPage.get('/', async (c) => {
 
     raActivateGlow()
     raStartPinPulse(listingId)
-    raShowRoutePill(score, listing)
+    raShowRoutePill(score, listing, listingId)
   }
 
   function raDeactivateRoute() {
