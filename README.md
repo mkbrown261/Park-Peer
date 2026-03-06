@@ -310,3 +310,49 @@ Default seeded: all 7 days, 07:00–22:00 open for existing listings.
 ### Code Quality
 - Removed 2x `console.debug` statements left from walk-route debugging
 - Cleaned debug comment on `el._lng` coordinate freeze
+
+## 📱 Contact Verification System (v2.1)
+
+### Overview
+Full email + phone OTP verification built for the checkout flow. Supports guest checkout (no account login required) using session-scoped verification tokens.
+
+### API Endpoints
+
+| Method | Route | Description |
+|---|---|---|
+| POST | `/api/verify/phone/send` | Send 6-digit OTP via Twilio SMS |
+| POST | `/api/verify/phone/confirm` | Verify phone OTP — marks verified_contacts row |
+| POST | `/api/verify/email/send` | Send 6-digit OTP via Resend email |
+| POST | `/api/verify/email/confirm` | Verify email OTP — marks verified_contacts row |
+| GET  | `/api/verify/status` | Check session verification state |
+
+### Checkout UI Features
+- **Predictive email input** — real-time format hints, progressive error messages, disposable domain rejection
+- **Auto-format phone** — US 10-digit auto-formatted to `(555) 123-4567`; international `+` numbers accepted
+- **OTP modal** — 6 individual digit boxes with keyboard nav, paste support, wrong-answer shake animation
+- **Verified badges** — green checkmarks appear on both fields after successful OTP
+- **Resend timer** — 60-second cooldown before resend is allowed
+- **Hold token reuse** — `session_token` (= `checkoutToken`) is the same token used for slot holds, so verification and hold are tied to the same checkout session
+
+### Post-Payment Messaging
+| Trigger | Channel | Contents |
+|---|---|---|
+| Payment success | Email | Booking confirmation + QR code image (200×200 PNG) + check-in link |
+| Payment success | Email | Separate payment receipt with last-4 card digits |
+| Payment success | SMS | Booking summary + QR check-in URL (`/checkin?t=TOKEN&b=BOOKING_ID`) |
+| Both | — | Only sent to **verified** contacts; unverified contacts fall back to raw body values |
+
+### Security
+- OTPs hashed with PBKDF2-SHA-256 (10,000 iterations + random salt)
+- Constant-time comparison to prevent timing attacks
+- Verified contacts expire 2 hours after verification
+- Single-use: `used = 1` after `payments/confirm` reads them (replay prevention)
+- Rate limits: 3 OTPs per contact per 10 minutes; 5 per IP per minute; 5 confirm attempts per session per 15 minutes
+
+### DB Tables Added (migration 0017)
+- `email_otp_codes` — stores hashed email OTP codes
+- `otp_codes` extended — adds `session_token`, `type`, `ip_address`, `attempts` columns
+- `verified_contacts` — session-scoped verification state (email/phone per session)
+
+### Last Deployed
+2026-03-06 · https://1d9fc520.parkpeer.pages.dev
