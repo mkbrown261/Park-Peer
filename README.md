@@ -137,8 +137,8 @@ Full user lifecycle management with compliance, refunds, and auditing.
 | Process Manager | PM2 |
 | Styling | Tailwind CSS (CDN) |
 | Icons | Font Awesome 6 |
-| Payments | Stripe (✅ Production-wired — Stripe.js v3 Payment Element) |
-| Database | Cloudflare D1 (✅ Production — 28 tables, 11 migrations applied) |
+| Payments | Stripe (✅ Production-wired — live keys, Stripe.js v3 Payment Element, idempotency) |
+| Database | Cloudflare D1 (✅ Production — 33 tables, 13 migrations applied) |
 
 ## 🚀 Local Development
 ```bash
@@ -157,23 +157,23 @@ npx wrangler pages deploy dist --project-name parkpeer
 - [x] Landing page with floating map pins, earnings calculator, city coverage
 - [x] Full-featured search with filter sidebar + visual map
 - [x] Listing detail page with gallery, reviews, availability calendar, booking widget
-- [x] **Stripe payment integration** — Stripe.js v3 Payment Element, 3-step checkout flow (D1 booking → Stripe PI → confirm)
-- [x] **Cloudflare D1 persistence** — 28 tables, 11 migrations, full booking/payment lifecycle in D1
+- [x] **Stripe payment integration** — live keys, Stripe.js v3 Payment Element, idempotency keys, ghost-booking prevention
+- [x] **Cloudflare D1 persistence** — 33 tables, 13 migrations, full booking/payment lifecycle in D1
+- [x] **Production-grade booking pipeline** — holds-first flow, atomic D1 batch, recovery logging, integrity audit
 - [x] Driver dashboard with live countdown timer, booking history, saved spots
 - [x] Host dashboard with listing management, booking approvals, revenue chart, calendar
 - [x] Sign Up / Login with role selection, password strength meter, social OAuth UI
 - [x] Admin panel with fraud alerts, listing moderation, user management, system health
+- [x] **Admin integrity endpoint** — ghost booking detection, orphan payment audit, stale hold cleanup
 - [x] RESTful API with full CRUD + Stripe + notifications
 - [x] Mobile-responsive across all pages
 - [x] Dark mode design system with Electric Indigo + Neon Lime palette
 
 ## 🔜 Phase 2 Roadmap
-- [ ] Stripe live mode switchover (currently test keys)
-- [ ] Webhook endpoint registration on Stripe dashboard (https://parkpeer.pages.dev/api/webhooks/stripe)
 - [ ] Google Maps / Mapbox real map (Mapbox already integrated, real listings needed)
 - [ ] SMS/Email notifications (Twilio + Resend secrets already set in Cloudflare)
 - [ ] Surge pricing engine (events)
-- [ ] QR code generation
+- [ ] QR code generation for check-in
 - [ ] Superhost achievement system
 - [ ] AI pricing suggestions
 
@@ -183,24 +183,42 @@ npx wrangler pages deploy dist --project-name parkpeer
 ## 🔧 Recent Fixes (2026-03-06) — Stripe + D1 Production Wiring
 
 ### Stripe Payment Integration (✅ Complete)
+- **Live keys active** — `pk_live_...` / `sk_live_...` / `whsec_...` all set in Cloudflare Pages secrets
 - **Checkout page** — full Stripe.js v3 Payment Element replacing static card HTML
-- **3-step flow**:
-  1. `POST /api/bookings` → creates D1 `bookings` row (status=`pending`), returns `db_id`
-  2. `POST /api/payments/create-intent` → creates Stripe PI, **stamps `stripe_payment_intent_id` onto booking row** (critical webhook link)
+- **3-step flow** (holds-first):
+  1. `POST /api/holds` → atomic slot lock (10-min TTL, blocks other users)
+  2. `POST /api/payments/create-intent` → creates Stripe PI tied to hold; **Stripe Idempotency-Key** = `checkout_token` prevents duplicate PIs on retry
   3. `stripe.confirmPayment()` in browser → on success → `POST /api/payments/confirm`
 - **`/api/payments/confirm`** — fully wired to D1:
   - Looks up booking by `stripe_payment_intent_id` (or fallback `booking_id`)
   - `UPDATE bookings SET status='confirmed'`, stamps `stripe_charge_id`
   - `INSERT INTO payments` row (idempotent — skips if PI already recorded)
   - Sends confirmation email + SMS; fires in-app notification async
-- **Stripe webhook** (`/api/webhooks/stripe`) — already handled `payment_intent.succeeded`, `payment_intent.payment_failed`, `charge.refunded`, `charge.dispute.created`; now works correctly because PI id is pre-stamped on booking
+- **Stripe webhook** (`/api/webhooks/stripe`) — handles `payment_intent.succeeded`, `payment_intent.payment_failed`, `charge.refunded`, `charge.dispute.created`
+- **Webhook registered** at https://parkpeer.pages.dev/api/webhooks/stripe
+
+### Ghost Booking Prevention (✅ Complete)
+| Mechanism | Description |
+|---|---|
+| **reservation_holds** | 10-min atomic slot lock; overlap query excludes caller's own session |
+| **booking_idempotency** | Maps `checkout_token → booking_id`; prevents double-INSERTs on retry |
+| **Stripe idempotency key** | Same `checkout_token` passed as `Idempotency-Key` → same PI returned |
+| **D1 atomic batch** | Booking + hold-convert + payment INSERT in one `db.batch()` call |
+| **payment_recovery_log** | PI success + D1 batch failure → logged; client gets `recovery_pending` status |
+| **Admin integrity scan** | `GET /api/admin/integrity` detects orphan payments, unconfirmed bookings, stale holds |
 
 ### Cloudflare D1 Persistence (✅ Complete)
-- **28 tables** fully applied in production (database_id: `119f9fd4-...`)
-- **11 migrations** all confirmed applied remotely
+- **33 tables** fully applied in production (database_id: `119f9fd4-...`)
+- **13 migrations** all confirmed applied remotely
+- **5 new tables** (migrations 0012–0013): `reservation_holds`, `payment_recovery_log`, `booking_idempotency`, `orphan_payments`, `integrity_log`
 - **Booking lifecycle**: `pending` → `confirmed` → `active` → `completed` / `cancelled` / `refunded` all tracked in D1
-- **`payments` table** rows now correctly inserted after Stripe confirms
-- **Contact email field** added to checkout for confirmation email delivery
+
+### Security & Rate Limiting (✅ Complete)
+- `/api/holds` — 20 req/min per IP
+- `/api/payments/create-intent` — 10 req/min per IP
+- `/api/admin/integrity` — requires admin session
+- Structured JSON logging (`logEvent`) on all hold/payment/booking events for `wrangler tail` monitoring
+- SQL alias bug fixed in payments idempotency check (`payments.booking_id` not `p.booking_id`)
 
 ### Map / UI
 - **Popup no longer blocks the walking route pill** — popup offset increased to 72px when a walk route is active; the `#route-info-pill` drops to `1.5rem` from the bottom while the popup is open (`pill-popup-open` class), giving the popup full clearance above the route line
