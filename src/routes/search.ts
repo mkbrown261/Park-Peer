@@ -228,7 +228,7 @@ searchPage.get('/', async (c) => {
       <!-- FIX 2: UNIFIED route info pill — replaces walk-route-panel + route-info-label -->
       <!-- Only ONE pill exists. It is a CSS-positioned overlay (bottom-center).        -->
       <!-- A separate Mapbox-anchored marker (#route-pin-label) handles map position.   -->
-      <div id="route-info-pill" class="hidden absolute z-20">
+      <div id="route-info-pill" class="absolute z-20">
         <div class="rip-inner">
           <i class="fas fa-person-walking rip-icon"></i>
           <span id="rip-time">–</span>
@@ -580,23 +580,35 @@ searchPage.get('/', async (c) => {
     /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
        UNIFIED ROUTE INFO PILL
        Key rules:
-       • position/centering is ONLY in CSS (not Tailwind classes)
-       • hidden = display:none so the element never occupies layout
+       • position/centering is ONLY in CSS — transform is ALWAYS active
+       • hidden = opacity:0 + visibility:hidden + pointer-events:none
+         (NEVER display:none — that destroys the transform layer and
+          causes a 1-frame jump to left:50% without translateX on repaint)
        • NO transform in any animation — opacity-only fade
        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
     #route-info-pill {
       position: absolute;
       bottom: 6rem;          /* 96px from bottom of map */
       left: 50%;
-      transform: translateX(-50%);   /* centering — never touched by JS or keyframes */
+      transform: translateX(-50%);   /* centering — ALWAYS in effect, never overridden */
       z-index: 20;
-      pointer-events: auto;
-      /* opacity-only transition for show/hide — ZERO layout/transform change */
-      opacity: 1;
-      transition: opacity 0.18s ease;
+      pointer-events: none;          /* overridden to auto when visible */
+      /* Smooth fade in/out — transform stays constant the whole time */
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.18s ease, visibility 0s linear 0.18s;
     }
+    #route-info-pill.pill-visible {
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transition: opacity 0.18s ease, visibility 0s linear 0s;
+    }
+    /* Keep .hidden support for any legacy callers — maps to same as not-visible */
     #route-info-pill.hidden {
-      display: none !important;  /* fully removed from layout when hidden */
+      opacity: 0 !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
     }
     .rip-inner {
       display: inline-flex;
@@ -635,7 +647,7 @@ searchPage.get('/', async (c) => {
     }
     .rip-close:hover { color: #fff; }
     @media (max-width: 767px) {
-      #route-info-pill { bottom: 5rem; }
+      #route-info-pill { bottom: 5rem; }  /* centering still handled by transform above */
       .rip-inner { font-size: 11px; padding: 7px 12px; max-width: 88vw; }
       #rip-time  { font-size: 12px; }
     }
@@ -812,10 +824,13 @@ searchPage.get('/', async (c) => {
     const pill = document.getElementById('route-info-pill')
     if (!pill) return
 
-    const wasHidden  = pill.classList.contains('hidden')
-    const isReselect = !wasHidden && RA.activeListingId === listingId
+    const wasVisible = pill.classList.contains('pill-visible')
+    const isReselect = wasVisible && RA.activeListingId === listingId
 
+    // Show pill: add pill-visible (opacity:1 + visibility:visible + pointer-events:auto)
+    // Remove .hidden just in case any legacy caller added it
     pill.classList.remove('hidden')
+    pill.classList.add('pill-visible')
 
     // Only flash border on re-tap of same pin
     if (isReselect) {
@@ -842,7 +857,7 @@ searchPage.get('/', async (c) => {
 
   function raHideRoutePill() {
     const pill = document.getElementById('route-info-pill')
-    if (pill) pill.classList.add('hidden')
+    if (pill) pill.classList.remove('pill-visible')
   }
 
   // ── 4. ORCHESTRATOR ───────────────────────────────────────
@@ -2035,8 +2050,8 @@ searchPage.get('/', async (c) => {
       if (map.getLayer('walk-route-line')) map.removeLayer('walk-route-line')
       if (map.getSource('walk-route'))     map.removeSource('walk-route')
     } catch(e) {}
-    // FIX 2: hide unified pill (raDeactivateRoute already calls raHideRoutePill)
-    document.getElementById('route-info-pill').classList.add('hidden')
+    // FIX: hide unified pill using pill-visible (not classList.add('hidden'))
+    document.getElementById('route-info-pill')?.classList.remove('pill-visible')
     WS.activeRoute = null
   }
 
