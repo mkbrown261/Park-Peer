@@ -239,6 +239,15 @@ searchPage.get('/', async (c) => {
         </div>
       </div>
 
+      <!-- Route info label: floating near active pin, shows time + dist + price -->
+      <div id="route-info-label" class="hidden">
+        <div class="route-label-card">
+          <span class="route-label-time" id="ril-time">–</span>
+          <span class="route-label-dist" id="ril-dist">–</span>
+          <span class="route-label-price" id="ril-price"></span>
+        </div>
+      </div>
+
       <!-- Map loading overlay -->
       <div id="map-loading" class="absolute inset-0 bg-charcoal flex items-center justify-center z-20">
         <div class="text-center">
@@ -608,6 +617,121 @@ searchPage.get('/', async (c) => {
       .ws-chip-time { font-size: 12px; }
       .ws-chip-dest { max-width: 70px; }
       #walk-route-panel { bottom: 5rem; }
+      #route-info-label { bottom: 5.5rem; }
+    }
+
+    /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+       ROUTE ANIMATION SYSTEM
+       ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+    /* ── 1. Route line glow pulse (CSS-driven opacity cycle) ── */
+    @keyframes routeGlowPulse {
+      0%   { opacity: 0.18; }
+      50%  { opacity: 0.38; }
+      100% { opacity: 0.18; }
+    }
+    /* ── 2. Pin pulse ring (radiates outward from active pin) ── */
+    @keyframes pinPulseRing {
+      0%   { transform: scale(1);   opacity: 0.7; }
+      70%  { transform: scale(2.4); opacity: 0;   }
+      100% { transform: scale(2.4); opacity: 0;   }
+    }
+    /* ── 3. Pin body beat (subtle scale) ── */
+    @keyframes pinBeat {
+      0%,100% { transform: scale(1);    }
+      40%     { transform: scale(1.18); }
+      70%     { transform: scale(0.97); }
+    }
+    /* ── 4. Route info label entrance ── */
+    @keyframes routeLabelIn {
+      from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+      to   { opacity: 1; transform: translateX(-50%) translateY(0);    }
+    }
+    /* ── 5. Route chip active state highlight ── */
+    @keyframes chipSelectFlash {
+      0%   { box-shadow: 0 0 0 0 rgba(34,197,94,0.6); }
+      50%  { box-shadow: 0 0 0 6px rgba(34,197,94,0); }
+      100% { box-shadow: 0 0 0 0 rgba(34,197,94,0);   }
+    }
+
+    /* Park pin pulse wrapper – the ring lives as a ::before */
+    .park-pin.pin-active-pulse {
+      animation: pinBeat 1.5s ease-in-out infinite;
+      will-change: transform;
+      position: relative;
+      z-index: 5;
+    }
+    .park-pin.pin-active-pulse::before {
+      content: '';
+      position: absolute;
+      inset: -4px;
+      border-radius: 50%;
+      border: 2px solid currentColor;
+      animation: pinPulseRing 1.5s ease-out infinite;
+      will-change: transform, opacity;
+      pointer-events: none;
+    }
+
+    /* Route info label – floating near parking pin */
+    #route-info-label {
+      position: absolute;
+      bottom: 6.5rem;
+      left: 50%;
+      transform: translateX(-50%) translateY(0);
+      z-index: 25;
+      pointer-events: none;
+      animation: routeLabelIn 0.22s ease-out both;
+    }
+    #route-info-label.hidden { display: none; }
+    .route-label-card {
+      display: inline-flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1px;
+      padding: 7px 13px;
+      border-radius: 14px;
+      background: rgba(10,10,10,0.82);
+      border: 1px solid rgba(34,197,94,0.28);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 500;
+      line-height: 1.35;
+      white-space: nowrap;
+      box-shadow: 0 6px 24px rgba(0,0,0,0.5), 0 0 0 1px rgba(34,197,94,0.1);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+    }
+    .route-label-time {
+      font-size: 14px;
+      font-weight: 800;
+      color: #4ade80;
+      letter-spacing: -0.01em;
+    }
+    .route-label-dist {
+      color: #9ca3af;
+      font-size: 11px;
+    }
+    .route-label-price {
+      color: #c4b5fd;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    /* Active ws-chip flash on selection */
+    .ws-chip-route.chip-selected {
+      animation: chipSelectFlash 0.5s ease-out both;
+      border-color: rgba(34,197,94,0.7) !important;
+    }
+
+    /* Reduced motion: kill all decorative animations */
+    @media (prefers-reduced-motion: reduce) {
+      .park-pin.pin-active-pulse,
+      .park-pin.pin-active-pulse::before {
+        animation: none !important;
+      }
+      @keyframes routeGlowPulse { 0%,100% { opacity: 0.25; } }
+      .ws-chip-route.chip-selected { animation: none !important; }
+      #route-info-label { animation: none !important; }
     }
   </style>
 
@@ -651,6 +775,143 @@ searchPage.get('/', async (c) => {
   const WS_MAX_SPOTS   = 20   // only compute for nearest N spots by haversine
   const WS_CACHE_TTL   = 5 * 60 * 1000  // 5 min cache
   const wsCache = new Map()   // key → { result, ts }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // ROUTE ANIMATION ENGINE
+  // Manages: route glow, pin pulse, info label, chip state
+  // Does NOT touch routing logic or WS calculations.
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  const RA = {
+    activeListingId : null,   // currently highlighted listing id
+    glowTimer       : null,   // setInterval for Mapbox glow pulse
+    reducedMotion   : window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  }
+
+  // ── Colour config (uses existing brand palette) ───────────
+  const RA_ACTIVE_COLOR   = '#22c55e'   // brand green (existing)
+  const RA_INACTIVE_COLOR = '#4b5563'   // muted neutral (existing grey-600)
+  const RA_GLOW_COLOR     = '#22c55e'
+
+  // ── 1. ROUTE GLOW ─────────────────────────────────────────
+  // Activates animated glow + thickness on Mapbox layers
+  function raActivateGlow() {
+    if (!map) return
+    try {
+      // Transition paint properties for a smooth entrance (200ms)
+      if (map.getLayer('walk-route-line')) {
+        map.setPaintProperty('walk-route-line', 'line-width',   6)
+        map.setPaintProperty('walk-route-line', 'line-opacity', 1)
+        map.setPaintProperty('walk-route-line', 'line-color',   RA_ACTIVE_COLOR)
+      }
+      if (map.getLayer('walk-route-glow')) {
+        map.setPaintProperty('walk-route-glow', 'line-width',   18)
+        map.setPaintProperty('walk-route-glow', 'line-opacity', 0.28)
+        map.setPaintProperty('walk-route-glow', 'line-blur',    10)
+      }
+
+      // CSS-driven glow pulse (every ~2 s) unless reduced motion
+      clearInterval(RA.glowTimer)
+      if (!RA.reducedMotion) {
+        let tick = 0
+        RA.glowTimer = setInterval(() => {
+          if (!map || !map.getLayer('walk-route-glow')) { clearInterval(RA.glowTimer); return }
+          tick++
+          const opacity = (tick % 2 === 0) ? 0.28 : 0.14
+          map.setPaintProperty('walk-route-glow', 'line-opacity', opacity)
+        }, 1000)
+      }
+    } catch(e) {}
+  }
+
+  function raDeactivateGlow() {
+    clearInterval(RA.glowTimer)
+    if (!map) return
+    try {
+      if (map.getLayer('walk-route-line')) {
+        map.setPaintProperty('walk-route-line', 'line-width',   3.5)
+        map.setPaintProperty('walk-route-line', 'line-opacity', 0.4)
+        map.setPaintProperty('walk-route-line', 'line-color',   RA_INACTIVE_COLOR)
+      }
+      if (map.getLayer('walk-route-glow')) {
+        map.setPaintProperty('walk-route-glow', 'line-width',   10)
+        map.setPaintProperty('walk-route-glow', 'line-opacity', 0.08)
+        map.setPaintProperty('walk-route-glow', 'line-blur',    6)
+      }
+    } catch(e) {}
+  }
+
+  // ── 2. PIN PULSE ──────────────────────────────────────────
+  function raStartPinPulse(listingId) {
+    if (RA.reducedMotion) return
+    const m = activeMarkers.find(m => m.id == listingId)
+    if (!m) return
+    m.el.classList.add('pin-active-pulse')
+  }
+
+  function raStopPinPulse(listingId) {
+    const m = activeMarkers.find(m => m.id == listingId)
+    if (m) m.el.classList.remove('pin-active-pulse')
+  }
+
+  function raStopAllPinPulses() {
+    activeMarkers.forEach(m => m.el.classList.remove('pin-active-pulse'))
+  }
+
+  // ── 3. ROUTE INFO LABEL ───────────────────────────────────
+  // Shows a floating pill near the bottom with time, distance, price
+  function raShowRouteLabel(score, listing) {
+    const el = document.getElementById('route-info-label')
+    if (!el) return
+    document.getElementById('ril-time').textContent  = fmtDur(score.durationS)
+    document.getElementById('ril-dist').textContent  = fmtDist(score.distanceM)
+    const price = listing ? ('$' + (listing.price_hourly || 0).toFixed(0) + '/hr') : ''
+    document.getElementById('ril-price').textContent = price
+    // Re-trigger animation by removing + re-adding class
+    el.classList.remove('hidden')
+    // Force reflow to restart CSS animation
+    void el.offsetWidth
+    el.style.animation = 'none'
+    void el.offsetWidth
+    el.style.animation = ''
+  }
+
+  function raHideRouteLabel() {
+    const el = document.getElementById('route-info-label')
+    if (el) el.classList.add('hidden')
+  }
+
+  // ── 4. CHIP FLASH ─────────────────────────────────────────
+  function raFlashChip() {
+    const chip = document.querySelector('.ws-chip-route')
+    if (!chip) return
+    chip.classList.remove('chip-selected')
+    void chip.offsetWidth  // reflow
+    chip.classList.add('chip-selected')
+    setTimeout(() => chip.classList.remove('chip-selected'), 600)
+  }
+
+  // ── 5. ORCHESTRATOR: activate/deactivate ──────────────────
+  // Call this whenever a route becomes the "selected" route.
+  function raActivateRoute(listingId, score, listing) {
+    // Deactivate previous if different
+    if (RA.activeListingId && RA.activeListingId !== listingId) {
+      raStopPinPulse(RA.activeListingId)
+    }
+    RA.activeListingId = listingId
+
+    // GPU-accelerated animations (will-change set via CSS)
+    raActivateGlow()
+    raStartPinPulse(listingId)
+    raShowRouteLabel(score, listing)
+    raFlashChip()
+  }
+
+  function raDeactivateRoute() {
+    raDeactivateGlow()
+    raStopAllPinPulses()
+    raHideRouteLabel()
+    RA.activeListingId = null
+  }
 
   // Format meters → human string
   function fmtDist(m) {
@@ -748,6 +1009,19 @@ searchPage.get('/', async (c) => {
     const urlQ = new URLSearchParams(window.location.search)
     const qVal = urlQ.get('q') || urlQ.get('city') || ''
     if (qVal) document.getElementById('search-input').value = qVal
+
+    // ── Route chip tap: re-trigger animations if chip is tapped while route showing ──
+    const routeChipEl = document.getElementById('walk-route-panel')
+    if (routeChipEl) {
+      routeChipEl.addEventListener('click', (e) => {
+        // Don't re-trigger if the close button was clicked
+        if (e.target.closest('.ws-chip-close')) return
+        if (WS.activeRoute) {
+          const listing = allListings.find(l => l.id == WS.activeRoute.listingId)
+          raActivateRoute(WS.activeRoute.listingId, WS.activeRoute, listing)
+        }
+      })
+    }
 
     // Fetch Mapbox token then start map (non-blocking relative to listing fetch)
     try {
@@ -1744,19 +2018,19 @@ searchPage.get('/', async (c) => {
     if (!map || !score.geometry) return
     clearWalkRoute()
     WS.activeRoute = { listingId, ...score }
-    // Add route source + layer
+    // Add route source + layers (start inactive — raActivateRoute will brighten them)
     try {
       if (map.getSource('walk-route')) map.removeSource('walk-route')
       if (map.getLayer('walk-route-line')) map.removeLayer('walk-route-line')
       if (map.getLayer('walk-route-glow')) map.removeLayer('walk-route-glow')
     } catch(e) {}
     map.addSource('walk-route', { type: 'geojson', data: { type: 'Feature', geometry: score.geometry } })
-    // Glow layer
+    // Glow layer — starts at inactive opacity; raActivateGlow() ramps it up
     map.addLayer({ id: 'walk-route-glow', type: 'line', source: 'walk-route',
-      paint: { 'line-color': '#22c55e', 'line-width': 10, 'line-opacity': 0.2, 'line-blur': 6 } })
-    // Main line
+      paint: { 'line-color': RA_GLOW_COLOR, 'line-width': 10, 'line-opacity': 0.08, 'line-blur': 6 } })
+    // Main line — starts thin/muted; raActivateGlow() makes it bold
     map.addLayer({ id: 'walk-route-line', type: 'line', source: 'walk-route',
-      paint: { 'line-color': '#22c55e', 'line-width': 3.5, 'line-opacity': 0.95,
+      paint: { 'line-color': RA_INACTIVE_COLOR, 'line-width': 3.5, 'line-opacity': 0.4,
                'line-dasharray': [2, 1.5] } })
     // Update compact route chip
     document.getElementById('route-panel-time').textContent = fmtDur(score.durationS)
@@ -1765,10 +2039,17 @@ searchPage.get('/', async (c) => {
     const destLabel = (WS.destName || 'Destination').split(',')[0].trim()
     document.getElementById('route-panel-dest').textContent = destLabel
     document.getElementById('walk-route-panel').classList.remove('hidden')
+
+    // ── Trigger Route Animation Engine ──────────────────────
+    const listing = allListings.find(l => l.id == listingId)
+    // rAF ensures layers are committed to GL before we read them back
+    requestAnimationFrame(() => raActivateRoute(listingId, score, listing))
   }
 
   function clearWalkRoute() {
     if (!map) return
+    // Stop all animations first
+    raDeactivateRoute()
     try {
       if (map.getLayer('walk-route-glow')) map.removeLayer('walk-route-glow')
       if (map.getLayer('walk-route-line')) map.removeLayer('walk-route-line')
