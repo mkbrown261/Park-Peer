@@ -2132,3 +2132,602 @@ hostDashboard.get('/notifications', async (c) => {
   const guardScript = `<script>(function(){ var hasCsrf = document.cookie.split(';').some(function(c){ return c.trim().startsWith('__pp_csrf='); }); if (!hasCsrf) { window.location.replace('/auth/login?reason=auth'); } })();<\/script>`
   return c.html(Layout('Notification Preferences', content, guardScript, navSession))
 })
+
+// ════════════════════════════════════════════════════════════════════════════
+// HOST CONNECT — Stripe Express Onboarding Landing Pages
+// GET /host/connect/onboard   — initiate / resume onboarding
+// GET /host/connect/complete  — return_url after Stripe onboarding
+// GET /host/connect/refresh   — refresh_url if onboarding link expires
+// GET /host/connect/cashout   — host cash-out dashboard
+// ════════════════════════════════════════════════════════════════════════════
+
+hostDashboard.get('/connect/onboard', async (c) => {
+  const session = (c as any).get('user') as any
+  const hostName = session?.fullName || session?.email || 'Host'
+  const navSession = { name: hostName, role: session?.role || 'HOST', isAdmin: (session?.role || '').toUpperCase() === 'ADMIN' }
+  const guardScript = `<script>(function(){ var hasCsrf = document.cookie.split(';').some(function(c){ return c.trim().startsWith('__pp_csrf='); }); if (!hasCsrf) { window.location.replace('/auth/login?reason=auth'); } })();<\/script>`
+  const content = `
+  <div class="max-w-lg mx-auto py-12 px-4">
+    <div class="bg-[#1a1a2e] rounded-2xl p-8 border border-white/10 text-center">
+      <div class="w-16 h-16 bg-indigo-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
+        <i class="fas fa-university text-2xl text-indigo-400"></i>
+      </div>
+      <h1 class="text-2xl font-bold text-white mb-2">Connect Your Bank Account</h1>
+      <p class="text-gray-400 mb-6">Set up payouts via Stripe to receive your earnings directly to your bank account. Takes about 2 minutes.</p>
+      <div id="connect-status" class="mb-5 hidden p-4 rounded-xl text-sm"></div>
+      <div class="mb-6 space-y-3 text-left">
+        <label class="block text-sm text-gray-400 font-medium mb-1">Account Type</label>
+        <div class="flex gap-3">
+          <label class="flex-1 flex items-center gap-3 p-3 rounded-xl border border-white/10 cursor-pointer hover:border-indigo-500/50 transition">
+            <input type="radio" name="biz_type" value="individual" checked class="accent-indigo-500">
+            <div><div class="text-white font-medium text-sm">Individual</div><div class="text-gray-500 text-xs">Personal bank account</div></div>
+          </label>
+          <label class="flex-1 flex items-center gap-3 p-3 rounded-xl border border-white/10 cursor-pointer hover:border-indigo-500/50 transition">
+            <input type="radio" name="biz_type" value="company" class="accent-indigo-500">
+            <div><div class="text-white font-medium text-sm">Business</div><div class="text-gray-500 text-xs">Business bank account</div></div>
+          </label>
+        </div>
+      </div>
+      <button id="start-onboard-btn"
+        class="w-full py-3 px-6 rounded-xl font-semibold text-black bg-[#C6FF00] hover:bg-[#d4ff33] transition flex items-center justify-center gap-2">
+        <i class="fas fa-arrow-right"></i> Start Bank Setup
+      </button>
+      <p class="text-xs text-gray-500 mt-4">Secured by <strong class="text-gray-400">Stripe</strong> — ParkPeer never stores your bank details.</p>
+    </div>
+  </div>
+  <script>
+  document.getElementById('start-onboard-btn').addEventListener('click', async function() {
+    const btn = this;
+    const statusEl = document.getElementById('connect-status');
+    const bizType = document.querySelector('input[name="biz_type"]:checked')?.value || 'individual';
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> Setting up...';
+    statusEl.className = 'mb-5 p-4 rounded-xl text-sm bg-blue-500/10 border border-blue-500/20 text-blue-300';
+    statusEl.textContent = 'Creating your Stripe account...';
+    statusEl.classList.remove('hidden');
+    try {
+      const res = await fetch('/api/connect/onboard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ business_type: bizType })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to start onboarding');
+      if (data.status === 'complete') {
+        statusEl.className = 'mb-5 p-4 rounded-xl text-sm bg-green-500/10 border border-green-500/20 text-green-300';
+        statusEl.textContent = 'Your account is already connected! Redirecting to cash-out...';
+        setTimeout(() => window.location.href = '/host/connect/cashout', 1500);
+        return;
+      }
+      statusEl.textContent = 'Redirecting to Stripe...';
+      window.location.href = data.onboarding_url;
+    } catch(e) {
+      statusEl.className = 'mb-5 p-4 rounded-xl text-sm bg-red-500/10 border border-red-500/20 text-red-300';
+      statusEl.textContent = e.message || 'Something went wrong. Please try again.';
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-arrow-right"></i> Start Bank Setup';
+    }
+  });
+  </script>
+  `
+  return c.html(Layout('Connect Bank Account – ParkPeer', content, guardScript, navSession))
+})
+
+hostDashboard.get('/connect/complete', async (c) => {
+  const session = (c as any).get('user') as any
+  const hostName = session?.fullName || session?.email || 'Host'
+  const navSession = { name: hostName, role: session?.role || 'HOST', isAdmin: (session?.role || '').toUpperCase() === 'ADMIN' }
+  const guardScript = `<script>(function(){ var hasCsrf = document.cookie.split(';').some(function(c){ return c.trim().startsWith('__pp_csrf='); }); if (!hasCsrf) { window.location.replace('/auth/login?reason=auth'); } })();<\/script>`
+  const content = `
+  <div class="max-w-lg mx-auto py-12 px-4">
+    <div class="bg-[#1a1a2e] rounded-2xl p-8 border border-white/10 text-center">
+      <div id="complete-icon" class="w-16 h-16 bg-green-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
+        <i class="fas fa-spinner fa-spin text-2xl text-green-400"></i>
+      </div>
+      <h1 id="complete-title" class="text-2xl font-bold text-white mb-2">Verifying your account...</h1>
+      <p id="complete-msg" class="text-gray-400 mb-6">Checking your Stripe account status.</p>
+      <div id="complete-actions" class="hidden space-y-3">
+        <a href="/host/connect/cashout" class="block w-full py-3 px-6 rounded-xl font-semibold text-black bg-[#C6FF00] hover:bg-[#d4ff33] transition text-center">
+          <i class="fas fa-wallet mr-2"></i> Go to Cash-Out Dashboard
+        </a>
+        <a href="/host" class="block w-full py-3 px-6 rounded-xl font-semibold text-white bg-white/10 hover:bg-white/20 transition text-center">
+          Back to Host Dashboard
+        </a>
+      </div>
+    </div>
+  </div>
+  <script>
+  (async () => {
+    try {
+      const res = await fetch('/api/connect/status');
+      const data = await res.json();
+      const icon = document.getElementById('complete-icon');
+      const title = document.getElementById('complete-title');
+      const msg = document.getElementById('complete-msg');
+      const actions = document.getElementById('complete-actions');
+      if (data.onboarding_status === 'complete' || data.details_submitted) {
+        icon.innerHTML = '<i class="fas fa-check-circle text-3xl text-green-400"></i>';
+        icon.className = 'w-16 h-16 bg-green-500/20 rounded-full flex items-center justify-center mx-auto mb-4';
+        title.textContent = 'Bank Account Connected!';
+        msg.textContent = 'Your account is verified and ready for payouts.';
+      } else if (data.requirements?.currently_due?.length > 0) {
+        icon.innerHTML = '<i class="fas fa-exclamation-triangle text-3xl text-yellow-400"></i>';
+        icon.className = 'w-16 h-16 bg-yellow-500/20 rounded-full flex items-center justify-center mx-auto mb-4';
+        title.textContent = 'More Information Required';
+        msg.textContent = 'Stripe needs a bit more info to complete verification. Please finish the setup.';
+      } else {
+        icon.innerHTML = '<i class="fas fa-clock text-3xl text-blue-400"></i>';
+        icon.className = 'w-16 h-16 bg-blue-500/20 rounded-full flex items-center justify-center mx-auto mb-4';
+        title.textContent = 'Verification In Progress';
+        msg.textContent = 'Your information is being reviewed by Stripe. This usually takes a few minutes.';
+      }
+      actions.classList.remove('hidden');
+    } catch(e) {
+      document.getElementById('complete-title').textContent = 'Setup Complete';
+      document.getElementById('complete-msg').textContent = 'You can now access your cash-out dashboard.';
+      document.getElementById('complete-actions').classList.remove('hidden');
+    }
+  })();
+  </script>
+  `
+  return c.html(Layout('Onboarding Complete – ParkPeer', content, guardScript, navSession))
+})
+
+hostDashboard.get('/connect/refresh', async (c) => {
+  const session = (c as any).get('user') as any
+  const hostName = session?.fullName || session?.email || 'Host'
+  const navSession = { name: hostName, role: session?.role || 'HOST', isAdmin: (session?.role || '').toUpperCase() === 'ADMIN' }
+  const guardScript = `<script>(function(){ var hasCsrf = document.cookie.split(';').some(function(c){ return c.trim().startsWith('__pp_csrf='); }); if (!hasCsrf) { window.location.replace('/auth/login?reason=auth'); } })();<\/script>`
+  const content = `
+  <div class="max-w-lg mx-auto py-12 px-4">
+    <div class="bg-[#1a1a2e] rounded-2xl p-8 border border-white/10 text-center">
+      <div class="w-16 h-16 bg-yellow-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
+        <i class="fas fa-sync-alt text-2xl text-yellow-400"></i>
+      </div>
+      <h1 class="text-2xl font-bold text-white mb-2">Session Expired</h1>
+      <p class="text-gray-400 mb-6">Your onboarding link has expired. Click below to generate a fresh one.</p>
+      <button onclick="window.location.href='/host/connect/onboard'"
+        class="w-full py-3 px-6 rounded-xl font-semibold text-black bg-[#C6FF00] hover:bg-[#d4ff33] transition">
+        <i class="fas fa-redo mr-2"></i> Restart Onboarding
+      </button>
+    </div>
+  </div>`
+  return c.html(Layout('Session Expired – ParkPeer', content, guardScript, navSession))
+})
+
+
+hostDashboard.get('/connect/cashout', async (c) => {
+  const session = (c as any).get('user') as any
+  const hostName = session?.fullName || session?.email || 'Host'
+  const navSession = { name: hostName, role: session?.role || 'HOST', isAdmin: (session?.role || '').toUpperCase() === 'ADMIN' }
+  const guardScript = `<script>(function(){ var hasCsrf = document.cookie.split(';').some(function(c){ return c.trim().startsWith('__pp_csrf='); }); if (!hasCsrf) { window.location.replace('/auth/login?reason=auth'); } })();<\/script>`
+
+  const content = `
+  <div class="max-w-5xl mx-auto py-8 px-4 space-y-6">
+
+    <!-- Page Header -->
+    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+      <div>
+        <h1 class="text-2xl font-bold text-white flex items-center gap-2">
+          <i class="fas fa-wallet text-[#C6FF00]"></i> Cash-Out Dashboard
+        </h1>
+        <p class="text-gray-400 text-sm mt-1">Manage your earnings and withdraw to your bank account</p>
+      </div>
+      <div class="flex gap-2">
+        <button id="refresh-btn" onclick="loadAll()" class="px-4 py-2 rounded-xl text-sm bg-white/10 hover:bg-white/20 text-white transition">
+          <i class="fas fa-sync-alt mr-1"></i> Refresh
+        </button>
+        <a href="/host" class="px-4 py-2 rounded-xl text-sm bg-white/10 hover:bg-white/20 text-white transition">
+          <i class="fas fa-arrow-left mr-1"></i> Dashboard
+        </a>
+      </div>
+    </div>
+
+    <!-- Connect Status Banner -->
+    <div id="connect-banner" class="hidden p-4 rounded-xl border text-sm flex items-start gap-3">
+      <i id="banner-icon" class="fas fa-info-circle mt-0.5 text-lg"></i>
+      <div>
+        <div id="banner-title" class="font-semibold"></div>
+        <div id="banner-msg" class="text-xs mt-0.5 opacity-80"></div>
+        <a id="banner-cta" href="#" class="inline-block mt-2 text-xs font-semibold underline hidden"></a>
+      </div>
+    </div>
+
+    <!-- Balance Cards -->
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-4" id="balance-cards">
+      <div class="bg-[#1a1a2e] rounded-2xl p-5 border border-white/10">
+        <div class="text-gray-400 text-xs mb-1">Available Balance</div>
+        <div id="bal-available" class="text-2xl font-bold text-[#C6FF00]">–</div>
+        <div class="text-gray-500 text-xs mt-1">Ready to withdraw</div>
+      </div>
+      <div class="bg-[#1a1a2e] rounded-2xl p-5 border border-white/10">
+        <div class="text-gray-400 text-xs mb-1">Pending</div>
+        <div id="bal-pending" class="text-2xl font-bold text-white">–</div>
+        <div class="text-gray-500 text-xs mt-1">In transit from Stripe</div>
+      </div>
+      <div class="bg-[#1a1a2e] rounded-2xl p-5 border border-white/10">
+        <div class="text-gray-400 text-xs mb-1">Total Earned</div>
+        <div id="bal-earned" class="text-2xl font-bold text-white">–</div>
+        <div class="text-gray-500 text-xs mt-1">All time (net)</div>
+      </div>
+      <div class="bg-[#1a1a2e] rounded-2xl p-5 border border-white/10">
+        <div class="text-gray-400 text-xs mb-1">Total Paid Out</div>
+        <div id="bal-paidout" class="text-2xl font-bold text-white">–</div>
+        <div class="text-gray-500 text-xs mt-1">Settled to bank</div>
+      </div>
+    </div>
+
+    <!-- Cash-Out Panel -->
+    <div class="grid lg:grid-cols-2 gap-6">
+
+      <!-- Manual Cash-Out -->
+      <div class="bg-[#1a1a2e] rounded-2xl p-6 border border-white/10">
+        <h2 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+          <i class="fas fa-money-bill-wave text-[#C6FF00]"></i> Manual Cash-Out
+        </h2>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-xs text-gray-400 mb-1">Amount to withdraw</label>
+            <div class="relative">
+              <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">$</span>
+              <input id="payout-amount" type="number" step="0.01" min="1"
+                placeholder="Enter amount (or leave blank for full balance)"
+                class="w-full bg-white/5 border border-white/10 rounded-xl px-8 py-3 text-white text-sm focus:outline-none focus:border-indigo-500/50 placeholder-gray-600">
+            </div>
+            <p class="text-xs text-gray-500 mt-1">Leave blank to withdraw full available balance</p>
+          </div>
+
+          <!-- Confirmation checkbox -->
+          <label class="flex items-start gap-3 cursor-pointer group">
+            <input type="checkbox" id="payout-confirm" class="w-4 h-4 mt-0.5 accent-indigo-500 flex-shrink-0">
+            <span class="text-xs text-gray-400 group-hover:text-gray-300 transition">
+              I confirm I want to withdraw earnings to my connected bank account. This action cannot be undone once processing starts.
+            </span>
+          </label>
+
+          <button id="payout-btn" disabled
+            class="w-full py-3 px-6 rounded-xl font-semibold text-black bg-[#C6FF00] hover:bg-[#d4ff33] transition disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2">
+            <i class="fas fa-arrow-right"></i> Request Cash-Out
+          </button>
+
+          <div id="payout-result" class="hidden p-4 rounded-xl text-sm"></div>
+        </div>
+      </div>
+
+      <!-- Automatic Schedule -->
+      <div class="bg-[#1a1a2e] rounded-2xl p-6 border border-white/10">
+        <h2 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+          <i class="fas fa-calendar-alt text-indigo-400"></i> Automatic Payouts
+        </h2>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-xs text-gray-400 mb-1">Payout Frequency</label>
+            <select id="sched-interval"
+              class="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-3 text-white text-sm focus:outline-none focus:border-indigo-500/50">
+              <option value="manual">Manual (I'll do it myself)</option>
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly (every Friday)</option>
+              <option value="monthly">Monthly (1st of month)</option>
+            </select>
+          </div>
+          <div id="weekly-opts" class="hidden">
+            <label class="block text-xs text-gray-400 mb-1">Day of week</label>
+            <select id="sched-weekly-anchor"
+              class="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-3 text-white text-sm focus:outline-none focus:border-indigo-500/50">
+              <option value="monday">Monday</option><option value="tuesday">Tuesday</option>
+              <option value="wednesday">Wednesday</option><option value="thursday">Thursday</option>
+              <option value="friday" selected>Friday</option><option value="saturday">Saturday</option><option value="sunday">Sunday</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-1">Minimum payout amount ($)</label>
+            <div class="relative">
+              <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">$</span>
+              <input id="sched-min" type="number" step="1" min="1" value="10"
+                class="w-full bg-white/5 border border-white/10 rounded-xl px-8 py-3 text-white text-sm focus:outline-none focus:border-indigo-500/50">
+            </div>
+          </div>
+          <button id="sched-save-btn"
+            class="w-full py-3 px-6 rounded-xl font-semibold text-white bg-indigo-600 hover:bg-indigo-500 transition flex items-center justify-center gap-2">
+            <i class="fas fa-save"></i> Save Schedule
+          </button>
+          <div id="sched-result" class="hidden p-3 rounded-xl text-xs"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Payout History + Earnings Tabs -->
+    <div class="bg-[#1a1a2e] rounded-2xl border border-white/10 overflow-hidden">
+      <div class="flex border-b border-white/10">
+        <button onclick="switchTab('payouts')" id="tab-payouts"
+          class="px-5 py-3 text-sm font-medium text-[#C6FF00] border-b-2 border-[#C6FF00]">
+          <i class="fas fa-history mr-1"></i> Payout History
+        </button>
+        <button onclick="switchTab('earnings')" id="tab-earnings"
+          class="px-5 py-3 text-sm font-medium text-gray-400 hover:text-white transition">
+          <i class="fas fa-chart-bar mr-1"></i> Earnings Breakdown
+        </button>
+        <button onclick="switchTab('account')" id="tab-account"
+          class="px-5 py-3 text-sm font-medium text-gray-400 hover:text-white transition">
+          <i class="fas fa-cog mr-1"></i> Account Settings
+        </button>
+      </div>
+
+      <!-- Payouts Tab -->
+      <div id="panel-payouts" class="p-5">
+        <div class="flex items-center justify-between mb-4">
+          <div class="flex gap-2 text-xs">
+            <button onclick="filterPayouts('all')" class="px-3 py-1 rounded-lg bg-indigo-600 text-white" id="pf-all">All</button>
+            <button onclick="filterPayouts('paid')" class="px-3 py-1 rounded-lg bg-white/10 text-gray-400 hover:text-white" id="pf-paid">Paid</button>
+            <button onclick="filterPayouts('pending')" class="px-3 py-1 rounded-lg bg-white/10 text-gray-400 hover:text-white" id="pf-pending">Pending</button>
+            <button onclick="filterPayouts('failed')" class="px-3 py-1 rounded-lg bg-white/10 text-gray-400 hover:text-white" id="pf-failed">Failed</button>
+          </div>
+        </div>
+        <div id="payouts-table" class="overflow-x-auto">
+          <div class="text-gray-500 text-sm text-center py-8"><i class="fas fa-spinner fa-spin mr-2"></i>Loading...</div>
+        </div>
+      </div>
+
+      <!-- Earnings Tab -->
+      <div id="panel-earnings" class="p-5 hidden">
+        <div id="earnings-summary" class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5"></div>
+        <div id="earnings-table" class="overflow-x-auto">
+          <div class="text-gray-500 text-sm text-center py-8"><i class="fas fa-spinner fa-spin mr-2"></i>Loading...</div>
+        </div>
+      </div>
+
+      <!-- Account Settings Tab -->
+      <div id="panel-account" class="p-5 hidden">
+        <div class="space-y-4">
+          <div class="p-4 rounded-xl bg-white/5 border border-white/10">
+            <div class="flex items-center justify-between">
+              <div>
+                <div class="text-white font-medium text-sm">Stripe Express Account</div>
+                <div id="acct-stripe-id" class="text-gray-500 text-xs mt-0.5">Loading...</div>
+              </div>
+              <span id="acct-badge" class="px-3 py-1 rounded-full text-xs font-medium bg-gray-500/20 text-gray-400">–</span>
+            </div>
+          </div>
+          <div class="p-4 rounded-xl bg-white/5 border border-white/10">
+            <div class="text-white font-medium text-sm mb-2">Requirements</div>
+            <div id="acct-requirements" class="text-gray-400 text-xs">Loading...</div>
+          </div>
+          <button id="stripe-dashboard-btn"
+            class="w-full py-3 px-6 rounded-xl font-semibold text-white bg-[#635bff] hover:bg-[#7b74ff] transition flex items-center justify-center gap-2">
+            <i class="fab fa-stripe mr-1"></i> Open Stripe Express Dashboard
+          </button>
+          <a href="/host/connect/onboard"
+            class="block w-full py-3 px-6 rounded-xl font-semibold text-white bg-white/10 hover:bg-white/20 transition text-center text-sm">
+            <i class="fas fa-edit mr-1"></i> Update Bank Account / Identity
+          </a>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+  const fmt = v => '$' + (v||0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g,',');
+  let currentFilter = 'all';
+
+  function switchTab(tab) {
+    ['payouts','earnings','account'].forEach(t => {
+      document.getElementById('panel-'+t).classList.toggle('hidden', t !== tab);
+      const btn = document.getElementById('tab-'+t);
+      if (t === tab) { btn.className = 'px-5 py-3 text-sm font-medium text-[#C6FF00] border-b-2 border-[#C6FF00]'; }
+      else           { btn.className = 'px-5 py-3 text-sm font-medium text-gray-400 hover:text-white transition'; }
+    });
+    if (tab === 'earnings' && !document.getElementById('earnings-table').dataset.loaded) loadEarnings();
+    if (tab === 'account'  && !document.getElementById('acct-stripe-id').dataset.loaded) loadAccount();
+  }
+
+  function statusBadge(s) {
+    const map = { paid:'bg-green-500/20 text-green-400', in_transit:'bg-blue-500/20 text-blue-400',
+      pending:'bg-yellow-500/20 text-yellow-400', requested:'bg-yellow-500/20 text-yellow-300',
+      failed:'bg-red-500/20 text-red-400', canceled:'bg-gray-500/20 text-gray-400' };
+    return '<span class="px-2 py-0.5 rounded-full text-xs font-medium ' + (map[s]||'bg-gray-500/20 text-gray-400') + '">' + (s||'–') + '</span>';
+  }
+
+  async function loadBalance() {
+    try {
+      const r = await fetch('/api/connect/balance');
+      const d = await r.json();
+      if (!r.ok) { showBanner('warning', d.error || 'Could not load balance', '', d.payouts_enabled === false ? 'Complete onboarding' : '', '/host/connect/onboard'); return; }
+      document.getElementById('bal-available').textContent = fmt(d.available_usd);
+      document.getElementById('bal-pending').textContent   = fmt(d.pending_usd);
+      document.getElementById('bal-earned').textContent    = fmt(d.total_earned);
+      document.getElementById('bal-paidout').textContent   = fmt(d.total_paid_out);
+      if (!d.payouts_enabled) showBanner('warning','Payouts not yet enabled','Complete your Stripe verification to enable withdrawals.','Finish Setup','/host/connect/onboard');
+    } catch(e) { showBanner('error','Could not load balance. Check your connection.',''); }
+  }
+
+  function showBanner(type, title, msg, ctaText, ctaHref) {
+    const banner = document.getElementById('connect-banner');
+    const clsMap = { success:'bg-green-500/10 border-green-500/30 text-green-300', warning:'bg-yellow-500/10 border-yellow-500/30 text-yellow-300', error:'bg-red-500/10 border-red-500/30 text-red-300', info:'bg-blue-500/10 border-blue-500/30 text-blue-300' };
+    const iconMap = { success:'fa-check-circle', warning:'fa-exclamation-triangle', error:'fa-times-circle', info:'fa-info-circle' };
+    banner.className = 'p-4 rounded-xl border text-sm flex items-start gap-3 ' + (clsMap[type]||clsMap.info);
+    document.getElementById('banner-icon').className = 'fas ' + (iconMap[type]||iconMap.info) + ' mt-0.5 text-lg';
+    document.getElementById('banner-title').textContent = title;
+    document.getElementById('banner-msg').textContent   = msg || '';
+    const cta = document.getElementById('banner-cta');
+    if (ctaText) { cta.textContent = ctaText; cta.href = ctaHref || '#'; cta.classList.remove('hidden'); }
+    else cta.classList.add('hidden');
+    banner.classList.remove('hidden');
+  }
+
+  async function loadPayouts(filter) {
+    currentFilter = filter || currentFilter;
+    const qs = currentFilter === 'all' ? '' : '?status=' + currentFilter;
+    try {
+      const r  = await fetch('/api/connect/payouts' + qs);
+      const d  = await r.json();
+      const tbl = document.getElementById('payouts-table');
+      if (!r.ok || !d.payouts?.length) { tbl.innerHTML = '<div class="text-gray-500 text-sm text-center py-10">No payouts found.</div>'; return; }
+      tbl.innerHTML = '<table class="w-full text-sm"><thead><tr class="text-left text-gray-500 border-b border-white/5"><th class="pb-2 pr-4">Date</th><th class="pb-2 pr-4">Amount</th><th class="pb-2 pr-4">Status</th><th class="pb-2 pr-4">Est. Arrival</th><th class="pb-2">Payout ID</th></tr></thead><tbody>' +
+        d.payouts.map(p => '<tr class="border-b border-white/5 hover:bg-white/5 transition"><td class="py-3 pr-4 text-gray-300">' + new Date(p.requested_at||p.created_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) + '</td><td class="py-3 pr-4 font-semibold text-white">' + fmt(p.amount_usd) + '</td><td class="py-3 pr-4">' + statusBadge(p.status) + '</td><td class="py-3 pr-4 text-gray-400 text-xs">' + (p.arrival_date_formatted||'–') + '</td><td class="py-3 text-gray-600 text-xs font-mono">' + (p.stripe_payout_id||'pending').slice(0,18) + (p.status === 'pending'||p.status === 'requested' ? '<button onclick="cancelPayout('+p.id+')" class="ml-2 text-red-400 hover:text-red-300 text-xs">Cancel</button>' : '') + '</td></tr>').join('') +
+        '</tbody></table>';
+    } catch(e) { document.getElementById('payouts-table').innerHTML = '<div class="text-red-400 text-sm text-center py-8">Failed to load payouts.</div>'; }
+  }
+
+  function filterPayouts(f) {
+    ['all','paid','pending','failed'].forEach(k => {
+      const btn = document.getElementById('pf-'+k);
+      btn.className = k === f ? 'px-3 py-1 rounded-lg bg-indigo-600 text-white text-xs' : 'px-3 py-1 rounded-lg bg-white/10 text-gray-400 hover:text-white text-xs';
+    });
+    loadPayouts(f);
+  }
+
+  async function cancelPayout(id) {
+    if (!confirm('Cancel this payout? Funds will remain in your Stripe balance.')) return;
+    try {
+      const r = await fetch('/api/connect/payout/'+id+'/cancel', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({}) });
+      const d = await r.json();
+      if (r.ok) { showBanner('success','Payout cancelled.',''); loadPayouts(); loadBalance(); }
+      else alert(d.error || 'Failed to cancel.');
+    } catch(e) { alert('Network error.'); }
+  }
+
+  async function loadEarnings() {
+    try {
+      const r = await fetch('/api/connect/earnings?days=90');
+      const d = await r.json();
+      document.getElementById('earnings-table').dataset.loaded = '1';
+      const s = d.summary || {};
+      document.getElementById('earnings-summary').innerHTML =
+        [['Gross Revenue', s.gross_revenue,'text-white'],['Platform Fees (15%)', s.platform_fees,'text-red-400'],
+         ['Net Earnings', s.net_earnings,'text-[#C6FF00]'],['Transferred Out', s.transferred_out,'text-blue-400']].map(
+          ([label,val,cls]) => '<div class="bg-white/5 rounded-xl p-3"><div class="text-gray-500 text-xs">'+label+'</div><div class="'+cls+' font-bold mt-1">'+fmt(val)+'</div></div>'
+        ).join('');
+      const rows = d.earnings || [];
+      if (!rows.length) { document.getElementById('earnings-table').innerHTML = '<div class="text-gray-500 text-sm text-center py-10">No earnings in the last 90 days.</div>'; return; }
+      document.getElementById('earnings-table').innerHTML = '<table class="w-full text-sm"><thead><tr class="text-left text-gray-500 border-b border-white/5"><th class="pb-2 pr-3">Date</th><th class="pb-2 pr-3">Listing</th><th class="pb-2 pr-3">Gross</th><th class="pb-2 pr-3">Fee (15%)</th><th class="pb-2 pr-3">Net</th><th class="pb-2">Transfer</th></tr></thead><tbody>' +
+        rows.map(r => '<tr class="border-b border-white/5 hover:bg-white/5"><td class="py-3 pr-3 text-gray-400 text-xs">' + new Date(r.created_at).toLocaleDateString('en-US',{month:'short',day:'numeric'}) + '</td><td class="py-3 pr-3 text-gray-300 text-xs truncate max-w-[120px]">' + (r.listing_title||'–') + '</td><td class="py-3 pr-3 text-white">' + fmt(r.gross) + '</td><td class="py-3 pr-3 text-red-400">' + fmt(r.platform_fee) + '</td><td class="py-3 pr-3 text-[#C6FF00] font-semibold">' + fmt(r.net) + '</td><td class="py-3 text-xs">' + (r.transfer_id ? '<span class="text-green-400"><i class="fas fa-check mr-1"></i>Sent</span>' : '<span class="text-yellow-400">Pending</span>') + '</td></tr>').join('') + '</tbody></table>';
+    } catch(e) { document.getElementById('earnings-table').innerHTML = '<div class="text-red-400 text-sm text-center py-8">Failed to load earnings.</div>'; }
+  }
+
+  async function loadAccount() {
+    try {
+      const r = await fetch('/api/connect/status');
+      const d = await r.json();
+      document.getElementById('acct-stripe-id').textContent = d.account_id || 'Not connected';
+      document.getElementById('acct-stripe-id').dataset.loaded = '1';
+      const badge = document.getElementById('acct-badge');
+      const bmap  = { complete:'bg-green-500/20 text-green-400', in_progress:'bg-yellow-500/20 text-yellow-400', restricted:'bg-red-500/20 text-red-400', pending:'bg-gray-500/20 text-gray-400', not_started:'bg-gray-500/20 text-gray-400' };
+      badge.className = 'px-3 py-1 rounded-full text-xs font-medium ' + (bmap[d.onboarding_status]||bmap.pending);
+      badge.textContent = d.onboarding_status || 'unknown';
+      const req = d.requirements?.currently_due || [];
+      document.getElementById('acct-requirements').innerHTML = req.length
+        ? '<ul class="list-disc list-inside space-y-1">' + req.map(r => '<li>' + r + '</li>').join('') + '</ul>'
+        : '<span class="text-green-400"><i class="fas fa-check-circle mr-1"></i>All requirements met</span>';
+    } catch {}
+  }
+
+  async function loadSchedule() {
+    try {
+      const r = await fetch('/api/connect/schedule');
+      const d = await r.json();
+      document.getElementById('sched-interval').value = d.interval || 'manual';
+      if (d.weekly_anchor) document.getElementById('sched-weekly-anchor').value = d.weekly_anchor;
+      if (d.minimum_payout_usd) document.getElementById('sched-min').value = d.minimum_payout_usd;
+      toggleWeeklyOpts();
+    } catch {}
+  }
+
+  function toggleWeeklyOpts() {
+    const val = document.getElementById('sched-interval').value;
+    document.getElementById('weekly-opts').classList.toggle('hidden', val !== 'weekly');
+  }
+
+  async function loadAll() {
+    await loadBalance();
+    await loadPayouts();
+    await loadSchedule();
+  }
+
+  // Payout confirmation toggle
+  document.getElementById('payout-confirm').addEventListener('change', function() {
+    document.getElementById('payout-btn').disabled = !this.checked;
+  });
+  document.getElementById('sched-interval').addEventListener('change', toggleWeeklyOpts);
+
+  // Cash-out button
+  document.getElementById('payout-btn').addEventListener('click', async function() {
+    const btn = this;
+    const amtInput = document.getElementById('payout-amount').value;
+    const result   = document.getElementById('payout-result');
+    const body = { payout_confirmed: true };
+    if (amtInput) body.amount_cents = Math.round(parseFloat(amtInput) * 100);
+
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> Processing...';
+
+    try {
+      const r = await fetch('/api/connect/payout', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const d = await r.json();
+      if (r.ok && d.success) {
+        result.className = 'p-4 rounded-xl text-sm bg-green-500/10 border border-green-500/20 text-green-300';
+        result.innerHTML = '<i class="fas fa-check-circle mr-2"></i>' + d.message;
+        result.classList.remove('hidden');
+        document.getElementById('payout-confirm').checked = false;
+        document.getElementById('payout-amount').value = '';
+        setTimeout(() => { loadBalance(); loadPayouts(); }, 1500);
+      } else {
+        result.className = 'p-4 rounded-xl text-sm bg-red-500/10 border border-red-500/20 text-red-300';
+        result.innerHTML = '<i class="fas fa-exclamation-triangle mr-2"></i>' + (d.error || 'Payout failed. Please try again.');
+        result.classList.remove('hidden');
+        btn.disabled = false;
+      }
+    } catch(e) {
+      result.className = 'p-4 rounded-xl text-sm bg-red-500/10 border border-red-500/20 text-red-300';
+      result.innerHTML = '<i class="fas fa-exclamation-triangle mr-2"></i> Network error. Please try again.';
+      result.classList.remove('hidden');
+      btn.disabled = false;
+    }
+    btn.innerHTML = '<i class="fas fa-arrow-right"></i> Request Cash-Out';
+  });
+
+  // Schedule save
+  document.getElementById('sched-save-btn').addEventListener('click', async function() {
+    const btn = this;
+    const res = document.getElementById('sched-result');
+    btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> Saving...';
+    try {
+      const r = await fetch('/api/connect/schedule', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({
+          interval: document.getElementById('sched-interval').value,
+          weekly_anchor: document.getElementById('sched-weekly-anchor').value,
+          minimum_payout_cents: Math.round(parseFloat(document.getElementById('sched-min').value||'10') * 100),
+        })
+      });
+      const d = await r.json();
+      if (r.ok) { res.className = 'p-3 rounded-xl text-xs bg-green-500/10 border border-green-500/20 text-green-300'; res.textContent = 'Schedule saved!'; }
+      else       { res.className = 'p-3 rounded-xl text-xs bg-red-500/10 border border-red-500/20 text-red-300'; res.textContent = d.error || 'Failed to save.'; }
+      res.classList.remove('hidden');
+      setTimeout(() => res.classList.add('hidden'), 3000);
+    } catch { res.textContent = 'Network error.'; res.classList.remove('hidden'); }
+    btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Save Schedule';
+  });
+
+  // Stripe dashboard button
+  document.getElementById('stripe-dashboard-btn').addEventListener('click', async function() {
+    this.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> Opening...';
+    try {
+      const r = await fetch('/api/connect/dashboard-link');
+      const d = await r.json();
+      if (r.ok && d.url) { window.open(d.url, '_blank'); }
+      else alert(d.error || 'Failed to open dashboard. Ensure onboarding is complete.');
+    } catch { alert('Network error. Please try again.'); }
+    this.innerHTML = '<i class="fab fa-stripe mr-1"></i> Open Stripe Express Dashboard';
+  });
+
+  // Boot
+  loadAll();
+  </script>
+  `
+  return c.html(Layout('Cash-Out Dashboard – ParkPeer', content, guardScript, navSession))
+})
+

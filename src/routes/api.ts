@@ -2102,7 +2102,177 @@ apiRoutes.post('/webhooks/stripe', async (c) => {
       break
     }
     default:
-      console.log(`[Webhook] Unhandled event: ${event.type}`)
+      // ── Stripe Connect account events ──────────────────────────────────
+      // These arrive with a Stripe-Account header on the webhook payload.
+      // We log them to stripe_connect_events for auditing/debugging.
+      if (event.type.startsWith('account.') || event.type.startsWith('person.') ||
+          event.type.startsWith('capability.') ||
+          (event.type.startsWith('payout.') && event.account)) {
+        const connectedAccountId = event.account as string | undefined
+        const obj = event.data?.object as any
+
+        try {
+          // Log the event
+          if (db) {
+            await db.prepare(`
+              INSERT OR IGNORE INTO stripe_connect_events
+                (stripe_event_id, event_type, connected_account_id, stripe_payout_id,
+                 host_id, payload_json, processed, created_at)
+              SELECT ?, ?, ?,
+                     CASE WHEN ? LIKE 'po_%' THEN ? ELSE NULL END,
+                     sca.user_id,
+                     ?, 1, datetime('now')
+              FROM stripe_connect_accounts sca
+              WHERE sca.stripe_account_id = ?
+              LIMIT 1
+            `).bind(
+              event.id, event.type, connectedAccountId || null,
+              obj?.id || '', obj?.id || '',
+              JSON.stringify(event.data?.object || {}),
+              connectedAccountId || ''
+            ).run().catch(() => {
+              // If no matching account, still log without host_id
+              if (db) {
+                db.prepare(`
+                  INSERT OR IGNORE INTO stripe_connect_events
+                    (stripe_event_id, event_type, connected_account_id, stripe_payout_id,
+                     payload_json, processed, created_at)
+                  VALUES (?, ?, ?, ?, ?, 1, datetime('now'))
+                `).bind(
+                  event.id, event.type, connectedAccountId || null,
+                  (obj?.id || '').startsWith('po_') ? obj.id : null,
+                  JSON.stringify(event.data?.object || {})
+                ).run().catch(() => {})
+              }
+            })
+
+            // ── account.updated: sync onboarding status ─────────────────
+            if (event.type === 'account.updated' && connectedAccountId) {
+              const acct = event.data.object as any
+              const newStatus = acct.details_submitted ? 'complete'
+                : (acct.requirements?.currently_due?.length > 0) ? 'restricted'
+                : 'in_progress'
+
+              await db.prepare(`
+                UPDATE stripe_connect_accounts
+                SET onboarding_status = ?,
+                    charges_enabled   = ?,
+                    payouts_enabled   = ?,
+                    details_submitted = ?,
+                    requirements_json = ?,
+                    updated_at        = datetime('now')
+                WHERE stripe_account_id = ?
+              `).bind(
+                newStatus,
+                acct.charges_enabled ? 1 : 0,
+                acct.payouts_enabled ? 1 : 0,
+                acct.details_submitted ? 1 : 0,
+                JSON.stringify(acct.requirements || {}),
+                connectedAccountId
+              ).run()
+
+              // Sync payout_info
+              await db.prepare(`
+                UPDATE payout_info
+                SET onboarding_status = ?, payouts_enabled = ?, updated_at = datetime('now')
+                WHERE connect_account_id = ?
+              `).bind(newStatus, acct.payouts_enabled ? 1 : 0, connectedAccountId).run()
+
+              console.log(`[Webhook] account.updated ${connectedAccountId} → ${newStatus}`)
+            }
+
+            // ── payout.paid / payout.failed / payout.updated ───────────────
+            if (['payout.paid','payout.failed','payout.updated','payout.canceled'].includes(event.type)) {
+              const payout = event.data.object as any
+              const stripePayoutId = payout.id as string
+              const newPayoutStatus = payout.status as string  // paid|failed|in_transit|canceled
+
+              await db.prepare(`
+                UPDATE host_payouts
+                SET status       = ?,
+                    failure_code    = ?,
+                    failure_message = ?,
+                    processed_at    = COALESCE(processed_at, datetime('now'))
+                WHERE stripe_payout_id = ?
+              `).bind(
+                newPayoutStatus,
+                payout.failure_code    || null,
+                payout.failure_message || null,
+                stripePayoutId
+              ).run()
+
+              if (event.type === 'payout.paid') {
+                console.log(`[Webhook] Payout settled: ${stripePayoutId} $${payout.amount/100}`)
+                logEvent('info', 'connect.payout_paid', {
+                  payout_id: stripePayoutId, amount: payout.amount/100,
+                  account: connectedAccountId,
+                })
+                // Send host notification for settled payout
+                if (db && connectedAccountId) {
+                  try {
+                    const hostRow = await db.prepare(`
+                      SELECT u.id, u.full_name, u.email, u.phone
+                      FROM stripe_connect_accounts sca
+                      JOIN users u ON u.id = sca.user_id
+                      WHERE sca.stripe_account_id = ? LIMIT 1
+                    `).bind(connectedAccountId).first<any>()
+                    if (hostRow) {
+                      notifyPayoutProcessed(env as any, {
+                        hostId:    hostRow.id,
+                        hostName:  hostRow.full_name || hostRow.email,
+                        hostEmail: hostRow.email,
+                        hostPhone: hostRow.phone || null,
+                        amount:    payout.amount / 100,
+                      }).catch(() => {})
+                    }
+                  } catch {}
+                }
+              } else if (event.type === 'payout.failed') {
+                console.error(`[Webhook] Payout FAILED: ${stripePayoutId} code=${payout.failure_code}`)
+                logEvent('error', 'connect.payout_failed', {
+                  payout_id: stripePayoutId, code: payout.failure_code,
+                  message: payout.failure_message, account: connectedAccountId,
+                })
+                // Increment retry count + notify host of failure
+                if (db) {
+                  try {
+                    await db.prepare(`
+                      UPDATE host_payouts
+                      SET retry_count = retry_count + 1, last_retry_at = datetime('now')
+                      WHERE stripe_payout_id = ?
+                    `).bind(stripePayoutId).run()
+
+                    if (connectedAccountId) {
+                      const hostRow = await db.prepare(`
+                        SELECT u.id, u.full_name, u.email
+                        FROM stripe_connect_accounts sca
+                        JOIN users u ON u.id = sca.user_id
+                        WHERE sca.stripe_account_id = ? LIMIT 1
+                      `).bind(connectedAccountId).first<any>()
+                      if (hostRow && db) {
+                        await db.prepare(`
+                          INSERT INTO notifications (user_id, user_role, type, title, message, created_at)
+                          VALUES (?, 'host', 'payout_failed', '⚠️ Payout Failed',
+                            'Your payout of $' || ROUND(? / 100.0, 2) || ' failed. Reason: ' || ?,
+                            datetime('now'))
+                        `).bind(
+                          hostRow.id,
+                          payout.amount,
+                          payout.failure_message || payout.failure_code || 'Unknown error'
+                        ).run().catch(() => {})
+                      }
+                    }
+                  } catch {}
+                }
+              }
+            }
+          }
+        } catch (we: any) {
+          console.error(`[Webhook] ${event.type} handler error:`, we.message)
+        }
+      } else {
+        console.log(`[Webhook] Unhandled event: ${event.type}`)
+      }
   }
 
   return c.json({ received: true })
