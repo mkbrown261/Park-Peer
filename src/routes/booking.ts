@@ -373,8 +373,10 @@ bookingPage.get('/:id', async (c) => {
           </div>
 
           <!-- Terms -->
-          <label class="flex items-start gap-3 cursor-pointer group">
-            <input type="checkbox" id="terms-check" class="mt-1 accent-indigo-500 w-4 h-4 flex-shrink-0"/>
+          <label class="flex items-start gap-3 cursor-pointer group" id="terms-check-label">
+            <input type="checkbox" id="terms-check"
+              class="mt-1 accent-indigo-500 w-4 h-4 flex-shrink-0"
+              onchange="updateConfirmBtn()"/>
             <p class="text-sm text-gray-400 group-hover:text-gray-300 transition-colors">
               I agree to ParkPeer's
               <a href="/legal/tos" class="text-indigo-400 hover:underline">Terms of Service</a>,
@@ -463,9 +465,9 @@ bookingPage.get('/:id', async (c) => {
 
             <!-- CTA Button -->
             <button onclick="confirmBooking()"
-              class="btn-primary w-full flex items-center justify-center gap-3 py-4 rounded-2xl font-bold text-white text-lg"
+              class="btn-primary w-full flex items-center justify-center gap-3 py-4 rounded-2xl font-bold text-white text-lg transition-all opacity-60"
               id="confirm-btn" disabled>
-              <i class="fas fa-lock"></i>
+              <i class="fas fa-lock" id="confirm-icon"></i>
               <span id="confirm-label">Select a time first</span>
             </button>
             <p class="text-center text-gray-500 text-xs">
@@ -753,14 +755,18 @@ bookingPage.get('/:id', async (c) => {
   }
 
   function resetTimeDisplays() {
-    document.getElementById('start-display').className = 'picker-value placeholder';
-    document.getElementById('start-display').textContent = '— Tap to choose time —';
-    document.getElementById('end-display').className = 'picker-value placeholder';
-    document.getElementById('end-display').textContent = '— Select start first —';
-    document.getElementById('end-picker-btn').disabled = true;
-    document.getElementById('suggestions-row').classList.add('hidden');
-    document.getElementById('duration-summary').classList.add('hidden');
-    document.getElementById('validation-banner').classList.add('hidden');
+    const startDisp = document.getElementById('start-display');
+    const endDisp   = document.getElementById('end-display');
+    const endBtn    = document.getElementById('end-picker-btn');
+    const sugRow    = document.getElementById('suggestions-row');
+    const durSum    = document.getElementById('duration-summary');
+    const valBan    = document.getElementById('validation-banner');
+    if (startDisp) { startDisp.className = 'picker-value placeholder'; startDisp.textContent = '— Tap to choose time —'; }
+    if (endDisp)   { endDisp.className   = 'picker-value placeholder'; endDisp.textContent   = '— Select start first —'; }
+    if (endBtn)    endBtn.disabled = true;
+    if (sugRow)    sugRow.classList.add('hidden');
+    if (durSum)    durSum.classList.add('hidden');
+    if (valBan)    valBan.classList.add('hidden');
     closeTimePicker();
   }
 
@@ -817,7 +823,8 @@ bookingPage.get('/:id', async (c) => {
   }
 
   function closeTimePicker() {
-    document.getElementById('time-picker-popup').classList.add('hidden');
+    const popup = document.getElementById('time-picker-popup');
+    if (popup) popup.classList.add('hidden');
     activePickerMode = null;
   }
 
@@ -1105,12 +1112,18 @@ bookingPage.get('/:id', async (c) => {
   }
 
   function updatePriceFromPricing(pricing) {
-    const hrs = pricing.hours;
-    document.getElementById('rate-label').textContent   = '$' + pricing.rate_per_hour + '/hr × ' + hrs + ' hr' + (hrs !== 1 ? 's' : '');
-    document.getElementById('base-amount').textContent  = '$' + pricing.subtotal.toFixed(2);
-    document.getElementById('fee-amount').textContent   = '$' + pricing.platform_fee.toFixed(2);
-    document.getElementById('total-amount').textContent = '$' + pricing.total.toFixed(2);
-    document.getElementById('confirm-label').textContent = 'Confirm & Pay  $' + pricing.total.toFixed(2);
+    if (!pricing) return;
+    const hrs    = pricing.hours;
+    const rateEl  = document.getElementById('rate-label');
+    const baseEl  = document.getElementById('base-amount');
+    const feeEl   = document.getElementById('fee-amount');
+    const totalEl = document.getElementById('total-amount');
+    if (rateEl)  rateEl.textContent  = '$' + pricing.rate_per_hour + '/hr × ' + hrs + ' hr' + (hrs !== 1 ? 's' : '');
+    if (baseEl)  baseEl.textContent  = '$' + Number(pricing.subtotal).toFixed(2);
+    if (feeEl)   feeEl.textContent   = '$' + Number(pricing.platform_fee).toFixed(2);
+    if (totalEl) totalEl.textContent = '$' + Number(pricing.total).toFixed(2);
+    // confirm-label updated by updateConfirmBtn() to avoid overwrite race conditions
+    updateConfirmBtn();
   }
 
   function updateDurationSummary(pricing, startISO, endISO) {
@@ -1127,27 +1140,49 @@ bookingPage.get('/:id', async (c) => {
   }
 
   function resetPriceBreakdown() {
-    document.getElementById('rate-label').textContent   = 'Rate × hours';
-    document.getElementById('base-amount').textContent  = '—';
-    document.getElementById('fee-amount').textContent   = '—';
-    document.getElementById('total-amount').textContent = '—';
-    document.getElementById('confirm-label').textContent = 'Confirm & Pay';
-    document.getElementById('duration-summary').classList.add('hidden');
+    const rateEl  = document.getElementById('rate-label');
+    const baseEl  = document.getElementById('base-amount');
+    const feeEl   = document.getElementById('fee-amount');
+    const totalEl = document.getElementById('total-amount');
+    const durEl   = document.getElementById('duration-summary');
+    if (rateEl)  rateEl.textContent  = 'Rate × hours';
+    if (baseEl)  baseEl.textContent  = '—';
+    if (feeEl)   feeEl.textContent   = '—';
+    if (totalEl) totalEl.textContent = '—';
+    if (durEl)   durEl.classList.add('hidden');
     lastValidResult = null;
+    updateConfirmBtn();
   }
 
   function updateConfirmBtn() {
-    const ack   = document.getElementById('cancel-ack-checkbox')?.checked;
-    const ready = !!(selectedStartSlot && selectedEndSlot && lastValidResult && ack);
     const btn   = document.getElementById('confirm-btn');
+    const label = document.getElementById('confirm-label');
+    const icon  = document.getElementById('confirm-icon');
+    if (!btn || !label) return;  // null guard
+
+    const termsAck  = !!(document.getElementById('terms-check')?.checked);
+    const cancelAck = !!(document.getElementById('cancel-ack-checkbox')?.checked);
+    const bothAcks  = termsAck && cancelAck;
+
+    // Determine readiness — ordered by booking flow steps
+    const ready = !!(selectedStartSlot && selectedEndSlot && lastValidResult && bothAcks);
     btn.disabled = !ready;
 
-    const label = document.getElementById('confirm-label');
-    if (!ready) {
+    if (ready) {
+      // Show price in button label
+      const total = lastValidResult?.total;
+      label.textContent = total ? 'Confirm & Pay  $' + Number(total).toFixed(2) : 'Confirm & Pay';
+      if (icon) icon.className = 'fas fa-check-circle';
+      btn.classList.remove('opacity-60');
+    } else {
+      // Guide user through flow steps in order
       if (!selectedStartSlot)    label.textContent = 'Select a start time';
       else if (!selectedEndSlot) label.textContent = 'Select an end time';
       else if (!lastValidResult) label.textContent = 'Checking availability…';
-      else if (!ack)             label.textContent = 'Acknowledge policy first';
+      else if (!termsAck)        label.textContent = 'Accept Terms of Service';
+      else if (!cancelAck)       label.textContent = 'Acknowledge cancellation policy';
+      if (icon) icon.className = 'fas fa-lock';
+      btn.classList.add('opacity-60');
     }
   }
   function updateConfirmButton() { updateConfirmBtn(); }
@@ -1238,6 +1273,8 @@ bookingPage.get('/:id', async (c) => {
         text.textContent = 'Slot hold expired — please re-add your card to re-lock it.';
         el.classList.add('text-red-400');
         stripeReady = false;
+        // Release the associated lock before nulling the token
+        releaseHoldSilently();
         holdId = null; holdSessionToken = null;
       }
     }, 1000);
@@ -1422,34 +1459,50 @@ bookingPage.get('/:id', async (c) => {
 
     // ── Guard: terms ──────────────────────────────────────────────────────────
     const terms = document.getElementById('terms-check');
-    if (!terms.checked) {
-      terms.closest('label').classList.add('ring','ring-red-500/40','rounded-xl','p-2');
-      alert('Please accept the Terms of Service to continue.');
+    if (!terms || !terms.checked) {
+      const termsLabel = document.getElementById('terms-check-label');
+      if (termsLabel) termsLabel.classList.add('ring','ring-red-500/40','rounded-xl','p-2');
+      showValidation('error', 'Please accept the Terms of Service to continue.');
       return;
     }
     const ack = document.getElementById('cancel-ack-checkbox');
     if (!ack?.checked) {
       document.getElementById('cancel-ack-label')?.classList.add('ring','ring-red-500/40','rounded-xl','p-2');
-      alert('Please acknowledge the Cancellation Policy to continue.');
+      showValidation('error', 'Please acknowledge the Cancellation Policy to continue.');
       return;
     }
 
-    const arrive = document.getElementById('booking-arrive').value;
-    const depart = document.getElementById('booking-depart').value;
-    if (!arrive || !depart) { alert('Please select arrival and departure times.'); return; }
-    if (!lastValidResult)   { alert('Please wait for availability to be confirmed.'); return; }
+    // ── Guard: slot selection ─────────────────────────────────────────────────
+    if (!selectedStartSlot) {
+      showValidation('error', 'Please select a start time.');
+      return;
+    }
+    if (!selectedEndSlot) {
+      showValidation('error', 'Please select an end time.');
+      return;
+    }
+
+    const arrive = document.getElementById('booking-arrive')?.value;
+    const depart = document.getElementById('booking-depart')?.value;
+    if (!arrive || !depart) { showValidation('error', 'Please select arrival and departure times.'); return; }
+    if (!lastValidResult)   { showValidation('error', 'Please wait for availability to be confirmed.'); return; }
 
     const btn = document.getElementById('confirm-btn');
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Processing…';
-    btn.disabled  = true;
+    const lbl = document.getElementById('confirm-label');
+    const ico = document.getElementById('confirm-icon');
+    if (btn) {
+      btn.disabled = true;
+      if (ico) ico.className = 'fas fa-spinner fa-spin';
+      if (lbl) lbl.textContent = 'Processing…';
+    }
 
     try {
-      const firstName  = document.getElementById('contact-first').value.trim();
-      const lastName   = document.getElementById('contact-last').value.trim();
-      const phone      = document.getElementById('contact-phone').value.trim();
-      const email      = document.getElementById('contact-email').value.trim();
+      const firstName  = (document.getElementById('contact-first')?.value || '').trim();
+      const lastName   = (document.getElementById('contact-last')?.value  || '').trim();
+      const phone      = (document.getElementById('contact-phone')?.value || '').trim();
+      const email      = (document.getElementById('contact-email')?.value || '').trim();
       const driverName = [firstName, lastName].filter(Boolean).join(' ') || 'Guest';
-      const plate      = document.getElementById('vehicle-plate').value.trim() || null;
+      const plate      = (document.getElementById('vehicle-plate')?.value || '').trim() || null;
 
       // ── Case A: Stripe card form is mounted and ready ─────────────────────
       if (stripe && stripeReady && !document.getElementById('new-card-form').classList.contains('hidden')) {
@@ -1466,14 +1519,16 @@ bookingPage.get('/:id', async (c) => {
 
         if (error) {
           showStripeError(error.message || 'Payment declined. Please try a different card.');
-          btn.innerHTML = '<i class="fas fa-lock mr-2"></i><span id="confirm-label">Retry Payment</span>';
-          btn.disabled  = false;
+          if (ico) ico.className = 'fas fa-redo';
+          if (lbl) lbl.textContent = 'Retry Payment';
+          if (btn) btn.disabled = false;
           return;
         }
         if (paymentIntent?.status !== 'succeeded') {
           showStripeError('Payment was not completed (status: ' + (paymentIntent?.status || 'unknown') + '). Please try again.');
-          btn.innerHTML = '<i class="fas fa-lock mr-2"></i><span id="confirm-label">Retry Payment</span>';
-          btn.disabled  = false;
+          if (ico) ico.className = 'fas fa-redo';
+          if (lbl) lbl.textContent = 'Retry Payment';
+          if (btn) btn.disabled = false;
           return;
         }
 
@@ -1502,28 +1557,34 @@ bookingPage.get('/:id', async (c) => {
 
         if (!cfRes.ok) {
           showStripeError(cfData.error || 'Booking confirmation failed. Your payment was captured — our team will contact you.');
-          btn.innerHTML = '<i class="fas fa-lock mr-2"></i><span id="confirm-label">Contact Support</span>';
-          btn.disabled  = false;
+          if (ico) ico.className = 'fas fa-headset';
+          if (lbl) lbl.textContent = 'Contact Support';
+          if (btn) btn.disabled = false;
           return;
         }
 
         if (holdCountdownTimer) clearInterval(holdCountdownTimer);
+        dbBookingId = cfData.db_booking_id || cfData.booking_id;  // mark as confirmed
         showSuccessModal(cfData.booking_reference || cfData.booking_id, arrive, depart);
         return;
       }
 
       // ── Case B: Card form not open yet — open it ──────────────────────────
-      document.getElementById('new-card-form').classList.remove('hidden');
-      document.getElementById('add-card-btn').classList.add('hidden');
+      const cardForm   = document.getElementById('new-card-form');
+      const addCardBtn = document.getElementById('add-card-btn');
+      if (cardForm)   cardForm.classList.remove('hidden');
+      if (addCardBtn) addCardBtn.classList.add('hidden');
       await initStripe();
-      btn.innerHTML = '<i class="fas fa-lock mr-2"></i><span id="confirm-label">Complete Payment</span>';
-      btn.disabled  = false;
-      document.getElementById('new-card-form').scrollIntoView({ behavior: 'smooth', block: 'center' });
+      if (ico) ico.className = 'fas fa-credit-card';
+      if (lbl) lbl.textContent = 'Complete Payment';
+      if (btn) btn.disabled = false;
+      if (cardForm) cardForm.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
     } catch(e) {
       showStripeError('Network error: ' + (e.message || 'Please check your connection and try again.'));
-      btn.innerHTML = '<i class="fas fa-lock mr-2"></i>Confirm & Pay';
-      btn.disabled  = false;
+      if (ico) ico.className = 'fas fa-lock';
+      if (lbl) lbl.textContent = 'Confirm & Pay';
+      if (btn) btn.disabled = false;
     }
   }
 

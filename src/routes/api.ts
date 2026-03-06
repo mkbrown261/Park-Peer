@@ -161,6 +161,46 @@ async function sweepExpiredHolds(db: D1Database): Promise<void> {
   } catch { /* non-fatal */ }
 }
 
+// Auto-expire reservation locks whose 5-min TTL has lapsed.
+async function sweepExpiredLocks(db: D1Database): Promise<void> {
+  try {
+    await db.prepare(`
+      UPDATE reservation_locks
+      SET    status     = 'expired',
+             updated_at = datetime('now')
+      WHERE  status     = 'locked'
+        AND  datetime(lock_expires_at) <= datetime('now')
+    `).run()
+  } catch { /* non-fatal */ }
+}
+
+// Range-overlap conflict check helper.
+// Returns true if a confirmed/active booking already covers start→end.
+async function hasBookingConflict(
+  db: D1Database,
+  listingId: string | number,
+  startIso: string,
+  endIso: string,
+  excludeBookingId?: number
+): Promise<boolean> {
+  try {
+    let q = `
+      SELECT id FROM bookings
+      WHERE  listing_id = ?
+        AND  status IN ('confirmed','active')
+        AND  start_time < ?
+        AND  end_time   > ?
+    `
+    const params: any[] = [String(listingId), endIso, startIso]
+    if (excludeBookingId) { q += ' AND id != ?'; params.push(excludeBookingId) }
+    q += ' LIMIT 1'
+    const row = await db.prepare(q).bind(...params).first<{ id: number }>()
+    return !!row
+  } catch {
+    return false  // fail open — let higher-level checks handle it
+  }
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // AUTH — Registration, Login, Logout, Token Refresh, CSRF
 // ════════════════════════════════════════════════════════════════════════════
@@ -872,6 +912,9 @@ apiRoutes.post('/payments/create-intent', async (c) => {
     // No hold provided — run a quick conflict check to catch obvious double-books
     if (db) {
       try {
+        // Also sweep expired locks before checking
+        await sweepExpiredLocks(db)
+
         const conflict = await db.prepare(`
           SELECT id FROM bookings
           WHERE listing_id = ? AND status IN ('confirmed','active')
@@ -882,6 +925,22 @@ apiRoutes.post('/payments/create-intent', async (c) => {
           return c.json({
             error: 'This spot is already booked for the selected time.',
             code:  'SLOT_BOOKED',
+          }, 409)
+        }
+
+        // Also check for active locks
+        const lockConflict = await db.prepare(`
+          SELECT id FROM reservation_locks
+          WHERE listing_id = ?
+            AND status = 'locked'
+            AND datetime(lock_expires_at) > datetime('now')
+            AND start_time < ? AND end_time > ?
+          LIMIT 1
+        `).bind(listing_id, end_datetime, start_datetime).first<{ id: number }>()
+        if (lockConflict) {
+          return c.json({
+            error: 'This time slot is no longer available.',
+            code:  'SLOT_HELD',
           }, 409)
         }
       } catch {}
@@ -1006,6 +1065,13 @@ apiRoutes.post('/payments/confirm', async (c) => {
     return c.json({ error: 'Stripe not configured' }, 503)
   }
 
+  // ── Rate limiting (per IP — prevent confirm-flood replay attacks) ─────
+  const ip = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || 'unknown'
+  if (isRateLimited(`confirm:${ip}`, 10, 60_000)) {
+    logEvent('warn', 'confirm.rate_limited', { ip })
+    return c.json({ error: 'Too many confirmation requests. Please wait a moment.' }, 429)
+  }
+
   let body: any = {}
   try { body = await c.req.json() } catch {
     return c.json({ error: 'Invalid JSON body' }, 400)
@@ -1017,6 +1083,15 @@ apiRoutes.post('/payments/confirm', async (c) => {
     start_datetime, end_datetime, vehicle_plate, checkout_token
   } = body
 
+  // ── Input sanitization ─────────────────────────────────────────────────
+  const safeDriverName  = sanitizeHtml(String(driver_name  || '').slice(0, 100))
+  const safeDriverEmail = String(driver_email  || '').slice(0, 254).toLowerCase().trim()
+  const safeVehiclePlate = sanitizeHtml(String(vehicle_plate || '').slice(0, 20).toUpperCase())
+  const safePaymentId   = String(payment_intent_id || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 80)
+
+  if (!safePaymentId) {
+    return c.json({ error: 'Missing or invalid payment_intent_id' }, 400)
+  }
   if (!payment_intent_id) {
     return c.json({ error: 'Missing payment_intent_id' }, 400)
   }
@@ -1033,7 +1108,7 @@ apiRoutes.post('/payments/confirm', async (c) => {
 
   try {
     // ── 1. Verify payment with Stripe (server-side, authoritative) ────────
-    const pi = await getPaymentIntent(env as any, payment_intent_id)
+    const pi = await getPaymentIntent(env as any, safePaymentId)
     if (pi.status !== 'succeeded') {
       // Release hold so user can retry with different payment
       if (db && (hold_id || session_token)) {
@@ -1081,7 +1156,8 @@ apiRoutes.post('/payments/confirm', async (c) => {
     let resolvedListingId = listing_id ? parseInt(String(listing_id)) : 0
     let resolvedStart   = start_datetime || ''
     let resolvedEnd     = end_datetime   || ''
-    let resolvedVehicle = vehicle_plate  || null
+    // Use sanitized vehicle plate value
+    let resolvedVehicle = safeVehiclePlate || null
 
     if (db) {
       // Find hold by id or session_token (whichever is available)
@@ -1146,6 +1222,32 @@ apiRoutes.post('/payments/confirm', async (c) => {
     let dbBookingId: number | null = existingBooking?.id ?? null
 
     if (db) {
+      // Final double-booking check before INSERT (last line of defense after payment)
+      if (!dbBookingId && resolvedListingId && resolvedStart && resolvedEnd) {
+        const finalConflict = await hasBookingConflict(db, resolvedListingId, resolvedStart, resolvedEnd)
+        if (finalConflict) {
+          // A race condition created another booking between the hold and now.
+          // Log to recovery — we'll need to refund this payment.
+          console.error(`[Confirm] DOUBLE-BOOKING DETECTED after payment PI=${payment_intent_id}`)
+          logEvent('error', 'booking.double_booking_race', {
+            pi: payment_intent_id, listing_id: resolvedListingId,
+            start: resolvedStart, end: resolvedEnd,
+          })
+          try {
+            await db!.prepare(`
+              INSERT OR IGNORE INTO payment_recovery_log
+                (stripe_pi_id, amount_cents, hold_id, recovery_status, error_detail, created_at)
+              VALUES (?, ?, ?, 'pending', 'DOUBLE_BOOKING_RACE: refund required', datetime('now'))
+            `).bind(payment_intent_id, pi.amount, hold_id || null).run()
+          } catch {}
+          return c.json({
+            success: false,
+            error: 'This time slot was just taken by another booking. Your payment will be refunded automatically.',
+            code: 'DOUBLE_BOOKING',
+            recovery: true,
+          }, 409)
+        }
+      }
       const cancelAck    = body.cancellation_acknowledged === true
       const cancelVer    = body.cancellation_policy_version || CURRENT_VERSIONS.cancellation_policy
       const hours        = resolvedStart && resolvedEnd
@@ -1231,6 +1333,15 @@ apiRoutes.post('/payments/confirm', async (c) => {
           `).bind(dbBookingId, String(hid)).run()
         }
 
+        // ── D2. Confirm reservation lock → confirmed ──────────────────────
+        if (session_token) {
+          await db.prepare(`
+            UPDATE reservation_locks
+            SET status = 'confirmed', booking_id = ?, stripe_pi_id = ?, updated_at = datetime('now')
+            WHERE session_token = ? AND status = 'locked'
+          `).bind(dbBookingId, payment_intent_id, String(session_token)).run().catch(() => {})
+        }
+
         // ── E. Update idempotency table ──────────────────────────────────
         if (checkout_token) {
           await db.prepare(`
@@ -1292,19 +1403,19 @@ apiRoutes.post('/payments/confirm', async (c) => {
     const endFmt   = resolvedEnd   ? new Date(resolvedEnd).toLocaleString('en-US')   : ''
 
     await Promise.all([
-      driver_email ? sendBookingConfirmation(env as any, {
-        driverEmail: driver_email, driverName: driver_name || driver_email,
+      safeDriverEmail ? sendBookingConfirmation(env as any, {
+        driverEmail: safeDriverEmail, driverName: safeDriverName || safeDriverEmail,
         bookingId: numericBookingId, listingTitle, listingAddress,
         startTime: startFmt, endTime: endFmt, totalCharged: amountPaid,
-        vehiclePlate: vehicle_plate || 'Not provided'
+        vehiclePlate: safeVehiclePlate || 'Not provided'
       }) : Promise.resolve(true),
-      driver_email ? sendPaymentReceipt(env as any, {
-        toEmail: driver_email, toName: driver_name || driver_email,
+      safeDriverEmail ? sendPaymentReceipt(env as any, {
+        toEmail: safeDriverEmail, toName: safeDriverName || safeDriverEmail,
         bookingId: numericBookingId, amount: amountPaid,
         last4: pi.payment_method_details?.card?.last4, listingTitle
       }) : Promise.resolve(true),
       body.driver_phone ? smsSendBookingConfirmation(env as any, {
-        toPhone: body.driver_phone, driverName: driver_name || 'Driver',
+        toPhone: String(body.driver_phone).slice(0, 20), driverName: safeDriverName || 'Driver',
         bookingId: numericBookingId, listingTitle, listingAddress,
         startTime: startFmt, endTime: endFmt, totalCharged: amountPaid
       }) : Promise.resolve(true)
@@ -2422,12 +2533,13 @@ apiRoutes.get('/listings/:id/time-slots', async (c) => {
     const dayOfWeek  = dateObj.getUTCDay()   // 0=Sun … 6=Sat
     const now        = new Date()
 
-    // ── Inline sweep: cancel stale pending bookings + expire old holds ───
+    // ── Inline sweep: cancel stale pending bookings + expire old holds/locks ─
     // Runs non-blocking before the conflict queries so stale rows never
     // appear as 'booked' or 'held' to other users.
     await Promise.all([
       sweepStalePendingBookings(db),
       sweepExpiredHolds(db),
+      sweepExpiredLocks(db),
     ])
 
     // ── 2. Fetch host schedule for this weekday ──────────────────────────
@@ -2454,7 +2566,7 @@ apiRoutes.get('/listings/:id/time-slots', async (c) => {
     const dayStart = `${dateStr}T00:00:00Z`
     const dayEnd   = `${dateStr}T23:59:59Z`
 
-    const [bookingRows, holdRows] = await db.batch([
+    const [bookingRows, holdRows, lockRows] = await db.batch([
       db.prepare(`
         SELECT start_time, end_time, id as booking_id
         FROM bookings
@@ -2474,10 +2586,21 @@ apiRoutes.get('/listings/:id/time-slots', async (c) => {
           AND end_time   > ?
         ORDER BY start_time
       `).bind(listingId, dayEnd, dayStart),
+      db.prepare(`
+        SELECT start_time, end_time, session_token
+        FROM reservation_locks
+        WHERE listing_id = ?
+          AND status = 'locked'
+          AND datetime(lock_expires_at) > datetime('now')
+          AND start_time < ?
+          AND end_time   > ?
+        ORDER BY start_time
+      `).bind(listingId, dayEnd, dayStart),
     ])
 
     const bookings: any[] = bookingRows.results || []
     const holds:    any[] = holdRows.results    || []
+    const locks:    any[] = lockRows.results    || []
 
     // ── 4. Build 15-min slot grid for the full day (0:00 – 23:45) ───────
     const SLOT_MINS = 15
@@ -2524,8 +2647,9 @@ apiRoutes.get('/listings/:id/time-slots', async (c) => {
         continue
       }
 
-      // Overlaps an active hold?
-      const isHeld = holds.some((h: any) => {
+      // Overlaps an active hold or reservation lock?
+      const allHeld = [...holds, ...locks]
+      const isHeld = allHeld.some((h: any) => {
         const hs = new Date(h.start_time).getTime()
         const he = new Date(h.end_time).getTime()
         return hs < slotEndMs && he > slotMs
@@ -2604,6 +2728,7 @@ apiRoutes.post('/listings/:id/validate-slot', async (c) => {
     await Promise.all([
       sweepStalePendingBookings(db),
       sweepExpiredHolds(db),
+      sweepExpiredLocks(db),
     ])
 
     // ── 1. Host schedule check ────────────────────────────────────────────
@@ -2714,6 +2839,27 @@ apiRoutes.post('/listings/:id/validate-slot', async (c) => {
         error:  'This time slot is temporarily reserved by another user. Please try again in a few minutes.',
         code:   'SLOT_HELD',
         retry_after_seconds: 600,
+      }, 409)
+    }
+
+    // ── 4. Active reservation lock overlap check ──────────────────────────
+    const lockedSlot = await db.prepare(`
+      SELECT id, start_time, end_time
+      FROM reservation_locks
+      WHERE listing_id = ?
+        AND status = 'locked'
+        AND datetime(lock_expires_at) > datetime('now')
+        AND start_time < ?
+        AND end_time   > ?
+      LIMIT 1
+    `).bind(listingId, end_datetime, start_datetime).first<any>()
+
+    if (lockedSlot) {
+      return c.json({
+        valid:  false,
+        error:  'This time slot is no longer available. Another user is completing payment. Please choose a different time.',
+        code:   'SLOT_HELD',
+        retry_after_seconds: 300,
       }, 409)
     }
 
@@ -2843,6 +2989,7 @@ apiRoutes.post('/holds', async (c) => {
     await Promise.all([
       sweepStalePendingBookings(db),
       sweepExpiredHolds(db),
+      sweepExpiredLocks(db),
     ])
 
     // ── 0. Host availability schedule check ─────────────────────────────
@@ -2920,6 +3067,27 @@ apiRoutes.post('/holds', async (c) => {
       }, 409)
     }
 
+    // ── 2b. Check for active RESERVATION LOCKS by OTHER sessions ─────────
+    const lockConflict = await db.prepare(`
+      SELECT id FROM reservation_locks
+      WHERE listing_id = ?
+        AND status = 'locked'
+        AND datetime(lock_expires_at) > datetime('now')
+        AND session_token != ?
+        AND start_time < ?
+        AND end_time   > ?
+      LIMIT 1
+    `).bind(listing_id, sessionToken, end_datetime, start_datetime).first<{ id: number }>()
+
+    if (lockConflict) {
+      logEvent('info', 'holds.slot_lock_conflict', { listing_id, start_datetime, end_datetime, ip })
+      return c.json({
+        error: 'Another user is finalising payment for this time slot. Please try again in a few minutes.',
+        code:  'SLOT_HELD',
+        retry_after_seconds: 300,
+      }, 409)
+    }
+
     // ── 3. Verify listing is active ───────────────────────────────────────
     const listing = await db.prepare(
       'SELECT id, rate_hourly, host_id, status FROM listings WHERE id = ? AND status = ?'
@@ -2929,11 +3097,16 @@ apiRoutes.post('/holds', async (c) => {
       return c.json({ error: 'Listing not found or unavailable', code: 'LISTING_UNAVAILABLE' }, 404)
     }
 
-    // ── 4. Expire any stale holds for this session before creating new ────
+    // ── 4. Expire any stale holds/locks for this session before creating new ─
     await db.prepare(`
       UPDATE reservation_holds
       SET status = 'expired', updated_at = datetime('now')
       WHERE session_token = ? AND status = 'active'
+    `).bind(sessionToken).run()
+    await db.prepare(`
+      UPDATE reservation_locks
+      SET status = 'expired', updated_at = datetime('now')
+      WHERE session_token = ? AND status = 'locked'
     `).bind(sessionToken).run()
 
     // ── 5. INSERT new hold (10-min TTL) ───────────────────────────────────
@@ -2960,6 +3133,24 @@ apiRoutes.post('/holds', async (c) => {
     ).run()
 
     const holdId = holdRes.meta?.last_row_id ?? 0
+
+    // ── 6. INSERT companion reservation_lock (5-min TTL for payment window) ─
+    const lockExpiry = new Date(Date.now() + 5 * 60 * 1000).toISOString()
+    try {
+      await db.prepare(`
+        INSERT INTO reservation_locks
+          (listing_id, session_token, hold_id, start_time, end_time,
+           lock_expires_at, status, idempotency_key, ip_address, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'locked', ?, ?, datetime('now'), datetime('now'))
+      `).bind(
+        listing_id, sessionToken, holdId,
+        start_datetime, end_datetime, lockExpiry,
+        checkoutToken, ipAddress
+      ).run()
+    } catch (lockErr: any) {
+      // Non-fatal: hold is sufficient; lock is a belt-and-suspenders guard
+      console.warn('[holds] lock insert failed:', lockErr.message)
+    }
 
     logEvent('info', 'holds.created', { hold_id: holdId, listing_id, user_id: userId, expires_at: holdExpiry, ip })
 
@@ -3031,6 +3222,11 @@ apiRoutes.post('/holds/:token/release', async (c) => {
     await db.prepare(`
       UPDATE reservation_holds SET status='released', updated_at=datetime('now')
       WHERE session_token=? AND status='active'
+    `).bind(token).run()
+    // Also release any associated reservation lock
+    await db.prepare(`
+      UPDATE reservation_locks SET status='released', updated_at=datetime('now')
+      WHERE session_token=? AND status='locked'
     `).bind(token).run()
     return c.json({ ok: true })
   } catch {
