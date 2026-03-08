@@ -204,8 +204,8 @@ featuresApiRoutes.get('/favorites', requireUserAuth(), async (c) => {
   try {
     const rows = await db.prepare(`
       SELECT
-        f.id AS favorite_id, f.created_at AS saved_at,
-        l.id, l.title, l.address, l.city, l.state,
+        f.id AS favorite_id, f.listing_id, f.created_at AS saved_at,
+        l.id AS listing_id_check, l.title, l.address, l.city, l.state,
         l.rate_hourly, l.rate_daily, l.photos,
         l.avg_rating, l.review_count, l.availability_confidence,
         l.quality_score, l.lat, l.lng,
@@ -643,5 +643,45 @@ featuresApiRoutes.post('/booking/confirm-data', requireUserAuth(), async (c) => 
     })
   } catch (e: any) {
     return c.json({ error: 'Failed to fetch booking data' }, 500)
+  }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// GET /api/bookings/by-intent?pi=<payment_intent_id>
+// Used by the /booking/confirmation/pending page to poll for booking status
+// after a Stripe 3DS redirect. Returns booking_id when the booking is confirmed.
+// Auth required to prevent enumeration.
+// ════════════════════════════════════════════════════════════════════════════
+featuresApiRoutes.get('/bookings/by-intent', requireUserAuth(), async (c) => {
+  const db   = c.env?.DB
+  const user = c.get('user') as any
+  if (!db) return c.json({ error: 'DB unavailable' }, 503)
+
+  const pi = c.req.query('pi') || ''
+  if (!pi || pi.length > 200) return c.json({ error: 'Invalid payment intent' }, 400)
+
+  try {
+    const booking = await db.prepare(
+      `SELECT id FROM bookings
+       WHERE stripe_payment_intent_id = ? AND driver_id = ?
+       AND status IN ('confirmed','active','completed') LIMIT 1`
+    ).bind(pi, user.id).first<any>()
+
+    if (booking) return c.json({ booking_id: booking.id })
+
+    // Also check most recent confirmed booking in last 15 minutes for this driver
+    // (handles cases where the PI wasn't stored yet when Stripe redirected back)
+    const recent = await db.prepare(
+      `SELECT id FROM bookings
+       WHERE driver_id = ? AND status IN ('confirmed','active')
+       AND created_at >= datetime('now','-15 minutes')
+       ORDER BY id DESC LIMIT 1`
+    ).bind(user.id).first<any>()
+
+    if (recent) return c.json({ booking_id: recent.id })
+
+    return c.json({ booking_id: null, status: 'processing' })
+  } catch (e: any) {
+    return c.json({ error: 'Lookup failed' }, 500)
   }
 })

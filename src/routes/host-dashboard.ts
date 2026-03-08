@@ -2726,8 +2726,11 @@ hostDashboard.get('/connect/cashout', async (c) => {
       if (t === tab) { btn.className = 'px-5 py-3 text-sm font-medium text-[#C6FF00] border-b-2 border-[#C6FF00]'; }
       else           { btn.className = 'px-5 py-3 text-sm font-medium text-gray-400 hover:text-white transition'; }
     });
+    // Only reload earnings/account if not yet loaded (prevent duplicate API calls)
     if (tab === 'earnings' && !document.getElementById('earnings-table').dataset.loaded) loadEarnings();
     if (tab === 'account'  && !document.getElementById('acct-stripe-id').dataset.loaded) loadAccount();
+    // Payouts tab: only reload if filter changed; first load handled by loadAll() on page init
+    // Do NOT re-trigger loadBalance() here — it ran on page load already
   }
 
   function statusBadge(s) {
@@ -2742,19 +2745,26 @@ hostDashboard.get('/connect/cashout', async (c) => {
       const r = await fetch('/api/connect/balance');
       const d = await r.json();
 
-      // ── Case 1: No Stripe account at all → auto-redirect to onboarding ──
+      // ── Case 1: No Stripe account at all → show banner (no auto-redirect) ──
+      // Auto-redirect was causing infinite loop on back-navigation because
+      // loadAll() fires on every page load/restore and triggered the redirect again.
+      // We show the banner and CTA button instead; user clicks to proceed.
       if (d.not_connected) {
         showBanner('info',
           'Bank account not connected',
-          'You need to complete Stripe onboarding before you can manage payouts. Redirecting…',
-          'Set Up Now',
+          'You need to complete Stripe onboarding before you can manage payouts.',
+          'Set Up Payouts',
           '/host/connect/onboard'
         );
-        // Disable the cash-out button so nothing fires while we redirect
+        // Disable the cash-out button
         const payoutBtn = document.getElementById('payout-btn');
         if (payoutBtn) payoutBtn.disabled = true;
-        // Auto-redirect after 2 seconds so the user can read the message
-        setTimeout(() => { window.location.href = '/host/connect/onboard'; }, 2000);
+        // Clear the payout table spinner so the page doesn't appear broken
+        const tbl = document.getElementById('payouts-table');
+        if (tbl && !tbl.dataset.loaded) {
+          tbl.innerHTML = '<div class="text-gray-500 text-sm text-center py-10"><i class="fas fa-lock mr-2"></i>Connect your bank account to view payouts.</div>';
+          tbl.dataset.loaded = '1';
+        }
         return;
       }
 
@@ -2798,18 +2808,25 @@ hostDashboard.get('/connect/cashout', async (c) => {
     banner.classList.remove('hidden');
   }
 
-  async function loadPayouts(filter) {
+  async function loadPayouts(filter?: string) {
     currentFilter = filter || currentFilter;
     const qs = currentFilter === 'all' ? '' : '?status=' + currentFilter;
+    const tbl = document.getElementById('payouts-table');
     try {
       const r  = await fetch('/api/connect/payouts' + qs);
       const d  = await r.json();
-      const tbl = document.getElementById('payouts-table');
-      if (!r.ok || !d.payouts?.length) { tbl.innerHTML = '<div class="text-gray-500 text-sm text-center py-10">No payouts found.</div>'; return; }
+      if (!r.ok || !d.payouts?.length) {
+        tbl.innerHTML = '<div class="text-gray-500 text-sm text-center py-10">No payouts found.</div>';
+        tbl.dataset.loaded = '1';
+        return;
+      }
       tbl.innerHTML = '<table class="w-full text-sm"><thead><tr class="text-left text-gray-500 border-b border-white/5"><th class="pb-2 pr-4">Date</th><th class="pb-2 pr-4">Amount</th><th class="pb-2 pr-4">Status</th><th class="pb-2 pr-4">Est. Arrival</th><th class="pb-2">Payout ID</th></tr></thead><tbody>' +
         d.payouts.map(p => '<tr class="border-b border-white/5 hover:bg-white/5 transition"><td class="py-3 pr-4 text-gray-300">' + new Date(p.requested_at||p.created_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) + '</td><td class="py-3 pr-4 font-semibold text-white">' + fmt(p.amount_usd) + '</td><td class="py-3 pr-4">' + statusBadge(p.status) + '</td><td class="py-3 pr-4 text-gray-400 text-xs">' + (p.arrival_date_formatted||'–') + '</td><td class="py-3 text-gray-600 text-xs font-mono">' + (p.stripe_payout_id||'pending').slice(0,18) + (p.status === 'pending'||p.status === 'requested' ? '<button onclick="cancelPayout('+p.id+')" class="ml-2 text-red-400 hover:text-red-300 text-xs">Cancel</button>' : '') + '</td></tr>').join('') +
         '</tbody></table>';
-    } catch(e) { document.getElementById('payouts-table').innerHTML = '<div class="text-red-400 text-sm text-center py-8">Failed to load payouts.</div>'; }
+      tbl.dataset.loaded = '1';
+    } catch(e) {
+      tbl.innerHTML = '<div class="text-red-400 text-sm text-center py-8">Failed to load payouts.</div>';
+    }
   }
 
   function filterPayouts(f) {
@@ -2881,11 +2898,28 @@ hostDashboard.get('/connect/cashout', async (c) => {
     document.getElementById('weekly-opts').classList.toggle('hidden', val !== 'weekly');
   }
 
+  // Guard: track whether loadAll has already run to prevent duplicate
+  // fetches when the browser restores this page from bfcache (back/forward nav)
+  let _payoutsPageInitDone = false;
+
   async function loadAll() {
+    if (_payoutsPageInitDone) return;
+    _payoutsPageInitDone = true;
     await loadBalance();
     await loadPayouts();
     await loadSchedule();
   }
+
+  // Re-run on bfcache restore (pageshow fires when navigating back)
+  window.addEventListener('pageshow', function(e) {
+    if (e.persisted) {
+      // Page was restored from bfcache; allow one more fresh load
+      _payoutsPageInitDone = false;
+      const tbl = document.getElementById('payouts-table');
+      if (tbl) delete tbl.dataset.loaded;
+      loadAll();
+    }
+  });
 
   // Payout confirmation toggle
   document.getElementById('payout-confirm').addEventListener('change', function() {

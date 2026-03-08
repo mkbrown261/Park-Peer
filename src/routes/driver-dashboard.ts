@@ -314,7 +314,7 @@ driverDashboard.get('/', async (c) => {
              style="background:linear-gradient(135deg,#C6FF00,#a8d900);color:#121212;">
             <i class="fas fa-route"></i> Arrival Mode
           </a>
-          <button onclick="window.location.href='/booking/${activeBooking.id}'" class="flex-1 bg-white/10 hover:bg-white/20 text-white font-semibold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2">
+          <button onclick="window.location.href='/booking/confirmation/${activeBooking.id}'" class="flex-1 bg-white/10 hover:bg-white/20 text-white font-semibold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2">
             <i class="fas fa-qrcode"></i> View QR
           </button>
           <button onclick="window.open('https://maps.google.com/maps?q=${encodeURIComponent(activeBooking.address || '')}','_blank')" class="flex-1 bg-white/10 hover:bg-white/20 text-white font-semibold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2">
@@ -349,7 +349,7 @@ driverDashboard.get('/', async (c) => {
             <p class="font-bold text-white text-sm">$${Number(b.total_charged||0).toFixed(2)}</p>
             <p class="text-xs ${b.status==='confirmed' ? 'text-green-400' : 'text-amber-400'} mt-0.5 capitalize">${b.status}</p>
           </div>
-          <a href="/booking/${b.id}" class="w-8 h-8 bg-charcoal-200 rounded-xl flex items-center justify-center text-gray-400 hover:text-white transition-colors ml-1">
+          <a href="/booking/confirmation/${b.id}" class="w-8 h-8 bg-charcoal-200 rounded-xl flex items-center justify-center text-gray-400 hover:text-white transition-colors ml-1">
             <i class="fas fa-chevron-right text-xs"></i>
           </a>
         </div>
@@ -1004,7 +1004,7 @@ driverDashboard.get('/notifications', async (c) => {
               const conf = f.availability_confidence;
               const confBadge = conf === 'high' ? '<span style="font-size:9px;color:#22c55e;background:rgba(34,197,94,0.1);border-radius:6px;padding:1px 5px;font-weight:600;">&#9679; High Avail.</span>' :
                                 conf === 'low'  ? '<span style="font-size:9px;color:#ef4444;background:rgba(239,68,68,0.1);border-radius:6px;padding:1px 5px;font-weight:600;">&#9680; Limited</span>' : '';
-              return '<div class="flex items-center gap-3 p-4 hover:bg-charcoal-200 transition-colors cursor-pointer group" onclick="window.location.href=\'/listing/' + f.id + '\'">' +
+              return '<div class="flex items-center gap-3 p-4 hover:bg-charcoal-200 transition-colors cursor-pointer group" onclick="window.location.href=\'/listing/' + (f.listing_id || f.id) + '\'">' +
                 '<div class="w-12 h-12 rounded-xl overflow-hidden flex-shrink-0 bg-charcoal-300 flex items-center justify-center">' +
                   (cover ? '<img src="' + cover + '" class="w-full h-full object-cover">' : '<i class="fas fa-parking text-gray-500"></i>') +
                 '</div>' +
@@ -1016,7 +1016,7 @@ driverDashboard.get('/notifications', async (c) => {
                     confBadge +
                   '</div>' +
                 '</div>' +
-                '<a href="/booking/' + f.id + '" onclick="event.stopPropagation()" class="text-xs px-2.5 py-1.5 rounded-lg font-bold flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" style="background:#5B2EFF;color:#fff;">Book</a>' +
+                '<a href="/listing/' + f.listing_id + '" onclick="event.stopPropagation()" class="text-xs px-2.5 py-1.5 rounded-lg font-bold flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" style="background:#5B2EFF;color:#fff;">Book</a>' +
               '</div>';
             }).join('');
           }

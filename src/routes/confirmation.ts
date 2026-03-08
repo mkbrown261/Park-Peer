@@ -494,6 +494,104 @@ confirmationPage.get('/:booking_id', async (c) => {
 })
 
 // ════════════════════════════════════════════════════════════════════════════
+// GET /booking/confirmation/pending  — 3DS / redirect-based payment return
+// Stripe redirects here after 3DS authentication. We look up the booking by
+// the payment_intent query param that Stripe appends automatically, then
+// forward to the real confirmation page once the booking is confirmed.
+// ════════════════════════════════════════════════════════════════════════════
+confirmationPage.get('/pending', async (c) => {
+  const db = c.env?.DB
+
+  // Auth guard — session cookie must still be valid after the 3DS redirect
+  const session = await verifyUserToken(
+    c,
+    c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod'
+  ).catch(() => null)
+
+  if (!session) {
+    return c.redirect('/auth/login?reason=auth&next=/dashboard?tab=upcoming')
+  }
+
+  if (!db) return c.redirect('/dashboard?tab=upcoming')
+
+  // Stripe appends ?payment_intent=pi_xxx&payment_intent_client_secret=...
+  // after the 3DS flow completes.
+  const piId = c.req.query('payment_intent') || ''
+  const holdParam = c.req.query('hold') || ''
+  const tokenParam = c.req.query('token') || ''
+
+  try {
+    // Try to find a confirmed booking by payment intent ID
+    if (piId) {
+      const booking = await db.prepare(
+        `SELECT id FROM bookings WHERE stripe_payment_intent_id = ? AND driver_id = ? LIMIT 1`
+      ).bind(piId, session.id).first<any>()
+
+      if (booking) {
+        return c.redirect('/booking/confirmation/' + booking.id)
+      }
+    }
+
+    // Fallback: find most recent confirmed booking for this driver in last 10 min
+    const recent = await db.prepare(
+      `SELECT id FROM bookings
+       WHERE driver_id = ? AND status IN ('confirmed','active')
+       AND created_at >= datetime('now','-10 minutes')
+       ORDER BY id DESC LIMIT 1`
+    ).bind(session.id).first<any>()
+
+    if (recent) {
+      return c.redirect('/booking/confirmation/' + recent.id)
+    }
+
+    // If nothing found, redirect to dashboard — booking may still be processing
+    return c.html(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Processing Payment — ParkPeer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <meta http-equiv="refresh" content="5;url=/dashboard?tab=upcoming">
+</head>
+<body class="bg-gray-950 text-white min-h-screen flex items-center justify-center">
+  <div class="text-center p-8 max-w-md">
+    <div class="w-16 h-16 bg-indigo-600 rounded-full flex items-center justify-center mx-auto mb-4">
+      <svg class="animate-spin h-8 w-8 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+      </svg>
+    </div>
+    <h1 class="text-xl font-bold mb-2">Finalising Your Booking…</h1>
+    <p class="text-gray-400 text-sm mb-4">Your payment was authorised. We're confirming your reservation — this takes just a moment.</p>
+    <p class="text-gray-600 text-xs">You'll be redirected automatically. If nothing happens, <a href="/dashboard?tab=upcoming" class="text-indigo-400 underline">go to your dashboard</a>.</p>
+  </div>
+  <script>
+    // Poll for booking confirmation every 2 seconds for up to 30 seconds
+    let attempts = 0;
+    const pi = new URLSearchParams(location.search).get('payment_intent') || '';
+    async function poll() {
+      if (attempts++ > 15 || !pi) { window.location.href = '/dashboard?tab=upcoming'; return; }
+      try {
+        const r = await fetch('/api/bookings/by-intent?pi=' + encodeURIComponent(pi), { credentials: 'include' });
+        if (r.ok) {
+          const d = await r.json();
+          if (d.booking_id) { window.location.href = '/booking/confirmation/' + d.booking_id; return; }
+        }
+      } catch(_) {}
+      setTimeout(poll, 2000);
+    }
+    poll();
+  </script>
+</body>
+</html>`)
+  } catch (e: any) {
+    console.error('[confirmation/pending]', e.message)
+    return c.redirect('/dashboard?tab=upcoming')
+  }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
 // GET /booking/confirmation/:booking_id/extend  — placeholder, redirects to booking
 // ════════════════════════════════════════════════════════════════════════════
 confirmationPage.get('/:booking_id/extend', async (c) => {

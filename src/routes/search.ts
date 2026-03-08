@@ -1032,7 +1032,11 @@ searchPage.get('/', async (c) => {
       const res = await fetch('/api/favorites', { credentials: 'include' })
       if (!res.ok) return
       const data = await res.json()
-      ;(data.favorites || []).forEach(f => savedSpots.add(String(f.id)))
+      // Use f.listing_id (explicit column) to avoid ambiguity with f.id vs l.id
+      ;(data.favorites || []).forEach(f => {
+        const lid = f.listing_id || f.id
+        if (lid) savedSpots.add(String(lid))
+      })
     } catch (_) {}
   }
   loadSavedSpots()

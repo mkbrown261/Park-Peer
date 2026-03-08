@@ -373,7 +373,7 @@ listingPage.get('/:id', async (c) => {
                 </p>
               </div>
               <div class="flex gap-2 flex-shrink-0">
-                <button class="w-10 h-10 bg-charcoal-100 border border-white/10 rounded-xl flex items-center justify-center text-gray-400 hover:text-red-400 transition-colors">
+                <button id="fave-btn" class="w-10 h-10 bg-charcoal-100 border border-white/10 rounded-xl flex items-center justify-center text-gray-400 hover:text-red-400 transition-colors" title="Save this spot">
                   <i class="fas fa-heart text-lg"></i>
                 </button>
                 <button class="w-10 h-10 bg-charcoal-100 border border-white/10 rounded-xl flex items-center justify-center text-gray-400 hover:text-white transition-colors">
@@ -636,6 +636,49 @@ listingPage.get('/:id', async (c) => {
 
   <script>
     const HOURLY_RATE = ${l.rate_hourly || 0};
+    const THIS_LISTING_ID = ${l.id};
+
+    // ── Favorites toggle ──────────────────────────────────────────────────────
+    (async function initFaveBtn() {
+      const btn = document.getElementById('fave-btn');
+      if (!btn) return;
+      // Check if already saved
+      try {
+        const r = await fetch('/api/favorites/check/' + THIS_LISTING_ID, { credentials: 'include' });
+        if (r.ok) {
+          const d = await r.json();
+          if (d.saved) { btn.querySelector('i').style.color = '#ef4444'; btn.title = 'Saved!'; }
+        }
+      } catch(_) {}
+
+      btn.addEventListener('click', async function() {
+        const icon = btn.querySelector('i');
+        const isSaved = icon && icon.style.color === 'rgb(239, 68, 68)';
+        // Optimistic UI update
+        if (icon) icon.style.color = isSaved ? '' : '#ef4444';
+        btn.title = isSaved ? 'Save this spot' : 'Saved!';
+        btn.style.transform = 'scale(1.25)';
+        setTimeout(() => btn.style.transform = 'scale(1)', 250);
+        try {
+          const r = await fetch('/api/favorites', {
+            method: isSaved ? 'DELETE' : 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ listing_id: THIS_LISTING_ID }),
+          });
+          if (r.status === 401) { window.location.href = '/auth/login?next=/listing/' + THIS_LISTING_ID; return; }
+          if (!r.ok) {
+            // Revert on error
+            if (icon) icon.style.color = isSaved ? '#ef4444' : '';
+            btn.title = isSaved ? 'Saved!' : 'Save this spot';
+          }
+        } catch(_) {
+          // Revert on network error
+          if (icon) icon.style.color = isSaved ? '#ef4444' : '';
+          btn.title = isSaved ? 'Saved!' : 'Save this spot';
+        }
+      });
+    })();
 
     // Set default times
     const now   = new Date();

@@ -1597,6 +1597,10 @@ bookingPage.get('/:id', async (c) => {
           elements: stripeElements,
           redirect: 'if_required',
           confirmParams: {
+            // return_url is required for 3DS/redirect-based payment methods.
+            // After 3DS the browser returns here carrying the payment_intent query param;
+            // the server confirms the booking and sets the session cookie before the redirect.
+            return_url: window.location.origin + '/booking/confirmation/pending?hold=' + encodeURIComponent(holdId || '') + '&token=' + encodeURIComponent(holdSessionToken || ''),
             payment_method_data: {
               billing_details: { name: driverName, email: email || undefined, phone: phone || undefined },
             },
