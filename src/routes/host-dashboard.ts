@@ -570,7 +570,7 @@ hostDashboard.get('/', async (c) => {
                   <span class="text-lime-400">${fmtMoney(nextPayout)}</span>
                 </div>
               </div>
-              <button onclick="window.location.href='/host/connect/cashout'" class="mt-4 w-full py-2.5 bg-lime-500 text-charcoal rounded-xl text-sm font-bold hover:bg-lime-400 transition-colors flex items-center justify-center gap-2">
+              <button id="manage-payouts-btn" onclick="handleManagePayouts(this)" class="mt-4 w-full py-2.5 bg-lime-500 text-charcoal rounded-xl text-sm font-bold hover:bg-lime-400 transition-colors flex items-center justify-center gap-2">
                 <i class="fas fa-wallet"></i> Manage Payouts
               </button>
             </div>
@@ -1182,6 +1182,28 @@ hostDashboard.get('/', async (c) => {
     function declineBooking(btn, id) {
       btn.closest('.flex').innerHTML = '<span class="text-red-400 text-sm font-semibold flex items-center gap-2"><i class="fas fa-times-circle"></i> Booking Declined</span>';
       fetch('/api/bookings/' + id + '/cancel', { method: 'POST', credentials: 'same-origin' }).catch(() => {});
+    }
+
+    // ── Manage Payouts: smart routing ───────────────────────────────────────
+    // Checks Stripe connection status before navigating so hosts without
+    // a connected account are sent straight to onboarding (not a dead-end).
+    async function handleManagePayouts(btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> Loading…';
+      try {
+        const r = await fetch('/api/connect/status', { credentials: 'same-origin' });
+        const d = await r.json();
+        // If no account or onboarding not complete → go to onboarding
+        if (!d.account_id || d.onboarding_status === 'not_started' || d.onboarding_status === 'pending' || !d.details_submitted) {
+          window.location.href = '/host/connect/onboard';
+        } else {
+          // Account exists and details submitted → go to full cashout dashboard
+          window.location.href = '/host/connect/cashout';
+        }
+      } catch (e) {
+        // On network error fall back to cashout page (which handles the redirect itself)
+        window.location.href = '/host/connect/cashout';
+      }
     }
 
     // ── Manage Listing Modal ────────────────────────────────────────────────
@@ -2311,7 +2333,10 @@ hostDashboard.get('/connect/complete', async (c) => {
         icon.innerHTML = '<i class="fas fa-check-circle text-3xl text-green-400"></i>';
         icon.className = 'w-16 h-16 bg-green-500/20 rounded-full flex items-center justify-center mx-auto mb-4';
         title.textContent = 'Bank Account Connected!';
-        msg.textContent = 'Your account is verified and ready for payouts.';
+        msg.textContent = 'Your account is verified and ready for payouts. Redirecting to your dashboard…';
+        actions.classList.remove('hidden');
+        // Auto-redirect to cashout dashboard after 2.5 seconds
+        setTimeout(() => { window.location.href = '/host/connect/cashout'; }, 2500);
       } else if (data.requirements?.currently_due?.length > 0) {
         icon.innerHTML = '<i class="fas fa-exclamation-triangle text-3xl text-yellow-400"></i>';
         icon.className = 'w-16 h-16 bg-yellow-500/20 rounded-full flex items-center justify-center mx-auto mb-4';
@@ -2594,13 +2619,47 @@ hostDashboard.get('/connect/cashout', async (c) => {
     try {
       const r = await fetch('/api/connect/balance');
       const d = await r.json();
-      if (!r.ok) { showBanner('warning', d.error || 'Could not load balance', '', d.payouts_enabled === false ? 'Complete onboarding' : '', '/host/connect/onboard'); return; }
+
+      // ── Case 1: No Stripe account at all → auto-redirect to onboarding ──
+      if (d.not_connected) {
+        showBanner('info',
+          'Bank account not connected',
+          'You need to complete Stripe onboarding before you can manage payouts. Redirecting…',
+          'Set Up Now',
+          '/host/connect/onboard'
+        );
+        // Disable the cash-out button so nothing fires while we redirect
+        const payoutBtn = document.getElementById('payout-btn');
+        if (payoutBtn) payoutBtn.disabled = true;
+        // Auto-redirect after 2 seconds so the user can read the message
+        setTimeout(() => { window.location.href = '/host/connect/onboard'; }, 2000);
+        return;
+      }
+
+      if (!r.ok) {
+        showBanner('warning', d.error || 'Could not load balance', '', 'Complete onboarding', '/host/connect/onboard');
+        return;
+      }
+
       document.getElementById('bal-available').textContent = fmt(d.available_usd);
       document.getElementById('bal-pending').textContent   = fmt(d.pending_usd);
       document.getElementById('bal-earned').textContent    = fmt(d.total_earned);
       document.getElementById('bal-paidout').textContent   = fmt(d.total_paid_out);
-      if (!d.payouts_enabled) showBanner('warning','Payouts not yet enabled','Complete your Stripe verification to enable withdrawals.','Finish Setup','/host/connect/onboard');
-    } catch(e) { showBanner('error','Could not load balance. Check your connection.',''); }
+
+      // ── Case 2: Account exists but payouts not yet enabled ──
+      if (!d.payouts_enabled) {
+        showBanner('warning',
+          'Payouts not yet enabled',
+          'Complete your Stripe verification to enable withdrawals.',
+          'Finish Setup',
+          '/host/connect/onboard'
+        );
+        const payoutBtn = document.getElementById('payout-btn');
+        if (payoutBtn) payoutBtn.disabled = true;
+      }
+    } catch(e) {
+      showBanner('error', 'Could not load balance. Check your connection.', '');
+    }
   }
 
   function showBanner(type, title, msg, ctaText, ctaHref) {

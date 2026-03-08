@@ -250,7 +250,16 @@ connectRoutes.get('/status', requireUserAuth(), async (c) => {
     `).bind(user.userId).first<any>()
 
     if (!row) {
-      return c.json({ connected: false, onboarding_status: 'not_started' })
+      return c.json({
+        connected:         false,
+        not_connected:     true,
+        account_id:        null,
+        onboarding_status: 'not_started',
+        details_submitted: false,
+        charges_enabled:   false,
+        payouts_enabled:   false,
+        redirect:          '/host/connect/onboard',
+      })
     }
 
     // Optionally refresh from Stripe (only if account is not yet complete)
@@ -332,7 +341,14 @@ connectRoutes.get('/balance', requireUserAuth(), async (c) => {
 
   try {
     const row = await getHostConnectAccount(db, user.userId)
-    if (!row) return c.json({ error: 'No connected account found. Please complete onboarding.' }, 404)
+    if (!row) return c.json({
+      not_connected:   true,
+      error:           'No connected account found. Please complete Stripe onboarding.',
+      redirect:        '/host/connect/onboard',
+      available_usd:   0,
+      pending_usd:     0,
+      payouts_enabled: false,
+    }, 200)  // 200 so the frontend can read the body and redirect gracefully
     if (!row.payouts_enabled) {
       return c.json({
         available_usd: 0, pending_usd: 0,
