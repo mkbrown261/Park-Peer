@@ -365,15 +365,17 @@ export async function fetchMetrics(db: D1Database, userId: number, role: 'DRIVER
       lifetime_revenue:     0,
     }
   } else {
-    // HOST
+    // HOST — count both 'confirmed' and 'completed' as active/earned bookings.
+    // A booking is 'confirmed' once payment is captured; 'completed' once the
+    // parking session ends. Both represent genuine revenue for tier purposes.
     const r12 = await db.prepare(`
       SELECT
-        COUNT(CASE WHEN b.status='completed' THEN 1 END)                                AS r12_completed,
-        COALESCE(SUM(CASE WHEN b.status='completed' THEN p.host_payout END), 0)         AS r12_revenue,
-        COUNT(CASE WHEN b.status='cancelled' AND b.cancelled_by='host' THEN 1 END)      AS r12_host_cancels,
-        COUNT(CASE WHEN b.status IN ('completed','cancelled') THEN 1 END)               AS r12_total_closed,
-        COUNT(CASE WHEN b.status IN ('confirmed','completed','cancelled') THEN 1 END)   AS r12_responded,
-        COUNT(b.id)                                                                      AS r12_total_requests
+        COUNT(CASE WHEN b.status IN ('confirmed','completed') THEN 1 END)                       AS r12_completed,
+        COALESCE(SUM(CASE WHEN b.status IN ('confirmed','completed') THEN p.host_payout END), 0) AS r12_revenue,
+        COUNT(CASE WHEN b.status='cancelled' AND b.cancelled_by='host' THEN 1 END)              AS r12_host_cancels,
+        COUNT(CASE WHEN b.status IN ('confirmed','completed','cancelled') THEN 1 END)            AS r12_total_closed,
+        COUNT(CASE WHEN b.status IN ('confirmed','completed','cancelled') THEN 1 END)            AS r12_responded,
+        COUNT(b.id)                                                                              AS r12_total_requests
       FROM bookings b
       LEFT JOIN payments p ON p.booking_id = b.id AND p.status = 'succeeded'
       WHERE b.host_id = ? AND b.created_at >= ?
@@ -387,7 +389,7 @@ export async function fetchMetrics(db: D1Database, userId: number, role: 'DRIVER
 
     const life = await db.prepare(`
       SELECT
-        COUNT(CASE WHEN b.status='completed' THEN 1 END) AS lifetime_completed,
+        COUNT(CASE WHEN b.status IN ('confirmed','completed') THEN 1 END) AS lifetime_completed,
         COALESCE(SUM(CASE WHEN p.status='succeeded' THEN p.host_payout END), 0) AS lifetime_revenue
       FROM bookings b
       LEFT JOIN payments p ON p.booking_id = b.id

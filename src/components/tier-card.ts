@@ -6,10 +6,9 @@
  *  - Metric gaps (what's needed to reach next tier)
  *  - Active benefits list
  *  - Loyalty credits balance
- *  - "Refresh" trigger button
+ *  - Working "Refresh Tier" button that calls /api/tiers/recalculate
  *
- * Called server-side with pre-fetched tier state; the card
- * also does a client-side /api/tiers/me fetch on load for freshness.
+ * Called server-side with pre-fetched tier state.
  */
 
 export interface TierCardData {
@@ -69,7 +68,7 @@ const TIER_COLORS: Record<string, { text: string; bg: string; border: string; ba
 }
 
 function tierColors(tierId: string) {
-  return TIER_COLORS[tierId] || TIER_COLORS['nomad']
+  return TIER_COLORS[tierId] || TIER_COLORS['steward']
 }
 
 function benefitRow(icon: string, label: string, active: boolean, value?: string) {
@@ -85,12 +84,15 @@ function benefitRow(icon: string, label: string, active: boolean, value?: string
 }
 
 export function renderTierCard(data: TierCardData): string {
-  const colors      = tierColors(data.current_tier)
-  const pct         = Math.round(data.progress_to_next * 100)
-  const b           = data.benefits
-  const tierSince   = data.tier_since
+  const colors    = tierColors(data.current_tier)
+  const pct       = Math.round(data.progress_to_next * 100)
+  const b         = data.benefits
+  const tierSince = data.tier_since
     ? new Date(data.tier_since).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
     : null
+
+  // Unique card ID so multiple cards on the same page work
+  const cardId = `tier-card-${data.role.toLowerCase()}-${Date.now()}`
 
   // Grace period warning banner
   const graceBanner = data.is_protected && data.grace_period_ends ? `
@@ -122,48 +124,56 @@ export function renderTierCard(data: TierCardData): string {
   ].filter(Boolean).join('')
 
   const noBenefits = benefitsHTML.trim() === ''
-    ? `<p class="text-gray-600 text-xs italic py-2">No active benefits yet — keep booking to level up!</p>`
+    ? `<p class="text-gray-500 text-xs italic py-2">You're on the base tier — complete bookings and earn ratings to unlock benefits.</p>`
     : ''
 
   // Progress section
   const progressSection = data.is_max_tier
-    ? `<div class="text-center py-2">
-        <p class="text-xs text-gray-400">
-          <i class="fas fa-crown text-amber-400 mr-1"></i>
-          You've reached the top tier. Thank you for being an elite member.
-        </p>
+    ? `<div class="text-center py-3">
+        <i class="fas fa-crown text-amber-400 text-lg mb-1 block"></i>
+        <p class="text-xs text-gray-400">You've reached the top tier. Thank you for being an elite host!</p>
       </div>`
     : `<div class="mb-4">
         <div class="flex items-center justify-between mb-1.5">
           <span class="text-xs text-gray-400">Progress to
             <span class="font-semibold ${colors.text}">${data.next_tier?.name || 'next tier'}</span>
           </span>
-          <span class="text-xs font-bold ${pct >= 80 ? 'text-lime-400' : 'text-gray-400'}">${pct}%</span>
+          <span class="text-xs font-bold ${pct >= 80 ? 'text-lime-400' : pct >= 50 ? 'text-indigo-400' : 'text-gray-400'}">${pct}%</span>
         </div>
-        <div class="w-full h-2 bg-charcoal-300 rounded-full overflow-hidden">
+        <div class="w-full h-2 bg-white/5 rounded-full overflow-hidden">
           <div class="${colors.bar} h-full rounded-full transition-all duration-700"
-               style="width: ${pct}%"></div>
+               style="width: ${Math.max(pct, 2)}%"></div>
         </div>
         ${data.gaps.length > 0 ? `
         <div class="mt-3 space-y-2">
           ${data.gaps.slice(0, 3).map(g => `
-            <div class="flex items-center gap-2">
-              <div class="flex-1">
-                <div class="flex justify-between mb-0.5">
-                  <span class="text-gray-500 text-xs">${g.metric}</span>
-                  <span class="text-gray-400 text-xs">${g.current} / ${g.required}</span>
-                </div>
-                <div class="w-full h-1 bg-charcoal-300 rounded-full overflow-hidden">
-                  <div class="h-full rounded-full ${g.pct_complete >= 100 ? 'bg-green-500' : colors.bar}"
-                       style="width: ${g.pct_complete}%"></div>
-                </div>
+            <div>
+              <div class="flex justify-between mb-0.5">
+                <span class="text-gray-500 text-xs">${g.metric}</span>
+                <span class="text-gray-400 text-xs">${g.current} / ${g.required} ${g.unit}</span>
+              </div>
+              <div class="w-full h-1 bg-white/5 rounded-full overflow-hidden">
+                <div class="h-full rounded-full transition-all duration-500 ${g.pct_complete >= 100 ? 'bg-green-500' : colors.bar}"
+                     style="width: ${Math.min(g.pct_complete, 100)}%"></div>
               </div>
             </div>`).join('')}
-        </div>` : ''}
+        </div>` : `<p class="text-gray-600 text-xs mt-2">Keep earning to progress!</p>`}
+      </div>`
+
+  // Revenue stat (host only)
+  const revenueStatCell = data.role === 'HOST' && (data.metrics.r12_revenue ?? 0) >= 0
+    ? `<div class="text-center">
+        <p class="text-white font-bold text-sm">$${((data.metrics.r12_revenue ?? 0)).toFixed(0)}</p>
+        <p class="text-gray-500 text-xs">revenue (12mo)</p>
+      </div>`
+    : `<div class="text-center">
+        <p class="text-white font-bold text-sm">${data.metrics.lifetime_completed}</p>
+        <p class="text-gray-500 text-xs">lifetime bookings</p>
       </div>`
 
   return `
-  <div class="bg-charcoal-100 rounded-2xl border ${colors.border} overflow-hidden">
+  <div id="${cardId}" class="bg-charcoal-100 rounded-2xl border ${colors.border} overflow-hidden">
+
     <!-- Tier Header -->
     <div class="relative p-5 pb-4" style="background: ${data.tier_gradient}22">
       <div class="flex items-start justify-between">
@@ -173,7 +183,7 @@ export function renderTierCard(data: TierCardData): string {
             <i class="fas ${data.tier_icon} text-white text-lg"></i>
           </div>
           <div>
-            <div class="flex items-center gap-2">
+            <div class="flex items-center gap-2 flex-wrap">
               <h3 class="font-black text-white text-lg leading-tight">${data.tier_name}</h3>
               <span class="text-xs px-2 py-0.5 rounded-full ${colors.bg} ${colors.text} ${colors.border} border font-medium">
                 ${data.role === 'DRIVER' ? 'Driver' : 'Host'}
@@ -182,15 +192,50 @@ export function renderTierCard(data: TierCardData): string {
             <p class="text-xs text-gray-400 mt-0.5 italic">${data.tier_tagline}</p>
           </div>
         </div>
-        <!-- Credits badge -->
-        ${data.loyalty_credits > 0 ? `
-        <div class="text-right">
+
+        <!-- Refresh button + credits -->
+        <div class="flex flex-col items-end gap-1.5">
+          <button id="${cardId}-refresh-btn"
+            onclick="(function(btn){
+              btn.disabled = true;
+              var icon = btn.querySelector('i');
+              if(icon){ icon.classList.add('fa-spin'); }
+              var statusEl = document.getElementById('${cardId}-status');
+              if(statusEl){ statusEl.textContent = 'Updating…'; statusEl.classList.remove('hidden'); }
+              fetch('/api/tiers/recalculate', {method:'POST', credentials:'include'})
+                .then(function(r){ return r.json(); })
+                .then(function(d){
+                  if(statusEl){
+                    if(d.success){
+                      var changed = d.results && d.results.some(function(r){ return r.changed; });
+                      statusEl.textContent = changed ? '✓ Tier updated!' : '✓ Up to date';
+                      statusEl.classList.remove('hidden');
+                    } else {
+                      statusEl.textContent = d.error || 'Try again later';
+                    }
+                  }
+                  setTimeout(function(){ location.reload(); }, 1200);
+                })
+                .catch(function(){
+                  if(statusEl){ statusEl.textContent = 'Refresh failed'; }
+                  btn.disabled = false;
+                  if(icon){ icon.classList.remove('fa-spin'); }
+                });
+            })(this)"
+            class="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-gray-400 hover:text-white text-xs transition disabled:opacity-40 disabled:cursor-wait"
+            title="Recalculate your tier based on latest activity">
+            <i class="fas fa-sync-alt text-xs"></i>
+            <span>Refresh</span>
+          </button>
+          <span id="${cardId}-status" class="hidden text-xs text-lime-400 font-medium text-right"></span>
+
+          ${data.loyalty_credits > 0 ? `
           <div class="inline-flex items-center gap-1 px-2.5 py-1 bg-lime-500/10 border border-lime-500/20 rounded-xl">
             <i class="fas fa-coins text-lime-400 text-xs"></i>
             <span class="text-lime-300 text-xs font-bold">$${data.loyalty_credits.toFixed(2)}</span>
           </div>
-          <p class="text-gray-600 text-xs mt-0.5 text-right">credits</p>
-        </div>` : ''}
+          <p class="text-gray-600 text-xs">credits</p>` : ''}
+        </div>
       </div>
 
       <!-- Tier stats row -->
@@ -203,10 +248,7 @@ export function renderTierCard(data: TierCardData): string {
           <p class="text-white font-bold text-sm">${data.metrics.r12_avg_rating > 0 ? data.metrics.r12_avg_rating.toFixed(1) + '★' : '—'}</p>
           <p class="text-gray-500 text-xs">avg rating</p>
         </div>
-        <div class="text-center">
-          <p class="text-white font-bold text-sm">${Math.round(data.metrics.r12_cancel_rate * 100)}%</p>
-          <p class="text-gray-500 text-xs">cancel rate</p>
-        </div>
+        ${revenueStatCell}
       </div>
     </div>
 

@@ -5729,7 +5729,7 @@ apiRoutes.post('/tiers/recalculate', requireUserAuth(), async (c) => {
   const rawRole = (session?.role || 'driver').toUpperCase()
 
   // Rate limit: max 1 manual recalc per 10 minutes per user
-  const limited = await isRateLimited(db, `tier_recalc:${userId}`, 1, 600)
+  const limited = isRateLimited(`tier_recalc:${userId}`, 1, 600_000)
   if (limited) return c.json({ error: 'Please wait before recalculating again.' }, 429)
 
   try {

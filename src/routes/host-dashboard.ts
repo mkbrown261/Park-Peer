@@ -104,7 +104,44 @@ hostDashboard.get('/', async (c) => {
           })
         }
       } catch(tierErr: any) {
-        console.error('[host-dashboard] tier error:', tierErr.message)
+        console.error('[host-dashboard] tier error:', tierErr.message, tierErr.stack)
+        // Even on error, try to show a minimal tier card using fallback steward data
+        try {
+          const fallbackState: any = await db.prepare(
+            'SELECT * FROM user_tier_state WHERE user_id = ? AND role = ?'
+          ).bind(userId, 'HOST').first()
+          if (fallbackState) {
+            const { getTierDef: _gtd, getNextTierGaps: _gng } = await import('../services/tiers')
+            const fDef = _gtd('HOST', fallbackState.current_tier || 'steward')
+            tierCardHTML = renderTierCard({
+              role: 'HOST',
+              current_tier: fallbackState.current_tier || 'steward',
+              tier_name: fDef.name,
+              tier_tagline: fDef.tagline,
+              tier_since: fallbackState.tier_since,
+              tier_gradient: fDef.gradient,
+              tier_icon: fDef.icon,
+              tier_rank: fDef.rank,
+              progress_to_next: fallbackState.progress_to_next || 0,
+              is_max_tier: false,
+              next_tier: null,
+              benefits: fDef.benefits as any,
+              metrics: {
+                r12_completed: fallbackState.r12_completed_bookings || 0,
+                r12_spend: 0,
+                r12_revenue: fallbackState.r12_total_revenue || 0,
+                r12_avg_rating: fallbackState.r12_avg_rating || 0,
+                r12_cancel_rate: fallbackState.r12_cancellation_rate || 0,
+                lifetime_completed: fallbackState.lifetime_completed || 0,
+              },
+              gaps: [],
+              loyalty_credits: fallbackState.loyalty_credits || 0,
+              is_protected: !!fallbackState.is_protected,
+              grace_period_ends: fallbackState.grace_period_ends,
+              consecutive_months: fallbackState.consecutive_months || 0,
+            })
+          }
+        } catch(_) { /* silently ignore double-error */ }
       }
 
       // Revenue from succeeded payments for this host
@@ -542,11 +579,17 @@ hostDashboard.get('/', async (c) => {
           <!-- Tier Status Card -->
           ${tierCardHTML || `
           <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-5">
-            <div class="flex items-center gap-2 mb-2">
-              <i class="fas fa-key text-gray-400"></i>
-              <h3 class="font-bold text-white text-sm">Host Tier</h3>
+            <div class="flex items-center justify-between mb-3">
+              <div class="flex items-center gap-2">
+                <i class="fas fa-key text-gray-400"></i>
+                <h3 class="font-bold text-white text-sm">Host Tier</h3>
+              </div>
+              <button onclick="fetch('/api/tiers/recalculate',{method:'POST',credentials:'include'}).then(()=>location.reload())"
+                class="text-xs px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white border border-white/10 transition">
+                <i class="fas fa-sync-alt mr-1"></i>Load
+              </button>
             </div>
-            <p class="text-gray-500 text-xs">Complete your first booking to unlock host tier status.</p>
+            <p class="text-gray-500 text-xs">Tier data loading — click Load to initialize your host tier status.</p>
           </div>`}
           
           <!-- Payout Card — real data -->
