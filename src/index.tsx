@@ -16,6 +16,8 @@ import { legalPages } from './routes/legal'
 import agreementRoutes from './routes/agreements'
 import { securityHeaders } from './middleware/security'
 import { connectRoutes } from './routes/connect'
+import { confirmationPage } from './routes/confirmation'
+import { featuresApiRoutes } from './routes/features-api'
 
 const app = new Hono()
 
@@ -60,6 +62,8 @@ app.route('/admin', adminPanel)
 // Admin API routes (protected by adminAuthMiddleware internally)
 app.route('/api/admin', adminApiRoutes)
 app.route('/api/connect', connectRoutes)
+app.route('/api', featuresApiRoutes)
 app.route('/api', apiRoutes)
+app.route('/booking/confirmation', confirmationPage)
 
 export default app

@@ -1434,3 +1434,134 @@ adminApiRoutes.post('/messaging-test', async (c: any) => {
   }, allOk ? 200 : 207)
 })
 
+
+// ════════════════════════════════════════════════════════════════════════════
+// GET /api/admin/fraud/flags — list unresolved fraud flags
+// ════════════════════════════════════════════════════════════════════════════
+adminApiRoutes.get('/fraud/flags', async (c: any) => {
+  const admin = await getAdminFromRequest(c)
+  if (!admin) return c.json({ error: 'Not authenticated' }, 401)
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'DB unavailable' }, 503)
+
+  const limit  = Math.min(Number(c.req.query('limit') || 50), 100)
+  const offset = Number(c.req.query('offset') || 0)
+  const resolved = c.req.query('resolved') === '1' ? 1 : 0
+
+  try {
+    const rows = await db.prepare(`
+      SELECT ff.*,
+        CASE ff.entity_type
+          WHEN 'user'    THEN (SELECT email FROM users    WHERE id = ff.entity_id)
+          WHEN 'listing' THEN (SELECT title FROM listings WHERE id = ff.entity_id)
+          WHEN 'booking' THEN 'Booking #' || ff.entity_id
+          ELSE NULL
+        END AS entity_label
+      FROM fraud_flags ff
+      WHERE ff.resolved = ?
+      ORDER BY ff.created_at DESC
+      LIMIT ? OFFSET ?
+    `).bind(resolved, limit, offset).all()
+
+    const totals = await db.prepare(`
+      SELECT
+        SUM(CASE WHEN resolved=0 THEN 1 ELSE 0 END) AS open_count,
+        SUM(CASE WHEN severity='critical' AND resolved=0 THEN 1 ELSE 0 END) AS critical_count,
+        SUM(CASE WHEN severity='high' AND resolved=0 THEN 1 ELSE 0 END) AS high_count
+      FROM fraud_flags
+    `).first<any>()
+
+    return c.json({ flags: rows.results || [], totals, limit, offset })
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// POST /api/admin/fraud/resolve/:id — resolve a fraud flag
+adminApiRoutes.post('/fraud/resolve/:id', async (c: any) => {
+  const admin = await getAdminFromRequest(c)
+  if (!admin) return c.json({ error: 'Not authenticated' }, 401)
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'DB unavailable' }, 503)
+  const flagId = c.req.param('id')
+
+  try {
+    await db.prepare(`
+      UPDATE fraud_flags SET resolved=1, resolved_by=0, resolved_at=datetime('now')
+      WHERE id=?
+    `).bind(flagId).run()
+    return c.json({ success: true })
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// POST /api/admin/quality/recalculate — recalculate quality scores for all listings
+adminApiRoutes.post('/quality/recalculate', async (c: any) => {
+  const admin = await getAdminFromRequest(c)
+  if (!admin) return c.json({ error: 'Not authenticated' }, 401)
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'DB unavailable' }, 503)
+
+  try {
+    // Simplified batch: update quality score based on available fields
+    await db.prepare(`
+      UPDATE listings SET
+        quality_score = (
+          CASE WHEN photos IS NOT NULL AND photos != '[]' AND photos != '' THEN 20 ELSE 0 END +
+          CASE WHEN description IS NOT NULL AND LENGTH(description) > 20 THEN 15 ELSE 0 END +
+          CASE WHEN rate_hourly IS NOT NULL OR rate_daily IS NOT NULL THEN 10 ELSE 0 END +
+          CASE WHEN available_from IS NOT NULL OR available_days IS NOT NULL THEN 20 ELSE 0 END +
+          CASE WHEN address_verified = 1 THEN 5 ELSE 0 END +
+          CASE WHEN instructions IS NOT NULL AND LENGTH(instructions) > 5 THEN 5 ELSE 0 END +
+          CASE WHEN (SELECT h.id_verified FROM users h WHERE h.id=listings.host_id) = 1
+               AND (SELECT h.stripe_account_id FROM users h WHERE h.id=listings.host_id) IS NOT NULL THEN 20 ELSE 0 END
+        ),
+        availability_confidence = (
+          CASE
+            WHEN booking_frequency >= 4 AND cancellation_rate <= 0.1 THEN 'high'
+            WHEN booking_frequency >= 1 OR last_booking_at >= datetime('now', '-30 days') THEN 'medium'
+            ELSE 'low'
+          END
+        )
+      WHERE status = 'active'
+    `).run()
+
+    const count = await db.prepare(`SELECT COUNT(*) as cnt FROM listings WHERE status='active'`).first<any>()
+    return c.json({ success: true, updated: count?.cnt || 0 })
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// GET /api/admin/referrals — list all referrals
+adminApiRoutes.get('/referrals', async (c: any) => {
+  const admin = await getAdminFromRequest(c)
+  if (!admin) return c.json({ error: 'Not authenticated' }, 401)
+  const db = c.env?.DB
+  if (!db) return c.json({ error: 'DB unavailable' }, 503)
+
+  try {
+    const rows = await db.prepare(`
+      SELECT r.*,
+        u1.email AS referrer_email, u1.full_name AS referrer_name,
+        u2.email AS referred_email, u2.full_name AS referred_name
+      FROM referrals r
+      LEFT JOIN users u1 ON r.referrer_user_id = u1.id
+      LEFT JOIN users u2 ON r.referred_user_id  = u2.id
+      ORDER BY r.created_at DESC LIMIT 100
+    `).all()
+
+    const stats = await db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN status='rewarded' THEN 1 ELSE 0 END) AS rewarded,
+        SUM(CASE WHEN status='rewarded' THEN reward_amount_cents ELSE 0 END) AS total_rewarded_cents
+      FROM referrals
+    `).first<any>()
+
+    return c.json({ referrals: rows.results || [], stats })
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
+  }
+})

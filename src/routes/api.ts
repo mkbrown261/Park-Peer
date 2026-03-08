@@ -326,6 +326,7 @@ apiRoutes.post('/auth/register', async (c) => {
     ? (body.role || 'driver').toUpperCase()
     : 'DRIVER'
   const phone = validateInput(body.phone, { maxLength: 20 })
+  const refCode = (body.ref_code || body.referral_code || '').trim().toUpperCase()
 
   try {
     // Check duplicate email
@@ -336,12 +337,25 @@ apiRoutes.post('/auth/register', async (c) => {
     const password_hash = await hashPassword(password)
 
     // Insert user — email_verified = 0 (requires email verification)
-      const result = await db.prepare(`
-      INSERT INTO users (email, password_hash, full_name, role, phone, status, email_verified, created_at)
-      VALUES (?, ?, ?, ?, ?, 'active', 0, datetime('now'))
-    `).bind(email, password_hash, sanitizeHtml(full_name), role, phone || null).run()
+    const result = await db.prepare(`
+      INSERT INTO users (email, password_hash, full_name, role, phone, status, email_verified, referred_by_code, created_at)
+      VALUES (?, ?, ?, ?, ?, 'active', 0, ?, datetime('now'))
+    `).bind(email, password_hash, sanitizeHtml(full_name), role, phone || null, refCode || null).run()
 
     const userId = Number(result.meta?.last_row_id ?? 0)
+
+    // Generate referral code for this new user
+    const userRefCode = (full_name.replace(/[^a-zA-Z]/g, '').toUpperCase().slice(0, 4) || 'PP') +
+      (userId * 7919 + 1234).toString(36).toUpperCase().slice(0, 5)
+    db.prepare('UPDATE users SET referral_code=? WHERE id=?').bind(userRefCode, userId).run().catch(() => {})
+    db.prepare('INSERT OR IGNORE INTO referrals (referrer_user_id, referral_code) VALUES (?,?)').bind(userId, userRefCode).run().catch(() => {})
+    db.prepare('INSERT OR IGNORE INTO user_wallet (user_id, balance_cents) VALUES (?,0)').bind(userId).run().catch(() => {})
+
+    // If user registered with a referral code, link it
+    if (refCode) {
+      db.prepare('UPDATE referrals SET referred_user_id=?, status=? WHERE referral_code=? AND status=?')
+        .bind(userId, 'registered', refCode, 'pending').run().catch(() => {})
+    }
 
     // Issue JWT in HttpOnly cookie
     const secret = c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod'
@@ -1787,6 +1801,50 @@ apiRoutes.post('/payments/confirm', async (c) => {
       })()
     }
 
+    // ── Referral reward: fire-and-forget after first booking ─────────────────
+    if (dbBookingId) {
+      ;(async () => {
+        try {
+          const referredUser = await db.prepare('SELECT id, referred_by_code FROM users WHERE id=?')
+            .bind(session.userId).first<any>()
+          if (referredUser?.referred_by_code) {
+            const refRow = await db.prepare(`
+              SELECT r.*, (SELECT COUNT(*) FROM bookings WHERE driver_id=? AND status IN ('confirmed','completed')) AS booking_count
+              FROM referrals r WHERE r.referral_code=? AND r.status='registered'
+            `).bind(session.userId, referredUser.referred_by_code).first<any>()
+            if (refRow && (refRow.booking_count || 0) >= 1) {
+              // Award referrer $10 credit
+              await db.batch([
+                db.prepare('UPDATE referrals SET status=?,reward_booking_id=?,rewarded_at=datetime(\'now\') WHERE id=?')
+                  .bind('rewarded', dbBookingId, refRow.id),
+                db.prepare('INSERT OR IGNORE INTO user_wallet (user_id, balance_cents) VALUES (?,0)')
+                  .bind(refRow.referrer_user_id),
+                db.prepare('UPDATE user_wallet SET balance_cents=balance_cents+1000, lifetime_earned_cents=lifetime_earned_cents+1000, updated_at=datetime(\'now\') WHERE user_id=?')
+                  .bind(refRow.referrer_user_id),
+                db.prepare('INSERT INTO wallet_transactions (user_id, type, amount_cents, description, referral_id, booking_id) VALUES (?,?,1000,?,?,?)')
+                  .bind(refRow.referrer_user_id, 'credit_referral', 'Referral reward — friend completed first booking', refRow.id, dbBookingId),
+                db.prepare('UPDATE users SET wallet_balance_cents=wallet_balance_cents+1000 WHERE id=?')
+                  .bind(refRow.referrer_user_id),
+              ])
+              console.log(`[referral reward] referrer=${refRow.referrer_user_id} +$10 for booking ${dbBookingId}`)
+            }
+          }
+
+          // Update listing availability stats after each booking
+          await db.prepare(`
+            UPDATE listings SET
+              last_booking_at = datetime('now'),
+              booking_frequency = (
+                SELECT CAST(COUNT(*) AS REAL) / 30 * 30
+                FROM bookings WHERE listing_id=? AND created_at >= datetime('now','-30 days')
+                  AND status IN ('confirmed','completed')
+              )
+            WHERE id = ?
+          `).bind(session.listingId || 0, dbBookingId).run().catch(() => {})
+        } catch (rErr: any) { console.error('[referral/avail update]', rErr.message) }
+      })()
+    }
+
     return c.json({
       success:                true,
       booking_id:             bookingRef,
@@ -2474,8 +2532,10 @@ apiRoutes.get('/listings', async (c) => {
              l.rate_hourly, l.rate_daily, l.rate_monthly,
              l.max_vehicle_size, l.amenities, l.instant_book,
              l.avg_rating, l.review_count, l.status,
-             l.pri_score,
-             u.full_name as host_name, u.id as host_id,
+             l.pri_score, l.quality_score,
+             l.availability_confidence, l.fraud_flags,
+             l.photos,
+             u.full_name as host_name, u.id as host_id, u.host_verified,
              hc.tier1_verified, hc.tier2_secure, hc.tier3_performance, hc.tier4_founding,
              pm.total_bookings as pri_total_bookings, pm.cancel_count,
              pm.avg_confirm_hours, pm.avg_response_minutes
@@ -2518,11 +2578,16 @@ apiRoutes.get('/listings', async (c) => {
         host: {
           id: r.host_id,
           name: r.host_name,
+          host_verified: r.host_verified === 1,
           verified: r.tier1_verified === 1,
           secure: r.tier2_secure === 1,
           performance: r.tier3_performance === 1,
           founding: r.tier4_founding === 1,
         },
+        availability_confidence: r.availability_confidence || 'medium',
+        quality_score: r.quality_score || 0,
+        fraud_flags: r.fraud_flags || 0,
+        photos: (() => { try { return JSON.parse(r.photos || '[]') } catch { return [] } })(),
         available: true
       }
     })
@@ -6369,5 +6434,121 @@ apiRoutes.put('/notifications/prefs', requireUserAuth(), async (c) => {
     return c.json({ success: true })
   } catch (e: any) {
     return c.json({ error: 'Failed to save preferences'}, 500)
+  }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// POST /api/twilio/diagnose — live Twilio account + SMS test
+// Requires header: X-Diag-Token: pp-twilio-diag-2026
+// Body: { phone?: string }  — if phone provided, sends a real test SMS
+// Returns full account status, phone number details, and optional send result.
+// TEMPORARY: remove after Twilio verification is confirmed.
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.post('/twilio/diagnose', async (c) => {
+  // Simple token guard — not a full auth, just prevents public abuse
+  const token = c.req.header('X-Diag-Token')
+  if (token !== 'pp-twilio-diag-2026') {
+    return c.json({ error: 'Unauthorized' }, 401)
+  }
+
+  const env = c.env as any
+  const sid   = env?.TWILIO_ACCOUNT_SID
+  const auth  = env?.TWILIO_AUTH_TOKEN
+  const from  = env?.TWILIO_PHONE_NUMBER
+
+  // Check secrets are present
+  if (!sid || !auth || !from) {
+    return c.json({
+      ok: false,
+      error: 'Missing Twilio secrets',
+      missing: { sid: !sid, auth: !auth, from: !from }
+    }, 503)
+  }
+
+  const credentials = btoa(`${sid}:${auth}`)
+  const results: any = { secrets_present: true, sid_prefix: sid.slice(0, 6) + '…', from_number: from }
+
+  // 1. Validate credentials — fetch account info
+  const t0 = Date.now()
+  try {
+    const acctRes = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}.json`, {
+      headers: { Authorization: `Basic ${credentials}` }
+    })
+    const acct = await acctRes.json() as any
+    results.account_latency_ms = Date.now() - t0
+
+    if (!acctRes.ok) {
+      results.account_ok = false
+      results.account_error = acct?.message || `HTTP ${acctRes.status}`
+      results.account_code  = acct?.code
+      results.fix = acctRes.status === 401
+        ? 'TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN is wrong — re-enter at Twilio console'
+        : 'Check Twilio account status at console.twilio.com'
+      return c.json({ ok: false, ...results }, 207)
+    }
+
+    results.account_ok     = true
+    results.account_status = acct.status          // 'active', 'suspended', 'closed'
+    results.account_name   = acct.friendly_name
+    results.account_type   = acct.type            // 'Trial' or 'Full'
+    results.is_trial       = acct.type === 'Trial'
+    results.trial_warning  = acct.type === 'Trial'
+      ? 'TRIAL ACCOUNT: SMS can only be sent to Twilio Verified Caller IDs. Upgrade at console.twilio.com/billing to lift this restriction.'
+      : null
+
+    // 2. Validate the from-number is on this account
+    const numRes = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${sid}/IncomingPhoneNumbers.json?PhoneNumber=${encodeURIComponent(from)}`,
+      { headers: { Authorization: `Basic ${credentials}` } }
+    )
+    const numData = await numRes.json() as any
+    const numbers = numData.incoming_phone_numbers || []
+    results.from_number_on_account = numbers.length > 0
+    results.from_number_details    = numbers[0] ? {
+      friendly_name:  numbers[0].friendly_name,
+      sms_enabled:    numbers[0].capabilities?.sms ?? false,
+      mms_enabled:    numbers[0].capabilities?.mms ?? false,
+      voice_enabled:  numbers[0].capabilities?.voice ?? false,
+    } : null
+    if (!results.from_number_on_account) {
+      results.from_number_warning = `${from} was not found on this Twilio account. Check TWILIO_PHONE_NUMBER secret.`
+    }
+
+    // 3. Send real test SMS if phone provided
+    let body: any = {}
+    try { body = await c.req.json() } catch {}
+    const toPhone = String(body.phone || '').trim()
+
+    if (toPhone) {
+      const toNorm = toPhone.startsWith('+') ? toPhone : `+1${toPhone.replace(/\D/g, '')}`
+      const t1 = Date.now()
+      const smsRes = await fetch(
+        `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Basic ${credentials}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            From: from,
+            To:   toNorm,
+            Body: `✅ ParkPeer SMS Test — LIVE\nTwilio is connected and working.\nAccount: ${acct.friendly_name}\nType: ${acct.type}\nSent: ${new Date().toISOString()}`,
+          }).toString()
+        }
+      )
+      const smsData = await smsRes.json() as any
+      results.test_sms = {
+        to:          toNorm,
+        ok:          smsRes.ok,
+        http_status: smsRes.status,
+        sid:         smsData.sid || null,
+        status:      smsData.status || null,
+        error:       smsRes.ok ? null : (smsData?.message || `Twilio error ${smsData?.code}`),
+        error_code:  smsData?.code || null,
+        latency_ms:  Date.now() - t1,
+      }
+    }
+
+    return c.json({ ok: results.account_status === 'active', ...results })
+  } catch (e: any) {
+    return c.json({ ok: false, error: 'Network error: ' + e.message, ...results }, 500)
   }
 })

@@ -341,6 +341,7 @@ hostDashboard.get('/', async (c) => {
                   <span><i class="fas fa-calendar text-indigo-400 mr-1"></i>${l.total_bookings || 0} bookings</span>
                   ${l.avg_rating > 0 ? `<span><i class="fas fa-star text-amber-400 mr-1"></i>${Number(l.avg_rating).toFixed(1)}</span>` : ''}
                   ${l.revenue > 0 ? `<span class="text-lime-500 font-semibold"><i class="fas fa-dollar-sign mr-0.5"></i>${Number(l.revenue).toFixed(0)} earned</span>` : ''}
+                  ${l.quality_score > 0 ? `<span style="font-size:11px;font-weight:600;color:${l.quality_score >= 80 ? '#22c55e' : l.quality_score >= 60 ? '#3b82f6' : l.quality_score >= 40 ? '#f59e0b' : '#ef4444'};background:${l.quality_score >= 80 ? 'rgba(34,197,94,0.1)' : l.quality_score >= 60 ? 'rgba(59,130,246,0.1)' : l.quality_score >= 40 ? 'rgba(245,158,11,0.1)' : 'rgba(239,68,68,0.1)'};border-radius:8px;padding:1px 7px;"><i class="fas fa-gauge-high mr-1" style="font-size:9px"></i>Quality: ${l.quality_score}</span>` : ''}
                 </div>
               </div>
               <div class="flex flex-col gap-2 relative">

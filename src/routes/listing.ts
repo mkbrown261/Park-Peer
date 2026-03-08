@@ -29,9 +29,10 @@ listingPage.get('/:id', async (c) => {
                l.max_vehicle_size, l.amenities, l.photos,
                l.instant_book, l.available_from, l.available_to,
                l.avg_rating, l.review_count, l.total_bookings,
-               l.status,
+               l.status, l.instructions, l.quality_score,
+               l.availability_confidence,
                u.full_name as host_name, u.created_at as host_joined,
-               u.id as host_id
+               u.id as host_id, u.host_verified, u.id_verified, u.stripe_account_id
         FROM listings l
         LEFT JOIN users u ON l.host_id = u.id
         WHERE l.id = ?
@@ -571,6 +572,25 @@ listingPage.get('/:id', async (c) => {
                 <i class="fas fa-bolt"></i>
                 Reserve Now
               </a>
+
+              <!-- Rebooking prompt — injected dynamically by JS -->
+              <div id="rebook-prompt" class="hidden mb-3 p-3 rounded-xl" style="background:rgba(91,46,255,0.08);border:1px solid rgba(91,46,255,0.2);">
+                <div class="flex items-center gap-2">
+                  <i class="fas fa-clock-rotate-left" style="color:#a78bfa;"></i>
+                  <div class="flex-1 min-w-0">
+                    <p class="text-sm font-semibold" style="color:#e2e8f0;">You've parked here before!</p>
+                    <p class="text-xs" style="color:#94a3b8;" id="rebook-last-date"></p>
+                  </div>
+                  <a href="/booking/${id}" class="text-xs px-3 py-1.5 rounded-lg font-bold flex-shrink-0" style="background:#5B2EFF;color:#fff;">Book Again</a>
+                </div>
+              </div>
+
+              <!-- Get Directions button -->
+              <button onclick="openDirectionsModal()" class="w-full flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-semibold mb-3" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);color:#94a3b8;">
+                <i class="fas fa-location-arrow" style="color:#3b82f6;"></i>
+                Get Directions
+              </button>
+
               <p class="text-center text-gray-500 text-xs mb-4">You won't be charged yet · Free cancellation</p>
 
               <div class="flex items-start gap-2 text-xs text-gray-500">
@@ -586,7 +606,7 @@ listingPage.get('/:id', async (c) => {
                   ${hostInitial}
                 </div>
                 <div>
-                  <p class="font-bold text-white">Hosted by ${l.host_name || 'ParkPeer Host'}</p>
+                  <p class="font-bold text-white">Hosted by ${l.host_name || 'ParkPeer Host'}${l.host_verified ? ' <span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;font-weight:700;color:#5B2EFF;background:rgba(91,46,255,0.1);border:1px solid rgba(91,46,255,0.2);border-radius:10px;padding:1px 6px;vertical-align:middle;"><i class=\'fas fa-shield-check\' style=\'font-size:9px\'></i>Verified</span>' : ''}</p>
                   <div class="flex items-center gap-1 text-xs text-gray-400">
                     <i class="fas fa-star text-amber-400"></i>
                     <span>Member since ${hostJoined}</span>
@@ -643,7 +663,68 @@ listingPage.get('/:id', async (c) => {
 
     if (arriveEl) arriveEl.addEventListener('change', updatePrice);
     if (departEl) departEl.addEventListener('change', updatePrice);
+
+    // ── Feature: Rebooking Check ────────────────────────────────────────────
+    (async function checkRebooking() {
+      try {
+        const res = await fetch('/api/rebooking/check/${id}', { credentials: 'include' });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.has_previous_booking && data.last_booking) {
+          const prompt = document.getElementById('rebook-prompt');
+          const dateEl = document.getElementById('rebook-last-date');
+          if (prompt) prompt.classList.remove('hidden');
+          if (dateEl && data.last_booking.start_time) {
+            dateEl.textContent = 'Last visit: ' + new Date(data.last_booking.start_time).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+          }
+        }
+      } catch (_) {}
+    })();
+
+    // ── Feature: Directions Modal ────────────────────────────────────────────
+    const LAT = ${l.lat || 'null'};
+    const LNG = ${l.lng || 'null'};
+    const FULL_ADDR = ${JSON.stringify([l.address, l.city, l.state].filter(Boolean).join(', '))};
+
+    function openDirectionsModal() {
+      document.getElementById('directions-modal-listing').classList.remove('hidden');
+      document.body.style.overflow = 'hidden';
+    }
+    function closeDirectionsModal() {
+      document.getElementById('directions-modal-listing').classList.add('hidden');
+      document.body.style.overflow = '';
+    }
   </script>
+
+  <!-- Directions Modal -->
+  <div id="directions-modal-listing" class="hidden fixed inset-0 z-50 flex items-end" style="background:rgba(0,0,0,0.8);" onclick="closeDirectionsModal()">
+    <div class="w-full rounded-t-3xl p-6" style="background:#13131a;max-width:520px;margin:0 auto;" onclick="event.stopPropagation()">
+      <div class="w-10 h-1 rounded-full mx-auto mb-5" style="background:rgba(255,255,255,0.15);"></div>
+      <h3 class="font-bold text-lg mb-1" style="color:#fff;">Get Directions</h3>
+      <p class="text-sm mb-5" style="color:#94a3b8;">${[l.address, l.city, l.state].filter(Boolean).join(', ')}</p>
+      <div class="space-y-3">
+        <a id="gmaps-link" href="${l.lat && l.lng ? `https://www.google.com/maps/dir/?api=1&destination=${l.lat},${l.lng}` : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([l.address, l.city, l.state].filter(Boolean).join(', '))}`}" target="_blank"
+           class="flex items-center gap-4 p-4 rounded-2xl font-semibold" style="background:#fff;color:#1a1a2e;">
+          <i class="fas fa-map-marked-alt text-2xl" style="color:#4285F4;"></i>
+          <span class="flex-1">Google Maps</span>
+          <i class="fas fa-arrow-up-right-from-square text-xs" style="color:#94a3b8;"></i>
+        </a>
+        <a id="apple-link" href="${l.lat && l.lng ? `http://maps.apple.com/?daddr=${l.lat},${l.lng}` : `http://maps.apple.com/?q=${encodeURIComponent([l.address, l.city, l.state].filter(Boolean).join(', '))}`}" target="_blank"
+           class="flex items-center gap-4 p-4 rounded-2xl font-semibold" style="background:#fff;color:#1a1a2e;">
+          <i class="fas fa-map text-2xl" style="color:#007AFF;"></i>
+          <span class="flex-1">Apple Maps</span>
+          <i class="fas fa-arrow-up-right-from-square text-xs" style="color:#94a3b8;"></i>
+        </a>
+        <a id="waze-link" href="${l.lat && l.lng ? `https://waze.com/ul?ll=${l.lat},${l.lng}&navigate=yes` : `https://waze.com/ul?q=${encodeURIComponent([l.address, l.city, l.state].filter(Boolean).join(', '))}&navigate=yes`}" target="_blank"
+           class="flex items-center gap-4 p-4 rounded-2xl font-semibold" style="background:#fff;color:#1a1a2e;">
+          <i class="fas fa-route text-2xl" style="color:#00AAFF;"></i>
+          <span class="flex-1">Waze</span>
+          <i class="fas fa-arrow-up-right-from-square text-xs" style="color:#94a3b8;"></i>
+        </a>
+      </div>
+      <button onclick="closeDirectionsModal()" class="mt-4 w-full py-3 rounded-xl text-sm font-semibold" style="background:rgba(255,255,255,0.06);color:#94a3b8;border:1px solid rgba(255,255,255,0.08);">Cancel</button>
+    </div>
+  </div>
   `
   return c.html(Layout(l.title, content, '', navSession))
 })

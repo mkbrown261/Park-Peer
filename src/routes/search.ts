@@ -980,12 +980,62 @@ searchPage.get('/', async (c) => {
   function hostBadges(host) {
     if (!host) return ''
     let badges = ''
-    if (host.verified)    badges += \`<span class="badge-tooltip ml-1"><span style="color:#2563eb;font-size:12px">✓</span><span class="badge-tip">Identity Verified</span></span>\`
-    if (host.secure)      badges += \`<span class="badge-tooltip ml-0.5"><span style="color:#16a34a;font-size:12px">🛡</span><span class="badge-tip">Secure Location</span></span>\`
-    if (host.performance) badges += \`<span class="badge-tooltip ml-0.5"><span style="color:#d97706;font-size:12px">⭐</span><span class="badge-tip">High-Performance Host</span></span>\`
-    if (host.founding)    badges += \`<span class="badge-tooltip ml-0.5"><span style="color:#7c3aed;font-size:12px">🏆</span><span class="badge-tip">Founding Member</span></span>\`
+    if (host.host_verified || host.verified) badges += '<span class="badge-tooltip ml-1"><span style="color:#5B2EFF;font-size:10px;background:rgba(91,46,255,0.12);border:1px solid rgba(91,46,255,0.3);border-radius:10px;padding:1px 5px;font-weight:700;">&#10003; Verified</span><span class="badge-tip">Verified Host &mdash; ID, Stripe &amp; 4.5+ Rating</span></span>'
+    else if (host.verified) badges += '<span class="badge-tooltip ml-1"><span style="color:#2563eb;font-size:12px">&#10003;</span><span class="badge-tip">Identity Verified</span></span>'
+    if (host.secure)      badges += '<span class="badge-tooltip ml-0.5"><span style="color:#16a34a;font-size:12px">&#x1F6E1;</span><span class="badge-tip">Secure Location</span></span>'
+    if (host.performance) badges += '<span class="badge-tooltip ml-0.5"><span style="color:#d97706;font-size:12px">&#11088;</span><span class="badge-tip">High-Performance Host</span></span>'
+    if (host.founding)    badges += '<span class="badge-tooltip ml-0.5"><span style="color:#7c3aed;font-size:12px">&#127942;</span><span class="badge-tip">Founding Member</span></span>'
     return badges
   }
+
+  function confidenceBadge(level) {
+    if (!level || level === 'medium') return ''
+    if (level === 'high') return '<span style="font-size:10px;font-weight:600;color:#22c55e;background:rgba(34,197,94,0.1);border-radius:8px;padding:1px 6px;">&#9679; High Avail.</span>'
+    if (level === 'low')  return '<span style="font-size:10px;font-weight:600;color:#ef4444;background:rgba(239,68,68,0.1);border-radius:8px;padding:1px 6px;">&#9680; Limited Avail.</span>'
+    return ''
+  }
+
+  // Favorite toggle
+  const savedSpots = new Set()
+  function buildFaveBtn(listingId) {
+    const isSaved = savedSpots.has(String(listingId))
+    const btn = document.createElement('button')
+    btn.className = 'fave-btn'
+    btn.dataset.lid = listingId
+    btn.title = isSaved ? 'Saved' : 'Save spot'
+    btn.style.cssText = 'position:absolute;top:6px;right:6px;z-index:10;background:rgba(0,0,0,0.55);border:none;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:transform 0.2s;backdrop-filter:blur(4px);'
+    btn.innerHTML = '<i class="fas fa-heart" style="font-size:12px;color:' + (isSaved ? '#ef4444' : 'rgba(255,255,255,0.5)') + '"></i>'
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation(); e.preventDefault()
+      const isSavedNow = savedSpots.has(String(listingId))
+      try {
+        const res = await fetch('/api/favorites', {
+          method: isSavedNow ? 'DELETE' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ listing_id: listingId })
+        })
+        if (res.status === 401) { window.location.href = '/auth/login?next=/search'; return; }
+        if (res.ok) {
+          const icon = btn.querySelector('i')
+          if (isSavedNow) { savedSpots.delete(String(listingId)); if(icon) icon.style.color = 'rgba(255,255,255,0.5)'; btn.title = 'Save spot' }
+          else             { savedSpots.add(String(listingId));    if(icon) icon.style.color = '#ef4444';             btn.title = 'Saved!' }
+          btn.style.transform = 'scale(1.3)'
+          setTimeout(() => btn.style.transform = 'scale(1)', 300)
+        }
+      } catch (_) {}
+    })
+    return btn
+  }
+  async function loadSavedSpots() {
+    try {
+      const res = await fetch('/api/favorites', { credentials: 'include' })
+      if (!res.ok) return
+      const data = await res.json()
+      ;(data.favorites || []).forEach(f => savedSpots.add(String(f.id)))
+    } catch (_) {}
+  }
+  loadSavedSpots()
 
   const MAP_STYLES = {
     dark:      'mapbox://styles/mapbox/dark-v11',
@@ -1287,8 +1337,11 @@ searchPage.get('/', async (c) => {
         ? '<p class="text-gray-500 text-xs">$' + l.price_daily.toFixed(0) + '/day</p>'
         : ''
 
+      // Build confidence badge
+      const confHtml = confidenceBadge(l.availability_confidence)
+
       card.innerHTML =
-        '<div class="flex gap-0">' +
+        '<div class="flex gap-0 relative">' +
           '<div class="w-28 h-28 bg-gradient-to-br from-charcoal-300 to-charcoal-400 flex items-center justify-center flex-shrink-0 relative overflow-hidden">' +
             '<i class="fas ' + typeIcon + ' text-3xl text-white/20"></i>' +
             '<span class="' + badge.cls + ' text-xs font-bold absolute top-2 left-2 px-1.5 py-0.5 rounded-md">' + badge.text + '</span>' +
@@ -1314,7 +1367,7 @@ searchPage.get('/', async (c) => {
                   '<span class="text-white text-xs font-semibold">' + (l.rating || 0).toFixed(1) + '</span>' +
                   '<span class="text-gray-500 text-xs">(' + (l.review_count || 0) + ')</span>' +
                 '</div>' +
-                priHtml +
+                (confHtml ? confHtml : priHtml) +
               '</div>' +
               '<div class="flex gap-1 flex-wrap justify-end items-center">' +
                 tags.slice(0,2).map(t => '<span class="text-xs bg-charcoal-300 text-gray-400 px-1.5 py-0.5 rounded-md">' + t + '</span>').join('') +
@@ -1323,6 +1376,10 @@ searchPage.get('/', async (c) => {
             hostLine +
           '</div>' +
         '</div>'
+
+      // Inject heart/save button into image section
+      const imgSection = card.querySelector('.w-28')
+      if (imgSection) { imgSection.style.position = 'relative'; imgSection.appendChild(buildFaveBtn(l.id)) }
 
       card.addEventListener('mouseenter', () => highlightPin(l.id))
       card.addEventListener('mouseleave', () => unhighlightPin(l.id))

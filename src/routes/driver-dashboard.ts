@@ -467,6 +467,36 @@ driverDashboard.get('/', async (c) => {
             </div>
           </div>
 
+          <!-- Pending Reviews -->
+          <div id="pending-reviews-section" class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden hidden">
+            <div class="flex items-center justify-between p-5 border-b border-white/5">
+              <h3 class="font-bold text-white text-lg flex items-center gap-2">
+                <i class="fas fa-star text-amber-400"></i> Rate Your Stays
+              </h3>
+              <span id="pending-reviews-count" class="text-xs px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-400 font-bold"></span>
+            </div>
+            <div id="pending-reviews-list" class="divide-y divide-white/5 p-4 space-y-3"></div>
+          </div>
+
+          <!-- Saved Spots -->
+          <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
+            <div class="flex items-center justify-between p-5 border-b border-white/5">
+              <h3 class="font-bold text-white text-lg flex items-center gap-2">
+                <i class="fas fa-heart text-red-400"></i> Saved Spots
+              </h3>
+              <a href="/search" class="text-xs text-indigo-400 hover:text-indigo-300">Find more →</a>
+            </div>
+            <div id="saved-spots-list" class="divide-y divide-white/5">
+              <div class="p-5 text-center">
+                <div class="w-10 h-10 rounded-full bg-charcoal-200 flex items-center justify-center mx-auto mb-2">
+                  <i class="fas fa-heart text-gray-500"></i>
+                </div>
+                <p class="text-gray-500 text-sm">No saved spots yet</p>
+                <a href="/search" class="text-xs text-indigo-400 mt-1 block">Browse listings →</a>
+              </div>
+            </div>
+          </div>
+
           <!-- Savings Dashboard -->
           ${savingsCardHTML}
         </div>
@@ -489,10 +519,10 @@ driverDashboard.get('/', async (c) => {
             <h3 class="font-bold text-white mb-4">Quick Actions</h3>
             <div class="grid grid-cols-2 gap-2">
               ${[
-                { label: 'Book Now',  icon: 'fa-search',     href: '/search',  color: 'text-indigo-400' },
-                { label: 'View Map',  icon: 'fa-map',        href: '/search',  color: 'text-lime-500' },
-                { label: 'Support',   icon: 'fa-headset',    href: '#',        color: 'text-blue-400' },
-                { label: 'Receipts',  icon: 'fa-receipt',    href: '#',        color: 'text-amber-400' },
+                { label: 'Book Now',   icon: 'fa-search',     href: '/search',              color: 'text-indigo-400' },
+                { label: 'Saved Spots',icon: 'fa-heart',       href: '#saved',               color: 'text-red-400' },
+                { label: 'Support',    icon: 'fa-headset',    href: '#',                    color: 'text-blue-400' },
+                { label: 'Receipts',   icon: 'fa-receipt',    href: '#',                    color: 'text-amber-400' },
               ].map(a => `
                 <a href="${a.href}" class="flex flex-col items-center gap-2 p-3 bg-charcoal-200 hover:bg-charcoal-300 rounded-xl text-center transition-colors group">
                   <i class="fas ${a.icon} ${a.color} text-xl"></i>
@@ -500,6 +530,49 @@ driverDashboard.get('/', async (c) => {
                 </a>
               `).join('')}
             </div>
+          </div>
+
+          <!-- Referral Card -->
+          <div id="referral-card" class="rounded-2xl p-5" style="background:linear-gradient(135deg,rgba(91,46,255,0.15),rgba(167,139,250,0.08));border:1px solid rgba(91,46,255,0.2);">
+            <div class="flex items-center gap-2 mb-3">
+              <i class="fas fa-gift text-purple-400"></i>
+              <h3 class="font-bold text-white text-sm">Refer & Earn $10</h3>
+            </div>
+            <p class="text-gray-400 text-xs mb-3">Share your code. They get $10 off. You get $10 credit after their first booking.</p>
+            <div id="referral-code-display" class="flex items-center gap-2 mb-3 p-2.5 rounded-xl" style="background:rgba(0,0,0,0.3);border:1px solid rgba(91,46,255,0.2);">
+              <span class="font-mono font-bold text-purple-300 text-sm flex-1" id="my-referral-code">Loading...</span>
+              <button onclick="copyReferralCode()" class="text-xs text-indigo-400 hover:text-indigo-300 flex-shrink-0">
+                <i class="fas fa-copy"></i>
+              </button>
+            </div>
+            <div class="grid grid-cols-3 gap-2 mb-3" id="referral-stats">
+              <div class="text-center p-2 rounded-lg" style="background:rgba(0,0,0,0.3);">
+                <p class="text-lg font-black text-white" id="ref-total">—</p>
+                <p class="text-xs text-gray-500">Invited</p>
+              </div>
+              <div class="text-center p-2 rounded-lg" style="background:rgba(0,0,0,0.3);">
+                <p class="text-lg font-black text-green-400" id="ref-rewarded">—</p>
+                <p class="text-xs text-gray-500">Rewarded</p>
+              </div>
+              <div class="text-center p-2 rounded-lg" style="background:rgba(0,0,0,0.3);">
+                <p class="text-lg font-black text-amber-400" id="ref-earned">—</p>
+                <p class="text-xs text-gray-500">Earned</p>
+              </div>
+            </div>
+            <button onclick="shareReferralCode()" class="w-full py-2.5 text-center rounded-xl text-sm font-bold transition-colors" style="background:#5B2EFF;color:#fff;">
+              <i class="fas fa-share-nodes mr-2"></i>Share Code
+            </button>
+          </div>
+
+          <!-- Wallet Balance -->
+          <div id="wallet-card" class="bg-charcoal-100 rounded-2xl border border-white/5 p-5 hidden">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="font-bold text-white text-sm flex items-center gap-2">
+                <i class="fas fa-wallet text-green-400"></i> Parking Wallet
+              </h3>
+              <span id="wallet-balance" class="text-green-400 font-black text-lg">$0.00</span>
+            </div>
+            <p class="text-gray-500 text-xs">Credits earned from referrals. Applied automatically at checkout.</p>
           </div>
 
           <!-- Account Status -->
@@ -909,6 +982,147 @@ driverDashboard.get('/notifications', async (c) => {
         } catch {}
       });
     })();
+
+    // ── Feature Pack: Saved Spots, Referral, Pending Reviews ────────────────
+    (async function featurePackInit() {
+      try {
+        // Load saved spots
+        const favRes = await fetch('/api/favorites', { credentials: 'include' });
+        if (favRes.ok) {
+          const favData = await favRes.json();
+          const list = document.getElementById('saved-spots-list');
+          if (list && favData.favorites && favData.favorites.length > 0) {
+            list.innerHTML = favData.favorites.map(f => {
+              const photos = (() => { try { return JSON.parse(f.photos || '[]') } catch { return [] } })();
+              const cover = photos[0] || '';
+              const rate = f.rate_hourly ? '$' + Number(f.rate_hourly).toFixed(0) + '/hr' : (f.rate_daily ? '$' + Number(f.rate_daily).toFixed(0) + '/day' : '');
+              const conf = f.availability_confidence;
+              const confBadge = conf === 'high' ? '<span style="font-size:9px;color:#22c55e;background:rgba(34,197,94,0.1);border-radius:6px;padding:1px 5px;font-weight:600;">&#9679; High Avail.</span>' :
+                                conf === 'low'  ? '<span style="font-size:9px;color:#ef4444;background:rgba(239,68,68,0.1);border-radius:6px;padding:1px 5px;font-weight:600;">&#9680; Limited</span>' : '';
+              return '<div class="flex items-center gap-3 p-4 hover:bg-charcoal-200 transition-colors cursor-pointer group" onclick="window.location.href=\'/listing/' + f.id + '\'">' +
+                '<div class="w-12 h-12 rounded-xl overflow-hidden flex-shrink-0 bg-charcoal-300 flex items-center justify-center">' +
+                  (cover ? '<img src="' + cover + '" class="w-full h-full object-cover">' : '<i class="fas fa-parking text-gray-500"></i>') +
+                '</div>' +
+                '<div class="flex-1 min-w-0">' +
+                  '<p class="font-semibold text-white text-sm truncate">' + (f.title || f.address || 'Parking Spot') + '</p>' +
+                  '<p class="text-gray-500 text-xs truncate">' + (f.address || '') + (f.city ? ', ' + f.city : '') + '</p>' +
+                  '<div class="flex items-center gap-2 mt-0.5">' +
+                    (rate ? '<span class="text-xs font-bold text-indigo-400">' + rate + '</span>' : '') +
+                    confBadge +
+                  '</div>' +
+                '</div>' +
+                '<a href="/booking/' + f.id + '" onclick="event.stopPropagation()" class="text-xs px-2.5 py-1.5 rounded-lg font-bold flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" style="background:#5B2EFF;color:#fff;">Book</a>' +
+              '</div>';
+            }).join('');
+          }
+        }
+      } catch (_) {}
+
+      try {
+        // Load referral code + stats
+        const refRes = await fetch('/api/referral/code', { credentials: 'include' });
+        if (refRes.ok) {
+          const refData = await refRes.json();
+          const codeEl = document.getElementById('my-referral-code');
+          if (codeEl) codeEl.textContent = refData.code || '—';
+          const totalEl = document.getElementById('ref-total');
+          const rewEl   = document.getElementById('ref-rewarded');
+          const earnEl  = document.getElementById('ref-earned');
+          if (totalEl) totalEl.textContent = refData.stats?.total_referrals ?? '0';
+          if (rewEl)   rewEl.textContent   = refData.stats?.rewarded_count  ?? '0';
+          if (earnEl)  earnEl.textContent  = refData.stats?.total_earned    ?? '$0';
+        }
+      } catch (_) {}
+
+      try {
+        // Load wallet balance
+        const walletRes = await fetch('/api/wallet', { credentials: 'include' });
+        if (walletRes.ok) {
+          const walletData = await walletRes.json();
+          if ((walletData.balance_cents || 0) > 0) {
+            const walletCard = document.getElementById('wallet-card');
+            const balEl      = document.getElementById('wallet-balance');
+            if (walletCard) walletCard.classList.remove('hidden');
+            if (balEl) balEl.textContent = walletData.balance;
+          }
+        }
+      } catch (_) {}
+
+      try {
+        // Load pending reviews
+        const revRes = await fetch('/api/reviews/pending', { credentials: 'include' });
+        if (revRes.ok) {
+          const revData = await revRes.json();
+          const pending = revData.pending || [];
+          if (pending.length > 0) {
+            const section = document.getElementById('pending-reviews-section');
+            const countEl = document.getElementById('pending-reviews-count');
+            const listEl  = document.getElementById('pending-reviews-list');
+            if (section) section.classList.remove('hidden');
+            if (countEl) countEl.textContent = pending.length + ' pending';
+            if (listEl) {
+              listEl.innerHTML = pending.map(b =>
+                '<div class="p-3 rounded-xl" style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);">' +
+                  '<div class="flex items-start justify-between gap-2 mb-2">' +
+                    '<div>' +
+                      '<p class="font-semibold text-white text-sm">' + (b.listing_title || b.address || 'Parking Spot') + '</p>' +
+                      '<p class="text-gray-500 text-xs">' + (b.host_name || 'Host') + ' · ' + new Date(b.start_time).toLocaleDateString() + '</p>' +
+                    '</div>' +
+                  '</div>' +
+                  '<div class="flex gap-1" id="stars-' + b.id + '">' +
+                    [1,2,3,4,5].map(n => '<button onclick="setRating(' + b.id + ',' + n + ')" class="star-btn text-xl" data-bid="' + b.id + '" data-n="' + n + '" style="color:rgba(255,255,255,0.2);background:none;border:none;cursor:pointer;padding:2px;">&#9733;</button>').join('') +
+                  '</div>' +
+                  '<textarea id="comment-' + b.id + '" placeholder="Share your experience (optional)" rows="2" style="width:100%;margin-top:8px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);color:#e2e8f0;border-radius:10px;padding:8px;font-size:13px;resize:none;outline:none;"></textarea>' +
+                  '<button onclick="submitReview(' + b.id + ')" class="mt-2 w-full py-2 rounded-xl text-sm font-bold" style="background:#5B2EFF;color:#fff;">Submit Review</button>' +
+                '</div>'
+              ).join('');
+            }
+          }
+        }
+      } catch (_) {}
+    })();
+
+    const selectedRatings = {};
+    function setRating(bookingId, n) {
+      selectedRatings[bookingId] = n;
+      const stars = document.querySelectorAll('[data-bid="' + bookingId + '"]');
+      stars.forEach(s => { s.style.color = Number(s.dataset.n) <= n ? '#f59e0b' : 'rgba(255,255,255,0.2)'; });
+    }
+    async function submitReview(bookingId) {
+      const rating = selectedRatings[bookingId];
+      if (!rating) { alert('Please select a star rating first'); return; }
+      const comment = document.getElementById('comment-' + bookingId)?.value || '';
+      try {
+        const res = await fetch('/api/reviews', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ booking_id: bookingId, rating, review_text: comment })
+        });
+        if (res.ok) {
+          const card = document.getElementById('stars-' + bookingId)?.closest('[style]');
+          if (card) card.innerHTML = '<p class="text-green-400 text-sm font-semibold py-2 text-center"><i class="fas fa-check-circle mr-2"></i>Review submitted — thank you!</p>';
+        }
+      } catch (_) {}
+    }
+    function copyReferralCode() {
+      const code = document.getElementById('my-referral-code')?.textContent || '';
+      if (!code || code === 'Loading...') return;
+      navigator.clipboard?.writeText('Use my ParkPeer code ' + code + ' for $10 off your first booking! https://parkpeer.pages.dev/auth/register?ref=' + code).catch(() => {});
+      const btn = event.currentTarget;
+      btn.innerHTML = '<i class="fas fa-check"></i>';
+      setTimeout(() => { btn.innerHTML = '<i class="fas fa-copy"></i>'; }, 2000);
+    }
+    async function shareReferralCode() {
+      const code = document.getElementById('my-referral-code')?.textContent || '';
+      const url = 'https://parkpeer.pages.dev/auth/register?ref=' + code;
+      const text = 'Use my ParkPeer referral code ' + code + ' and get $10 off your first booking!';
+      if (navigator.share) {
+        try { await navigator.share({ title: 'ParkPeer — $10 Referral', text, url }); return; } catch (_) {}
+      }
+      await navigator.clipboard.writeText(text + ' ' + url).catch(() => {});
+      alert('Referral link copied to clipboard!');
+    }
     </script>
   </div>
   `

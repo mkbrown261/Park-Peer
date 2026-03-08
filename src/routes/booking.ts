@@ -1692,18 +1692,23 @@ bookingPage.get('/:id', async (c) => {
       : fmtDate(selectedStartDate);
     document.getElementById('success-time').textContent = dateRange + '  ·  ' + startFmt + ' – ' + endFmt;
     document.getElementById('success-modal').classList.remove('hidden');
+
+    // Auto-redirect to the premium confirmation page after 2.5 seconds
+    if (dbBookingId) {
+      setTimeout(() => {
+        window.location.href = '/booking/confirmation/' + dbBookingId;
+      }, 2500);
+    }
   }
 
-  // Navigate to the dashboard after booking is confirmed.
-  // • If user has a real dbBookingId → go directly to booking detail page.
+  // Navigate to the premium confirmation page after booking is confirmed.
+  // • If user has a real dbBookingId → go to /booking/confirmation/:id (premium UX)
   // • If guest checkout (no session) → go to dashboard, which will redirect to login first.
   function viewBookingAfterConfirm() {
-    const ref = document.getElementById('success-booking-ref')?.textContent || '';
     if (dbBookingId) {
-      // Known booking ID — go directly to the booking detail page
-      window.location.href = '/booking/' + dbBookingId;
+      // Premium confirmation page with countdown, directions, confetti
+      window.location.href = '/booking/confirmation/' + dbBookingId;
     } else {
-      // No numeric ID yet (guest / recovery path) — go to dashboard
       window.location.href = '/dashboard?tab=upcoming';
     }
   }
