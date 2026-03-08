@@ -1285,7 +1285,10 @@ apiRoutes.post('/payments/confirm', async (c) => {
     let holdRow:          any = null
     let existingBooking:  any = null
     let listingRow:       any = null
-    let resolvedDriverId: number | null = body.driver_id ? Number(body.driver_id) : null
+    // SECURITY: Never trust driver_id from the request body — it could be spoofed.
+    // Resolve driverId only from (1) authenticated session, (2) existing booking, or (3) hold record.
+    const sessionUser     = await verifyUserToken(c, c.env?.USER_TOKEN_SECRET || '').catch(() => null)
+    let resolvedDriverId: number | null = sessionUser?.userId ? Number(sessionUser.userId) : null
     let resolvedHostId:   number | null = null
     let listingTitle    = 'Parking Space'
     let listingAddress  = ''
@@ -1451,14 +1454,16 @@ apiRoutes.post('/payments/confirm', async (c) => {
         }
 
         // ── C. INSERT payments row (idempotent) ──────────────────────────
-        if (dbBookingId && resolvedHostId) {
+        // Always insert the payment row regardless of resolvedHostId so the
+        // admin dashboard and analytics always show completed transactions.
+        if (dbBookingId) {
           await db.prepare(`
             INSERT OR IGNORE INTO payments
               (booking_id, driver_id, host_id, amount, platform_fee, host_payout,
                currency, stripe_payment_intent_id, stripe_charge_id, type, status)
             VALUES (?, ?, ?, ?, ?, ?, 'usd', ?, ?, 'charge', 'succeeded')
           `).bind(
-            dbBookingId, resolvedDriverId || 0, resolvedHostId,
+            dbBookingId, resolvedDriverId || 0, resolvedHostId || 0,
             amountPaid, platformFee, hostPayout,
             payment_intent_id, pi.latest_charge || null
           ).run()
@@ -3893,6 +3898,71 @@ apiRoutes.get('/bookings', requireUserAuth(), async (c) => {
   } catch (e: any) {
     console.error('[GET /bookings]', e.message)
     return c.json({ data: [], total: 0 })
+  }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// POST /api/bookings/:id/confirm  — host confirms a pending booking
+// POST /api/bookings/:id/cancel   — host or driver cancels a booking
+// Both endpoints are auth-guarded and enforce ownership.
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.post('/bookings/:id/confirm', requireUserAuth(), async (c) => {
+  const db   = c.env?.DB
+  const user = c.get('user') as any
+  const id   = c.req.param('id')
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+  try {
+    const booking = await db.prepare(
+      'SELECT id, host_id, driver_id, status FROM bookings WHERE id = ? LIMIT 1'
+    ).bind(id).first<any>()
+    if (!booking) return c.json({ error: 'Booking not found' }, 404)
+    // Only host may confirm
+    if (Number(user.userId) !== Number(booking.host_id)) {
+      return c.json({ error: 'Only the host may confirm this booking' }, 403)
+    }
+    if (booking.status === 'confirmed') {
+      return c.json({ success: true, status: 'confirmed', message: 'Already confirmed' })
+    }
+    await db.prepare(
+      "UPDATE bookings SET status='confirmed', updated_at=datetime('now') WHERE id=?"
+    ).bind(id).run()
+    logEvent('info', 'booking.confirmed_by_host', { booking_id: id, host_id: user.userId })
+    return c.json({ success: true, status: 'confirmed' })
+  } catch (e: any) {
+    console.error('[POST /bookings/:id/confirm]', e.message)
+    return c.json({ error: 'Failed to confirm booking' }, 500)
+  }
+})
+
+apiRoutes.post('/bookings/:id/cancel', requireUserAuth(), async (c) => {
+  const db   = c.env?.DB
+  const user = c.get('user') as any
+  const id   = c.req.param('id')
+  if (!db) return c.json({ error: 'Database unavailable' }, 503)
+  try {
+    const booking = await db.prepare(
+      'SELECT id, host_id, driver_id, status FROM bookings WHERE id = ? LIMIT 1'
+    ).bind(id).first<any>()
+    if (!booking) return c.json({ error: 'Booking not found' }, 404)
+    // Host or driver may cancel
+    const uid = Number(user.userId)
+    const isHost   = uid === Number(booking.host_id)
+    const isDriver = uid === Number(booking.driver_id)
+    const isAdmin  = (user.role || '').toUpperCase() === 'ADMIN'
+    if (!isHost && !isDriver && !isAdmin) {
+      return c.json({ error: 'Not authorized to cancel this booking' }, 403)
+    }
+    if (['cancelled', 'completed'].includes(booking.status)) {
+      return c.json({ success: true, status: booking.status, message: 'Already ' + booking.status })
+    }
+    await db.prepare(
+      "UPDATE bookings SET status='cancelled', updated_at=datetime('now') WHERE id=?"
+    ).bind(id).run()
+    logEvent('info', 'booking.cancelled', { booking_id: id, cancelled_by: uid })
+    return c.json({ success: true, status: 'cancelled' })
+  } catch (e: any) {
+    console.error('[POST /bookings/:id/cancel]', e.message)
+    return c.json({ error: 'Failed to cancel booking' }, 500)
   }
 })
 

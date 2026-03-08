@@ -220,8 +220,9 @@ export async function notifyBookingConfirmed(env: Env, data: {
   const db = env.DB
   if (!db) return
   try {
-    // ── Driver: booking confirmed ────────────────────────────────────────
-    const dPrefs = await getPrefs(db, data.driverId)
+    // ── Driver: in-app notification only ────────────────────────────────
+    // Email + SMS were already dispatched in the payment confirm handler (step 5c).
+    // We create the in-app entry and mark it as already sent to avoid duplicates.
     const dNotifId = await createInApp(db, {
       userId:   data.driverId,
       userRole: 'driver',
@@ -229,38 +230,33 @@ export async function notifyBookingConfirmed(env: Env, data: {
       title:    '✅ Booking Confirmed!',
       message:  `Your reservation at "${data.listingTitle}" is confirmed · ${fmtRange(data.startTime, data.endTime)} · $${data.totalCharged.toFixed(2)} charged`,
       relatedEntity: { type: 'booking', id: data.bookingId },
-    }, dPrefs.booking_email === 1, dPrefs.booking_sms === 1)
-
-    if (dPrefs.booking_email === 1) {
-      sendBookingConfirmation(env as any, {
-        driverEmail: data.driverEmail, driverName: data.driverName,
-        bookingId: data.bookingId, listingTitle: data.listingTitle,
-        listingAddress: data.listingAddress, startTime: data.startTime,
-        endTime: data.endTime, totalCharged: data.totalCharged,
-        vehiclePlate: data.vehiclePlate || '',
-      }).then(() => markEmailSent(db, dNotifId)).catch(() => {})
+    }, false, false) // delivery flags false — emails/SMS sent separately
+    // Mark as sent so the notification UI shows the correct state
+    if (dNotifId) {
+      await db.prepare('UPDATE notifications SET email_sent=1, sms_sent=1 WHERE id=?').bind(dNotifId).run().catch(() => {})
     }
 
-    if (dPrefs.booking_sms === 1 && data.driverPhone) {
-      smsSendBookingConfirmation(env as any, {
-        toPhone: data.driverPhone, driverName: data.driverName,
-        bookingId: data.bookingId, listingTitle: data.listingTitle,
-        listingAddress: data.listingAddress, startTime: data.startTime,
-        endTime: data.endTime, totalCharged: data.totalCharged,
-      }).then(() => markSmsSent(db, dNotifId)).catch(() => {})
-    }
-
-    // ── Host: payment received / booking confirmed ───────────────────────
+    // ── Host: in-app notification + SMS alert ────────────────────────────
     if (data.hostId > 0) {
       const hPrefs = await getPrefs(db, data.hostId)
-      await createInApp(db, {
+      const hNotifId = await createInApp(db, {
         userId:   data.hostId,
         userRole: 'host',
         type:     'booking_confirmed',
         title:    '💳 Payment Received',
-        message:  `${data.driverName} paid for "${data.listingTitle}" · ${fmtRange(data.startTime, data.endTime)} · $${data.hostPayout.toFixed(2)} payout`,
+        message:  `${data.driverName} paid for "${data.listingTitle}" · ${fmtRange(data.startTime, data.endTime)} · $${data.hostPayout.toFixed(2)} payout pending`,
         relatedEntity: { type: 'booking', id: data.bookingId },
-      }, false, false) // host already got email alert at booking_request stage
+      }, false, hPrefs.booking_sms === 1)
+
+      // SMS alert to host — let them know they have a new booking and payout
+      if (hPrefs.booking_sms === 1 && data.hostPhone) {
+        smsSendHostAlert(env as any, {
+          toPhone: data.hostPhone, hostName: data.hostName,
+          bookingId: data.bookingId, listingTitle: data.listingTitle,
+          driverName: data.driverName, startTime: data.startTime,
+          endTime: data.endTime, hostPayout: data.hostPayout,
+        }).then(() => markSmsSent(db, hNotifId)).catch(() => {})
+      }
     }
   } catch (e: any) {
     console.error('[notifyBookingConfirmed]', e.message)

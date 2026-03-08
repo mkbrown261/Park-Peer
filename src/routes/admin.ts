@@ -818,31 +818,159 @@ adminPanel.get('/fraud', (c) => {
 // ════════════════════════════════════════════════════════════════════════════
 // GET /admin/analytics
 // ════════════════════════════════════════════════════════════════════════════
-adminPanel.get('/analytics', (c) => {
+adminPanel.get('/analytics', async (c: any) => {
+  const db: D1Database | undefined = c.env?.DB
+  let totalBookings = 0, totalUsers = 0, totalListings = 0
+  let bookingsByStatus: any[] = []
+  let bookingsByCity: any[] = []
+  let recentDailyRevenue: any[] = []
+  let topListings: any[] = []
+
+  if (db) {
+    try {
+      const [bk, us, ls] = await Promise.all([
+        db.prepare('SELECT COUNT(*) as n FROM bookings').first<any>(),
+        db.prepare("SELECT COUNT(*) as n FROM users WHERE status != 'banned'").first<any>(),
+        db.prepare("SELECT COUNT(*) as n FROM listings WHERE status='active'").first<any>(),
+      ])
+      totalBookings = bk?.n ?? 0
+      totalUsers    = us?.n ?? 0
+      totalListings = ls?.n ?? 0
+
+      const bySt = await db.prepare(`
+        SELECT status, COUNT(*) as n FROM bookings GROUP BY status ORDER BY n DESC
+      `).all<any>()
+      bookingsByStatus = bySt.results || []
+
+      const byCity = await db.prepare(`
+        SELECT l.city, COUNT(b.id) as n
+        FROM bookings b LEFT JOIN listings l ON b.listing_id = l.id
+        WHERE l.city IS NOT NULL
+        GROUP BY l.city ORDER BY n DESC LIMIT 10
+      `).all<any>()
+      bookingsByCity = byCity.results || []
+
+      const daily = await db.prepare(`
+        SELECT date(created_at) as day,
+               COUNT(*) as bookings,
+               COALESCE(SUM(total_charged),0) as revenue
+        FROM bookings
+        WHERE created_at >= date('now','-30 days')
+        GROUP BY day ORDER BY day DESC LIMIT 30
+      `).all<any>()
+      recentDailyRevenue = daily.results || []
+
+      const topL = await db.prepare(`
+        SELECT l.title, l.city, COUNT(b.id) as bookings,
+               COALESCE(SUM(b.total_charged),0) as revenue
+        FROM bookings b LEFT JOIN listings l ON b.listing_id = l.id
+        GROUP BY b.listing_id ORDER BY revenue DESC LIMIT 5
+      `).all<any>()
+      topListings = topL.results || []
+
+    } catch(e: any) { console.error('[admin/analytics]', e.message) }
+  }
+
+  const byCityRows = bookingsByCity.length === 0
+    ? `<tr><td colspan="2"><div class="p-4 text-gray-500 text-sm text-center">No data yet</div></td></tr>`
+    : bookingsByCity.map(r => `
+        <tr class="border-b border-white/5">
+          <td class="px-4 py-2 text-white text-sm">${r.city || 'Unknown'}</td>
+          <td class="px-4 py-2 text-gray-400 text-sm">${r.n}</td>
+        </tr>`).join('')
+
+  const byStatusRows = bookingsByStatus.length === 0
+    ? `<div class="text-gray-500 text-sm text-center p-4">No bookings yet</div>`
+    : bookingsByStatus.map(r => {
+        const colors: Record<string,string> = {
+          confirmed: 'bg-green-500/20 text-green-400',
+          completed: 'bg-blue-500/20 text-blue-400',
+          cancelled: 'bg-red-500/20 text-red-400',
+          active:    'bg-lime-500/20 text-lime-400',
+          pending:   'bg-amber-500/20 text-amber-400',
+        }
+        const cls = colors[r.status] || 'bg-gray-500/20 text-gray-400'
+        return `<div class="flex items-center justify-between py-2">
+          <span class="text-xs px-2 py-0.5 rounded-full font-semibold ${cls}">${r.status}</span>
+          <span class="text-white font-bold text-sm">${r.n}</span>
+        </div>`
+      }).join('')
+
+  const topListingRows = topListings.length === 0
+    ? `<tr><td colspan="3"><div class="p-4 text-gray-500 text-sm text-center">No data yet</div></td></tr>`
+    : topListings.map(r => `
+        <tr class="border-b border-white/5">
+          <td class="px-4 py-2"><p class="text-white text-xs font-medium">${r.title || '—'}</p><p class="text-gray-500 text-xs">${r.city || ''}</p></td>
+          <td class="px-4 py-2 text-gray-400 text-xs">${r.bookings}</td>
+          <td class="px-4 py-2 text-lime-400 text-xs font-semibold">$${Number(r.revenue).toFixed(2)}</td>
+        </tr>`).join('')
+
+  const dailyRows = recentDailyRevenue.length === 0
+    ? `<tr><td colspan="3"><div class="p-4 text-gray-500 text-sm text-center">No data yet</div></td></tr>`
+    : recentDailyRevenue.map(r => `
+        <tr class="border-b border-white/5">
+          <td class="px-4 py-2 text-gray-400 text-xs">${r.day}</td>
+          <td class="px-4 py-2 text-white text-xs">${r.bookings}</td>
+          <td class="px-4 py-2 text-lime-400 text-xs font-semibold">$${Number(r.revenue).toFixed(2)}</td>
+        </tr>`).join('')
+
   const content = `
   <div class="flex items-center justify-between mb-6">
     <p class="text-gray-400 text-sm">Platform growth and usage metrics</p>
-    <div class="flex gap-2">
-      ${['7D','30D','3M','1Y'].map((p, i) => `
-        <button class="px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${i === 1 ? 'bg-indigo-500 text-white' : 'bg-charcoal-200 text-gray-400 hover:text-white border border-white/5'}">${p}</button>
-      `).join('')}
+  </div>
+
+  <!-- Summary KPIs -->
+  <div class="grid grid-cols-3 gap-4 mb-6">
+    ${StatCard('Total Bookings', String(totalBookings), 'fa-calendar-check', 'text-indigo-400', 'bg-indigo-500/10', 'All time')}
+    ${StatCard('Registered Users', String(totalUsers), 'fa-users', 'text-emerald-400', 'bg-emerald-500/10', 'Active accounts')}
+    ${StatCard('Active Listings', String(totalListings), 'fa-square-parking', 'text-amber-400', 'bg-amber-500/10', 'Live spaces')}
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+    <!-- Bookings by Status -->
+    <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-5">
+      <h3 class="font-semibold text-white text-sm mb-4">Bookings by Status</h3>
+      <div class="divide-y divide-white/5">${byStatusRows}</div>
+    </div>
+
+    <!-- Top Listings -->
+    <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
+      <div class="p-5 pb-3"><h3 class="font-semibold text-white text-sm">Top Listings by Revenue</h3></div>
+      <div class="overflow-x-auto">
+        <table class="w-full">
+          <thead class="bg-charcoal-200/60">
+            <tr>${['Listing','Bookings','Revenue'].map(h=>`<th class="px-4 py-2 text-left text-xs text-gray-500 uppercase">${h}</th>`).join('')}</tr>
+          </thead>
+          <tbody>${topListingRows}</tbody>
+        </table>
+      </div>
     </div>
   </div>
 
-  <!-- Charts placeholder grid -->
-  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-    ${['Bookings Over Time', 'Revenue Over Time', 'New User Signups', 'Listing Growth'].map(chart => `
-      <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-5">
-        <h3 class="font-semibold text-white text-sm mb-4">${chart}</h3>
-        ${EmptyState('fa-chart-line', 'No data yet', 'Chart will populate once the platform has activity.')}
-      </div>
-    `).join('')}
+  <!-- Daily Activity (last 30 days) -->
+  <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden mb-6">
+    <div class="p-5 pb-3"><h3 class="font-semibold text-white text-sm">Daily Activity (Last 30 Days)</h3></div>
+    <div class="overflow-x-auto">
+      <table class="w-full">
+        <thead class="bg-charcoal-200/60">
+          <tr>${['Date','Bookings','Revenue'].map(h=>`<th class="px-4 py-2 text-left text-xs text-gray-500 uppercase">${h}</th>`).join('')}</tr>
+        </thead>
+        <tbody>${dailyRows}</tbody>
+      </table>
+    </div>
   </div>
 
-  <!-- Geo breakdown placeholder -->
-  <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-5">
-    <h3 class="font-semibold text-white text-sm mb-4">Bookings by City</h3>
-    ${EmptyState('fa-map-location-dot', 'No city data yet', 'Geographic breakdown of bookings will appear here.')}
+  <!-- Bookings by City -->
+  <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
+    <div class="p-5 pb-3"><h3 class="font-semibold text-white text-sm">Bookings by City</h3></div>
+    <div class="overflow-x-auto">
+      <table class="w-full">
+        <thead class="bg-charcoal-200/60">
+          <tr>${['City','Bookings'].map(h=>`<th class="px-4 py-2 text-left text-xs text-gray-500 uppercase">${h}</th>`).join('')}</tr>
+        </thead>
+        <tbody>${byCityRows}</tbody>
+      </table>
+    </div>
   </div>
   `
   return c.html(AdminLayout('Analytics', content))
@@ -851,26 +979,73 @@ adminPanel.get('/analytics', (c) => {
 // ════════════════════════════════════════════════════════════════════════════
 // GET /admin/revenue
 // ════════════════════════════════════════════════════════════════════════════
-adminPanel.get('/revenue', (c) => {
+adminPanel.get('/revenue', async (c: any) => {
+  const db: D1Database | undefined = c.env?.DB
+  let totalVol = 0, totalFees = 0, totalPayouts = 0, totalRefunds = 0
+  let monthlyRows: any[] = []
+
+  if (db) {
+    try {
+      const kpis = await db.prepare(`
+        SELECT
+          COALESCE(SUM(CASE WHEN status='succeeded' THEN amount ELSE 0 END), 0) as total_vol,
+          COALESCE(SUM(CASE WHEN status='succeeded' THEN platform_fee ELSE 0 END), 0) as total_fees,
+          COALESCE(SUM(CASE WHEN status='succeeded' THEN host_payout ELSE 0 END), 0) as total_payouts,
+          COALESCE(SUM(CASE WHEN status='refunded'  THEN amount ELSE 0 END), 0) as total_refunds
+        FROM payments
+      `).first<any>()
+      totalVol     = Math.round((kpis?.total_vol     ?? 0) * 100) / 100
+      totalFees    = Math.round((kpis?.total_fees    ?? 0) * 100) / 100
+      totalPayouts = Math.round((kpis?.total_payouts ?? 0) * 100) / 100
+      totalRefunds = Math.round((kpis?.total_refunds ?? 0) * 100) / 100
+
+      const monthly = await db.prepare(`
+        SELECT strftime('%Y-%m', created_at) as month,
+               COUNT(*) as bookings,
+               COALESCE(SUM(CASE WHEN status='succeeded' THEN amount ELSE 0 END),0)       as gross,
+               COALESCE(SUM(CASE WHEN status='succeeded' THEN platform_fee ELSE 0 END),0) as fees,
+               COALESCE(SUM(CASE WHEN status='succeeded' THEN host_payout ELSE 0 END),0)  as payouts
+        FROM payments
+        GROUP BY month ORDER BY month DESC LIMIT 12
+      `).all<any>()
+      monthlyRows = monthly.results || []
+    } catch(e: any) { console.error('[admin/revenue]', e.message) }
+  }
+
+  const monthlyTableRows = monthlyRows.length === 0
+    ? `<tr><td colspan="5">${EmptyState('fa-chart-bar', 'No revenue data yet', 'Monthly revenue reports will populate here as transactions occur.')}</td></tr>`
+    : monthlyRows.map(r => `
+        <tr class="border-b border-white/5 hover:bg-white/5">
+          <td class="px-4 py-3 text-gray-400 text-xs font-semibold">${r.month}</td>
+          <td class="px-4 py-3 text-white text-xs">${r.bookings}</td>
+          <td class="px-4 py-3 text-lime-400 text-xs font-semibold">$${Number(r.gross).toFixed(2)}</td>
+          <td class="px-4 py-3 text-indigo-400 text-xs">$${Number(r.fees).toFixed(2)}</td>
+          <td class="px-4 py-3 text-blue-400 text-xs">$${Number(r.payouts).toFixed(2)}</td>
+        </tr>`).join('')
+
   const content = `
   <div class="flex items-center justify-between mb-6">
     <p class="text-gray-400 text-sm">Detailed financial reporting</p>
-    <button class="btn-primary px-4 py-2 rounded-xl text-xs text-white font-semibold flex items-center gap-2">
-      <i class="fas fa-download"></i> Export Report
-    </button>
   </div>
 
   <!-- Revenue KPIs -->
   <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-    ${StatCard('Gross Volume (All Time)', '$0.00', 'fa-dollar-sign', 'text-lime-500', 'bg-lime-500/10')}
-    ${StatCard('Net Platform Revenue', '$0.00', 'fa-piggy-bank', 'text-indigo-400', 'bg-indigo-500/10', 'After payouts')}
-    ${StatCard('Total Host Payouts', '$0.00', 'fa-money-bill-wave', 'text-blue-400', 'bg-blue-500/10', 'Paid out to hosts')}
-    ${StatCard('Total Refunds Issued', '$0.00', 'fa-rotate-left', 'text-red-400', 'bg-red-500/10')}
+    ${StatCard('Gross Volume (All Time)', '$' + totalVol.toFixed(2), 'fa-dollar-sign', 'text-lime-500', 'bg-lime-500/10')}
+    ${StatCard('Net Platform Revenue', '$' + totalFees.toFixed(2), 'fa-piggy-bank', 'text-indigo-400', 'bg-indigo-500/10', '15% platform fee')}
+    ${StatCard('Total Host Payouts', '$' + totalPayouts.toFixed(2), 'fa-money-bill-wave', 'text-blue-400', 'bg-blue-500/10', '85% to hosts')}
+    ${StatCard('Total Refunds Issued', '$' + totalRefunds.toFixed(2), 'fa-rotate-left', 'text-red-400', 'bg-red-500/10')}
   </div>
 
-  <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-5">
-    <h3 class="font-semibold text-white text-sm mb-4">Monthly Revenue Breakdown</h3>
-    ${EmptyState('fa-chart-bar', 'No revenue data yet', 'Monthly revenue reports will populate here as transactions occur.')}
+  <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
+    <div class="p-5 pb-3"><h3 class="font-semibold text-white text-sm">Monthly Revenue Breakdown</h3></div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-charcoal-200/60">
+          <tr>${['Month','Bookings','Gross','Platform Fee','Host Payouts'].map(h=>`<th class="px-4 py-3 text-left text-xs text-gray-500 uppercase tracking-wider">${h}</th>`).join('')}</tr>
+        </thead>
+        <tbody>${monthlyTableRows}</tbody>
+      </table>
+    </div>
   </div>
   `
   return c.html(AdminLayout('Revenue', content))

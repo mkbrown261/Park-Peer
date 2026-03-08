@@ -332,7 +332,7 @@ driverDashboard.get('/', async (c) => {
   const upcomingHTML = upcomingList.length === 0
     ? `<div class="p-6 text-center text-gray-500 text-sm">No upcoming reservations.</div>`
     : upcomingList.map(b => `
-        <div class="flex items-center gap-4 p-4 hover:bg-white/5 transition-colors">
+        <div class="flex items-center gap-4 p-4 hover:bg-white/5 transition-colors rounded-xl" id="booking-row-${b.id}" data-ref="PP-${new Date().getFullYear()}-${String(b.id).padStart(4,'0')}">
           <div class="w-10 h-10 gradient-bg rounded-xl flex items-center justify-center flex-shrink-0">
             <i class="fas ${typeIcon(b.type)} text-white text-sm"></i>
           </div>
@@ -446,7 +446,7 @@ driverDashboard.get('/', async (c) => {
           ${activeHTML}
 
           <!-- Upcoming Reservations -->
-          <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
+          <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden" data-section="upcoming">
             <div class="flex items-center justify-between p-5 border-b border-white/5">
               <h3 class="font-bold text-white text-lg">Upcoming Reservations</h3>
               <a href="/search" class="text-indigo-400 hover:text-indigo-300 text-sm font-medium transition-colors">Find More</a>
@@ -714,8 +714,54 @@ driverDashboard.get('/', async (c) => {
     (function(){
       var hasCsrf = document.cookie.split(';').some(function(c){ return c.trim().startsWith('__pp_csrf='); });
       if (!hasCsrf) { window.location.replace('/auth/login?reason=auth'); }
-      // Role guard: verify this is not a host-only account trying to access driver dashboard
-      // (actual enforcement is server-side; this is just a UX redirect hint)
+
+      // Handle ?tab= and ?highlight= params from post-booking redirect
+      var params = new URLSearchParams(window.location.search);
+      var tab = params.get('tab');
+      var highlight = params.get('highlight');
+
+      document.addEventListener('DOMContentLoaded', function() {
+        // If tab=upcoming, scroll to upcoming section
+        if (tab === 'upcoming') {
+          var upcomingSection = document.querySelector('[data-section="upcoming"]');
+          if (upcomingSection) {
+            upcomingSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }
+        }
+
+        // Highlight the just-booked row
+        if (highlight) {
+          var rows = document.querySelectorAll('[data-ref]');
+          var found = false;
+          rows.forEach(function(row) {
+            if (row.getAttribute('data-ref') === highlight) {
+              found = true;
+              row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              row.style.transition = 'background 0.5s ease';
+              row.style.background = 'rgba(99,102,241,0.3)';
+              row.style.borderRadius = '12px';
+              row.style.border = '1px solid rgba(99,102,241,0.5)';
+              setTimeout(function() {
+                row.style.background = '';
+                row.style.border = '';
+              }, 3500);
+            }
+          });
+          // If booking not in list yet (< 1s after confirm), show a toast
+          if (!found) {
+            var toast = document.createElement('div');
+            toast.textContent = '✅ Booking ' + highlight + ' confirmed! Refreshing…';
+            toast.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#4f46e5;color:#fff;padding:12px 24px;border-radius:12px;font-size:14px;font-weight:600;z-index:9999;box-shadow:0 4px 20px rgba(0,0,0,.4)';
+            document.body.appendChild(toast);
+            setTimeout(function() { window.location.reload(); }, 1800);
+          }
+        }
+
+        // Clean up URL (remove params without triggering reload)
+        if (tab || highlight) {
+          window.history.replaceState({}, '', window.location.pathname);
+        }
+      });
     })();
   <\/script>`
   return c.html(Layout('Driver Dashboard', content, guardScript, navSession))

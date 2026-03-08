@@ -591,7 +591,7 @@ bookingPage.get('/:id', async (c) => {
         <p class="text-gray-500 text-xs mt-1" id="success-address"></p>
       </div>
       <div class="flex gap-3">
-        <button onclick="window.location.href='/dashboard'"
+        <button id="view-booking-btn" onclick="viewBookingAfterConfirm()"
           class="flex-1 py-3 btn-primary text-white rounded-xl font-semibold text-sm">
           View Booking
         </button>
@@ -1683,6 +1683,21 @@ bookingPage.get('/:id', async (c) => {
     document.getElementById('success-modal').classList.remove('hidden');
   }
 
+  // Navigate to the dashboard after booking is confirmed.
+  // • If user has a real dbBookingId → go directly to dashboard with highlight.
+  // • If guest checkout (no session) → dashboard will redirect to login first,
+  //   which then redirects back to dashboard after sign-in.
+  function viewBookingAfterConfirm() {
+    const ref = document.getElementById('success-booking-ref')?.textContent || '';
+    if (dbBookingId) {
+      // Known booking ID — go to dashboard, show upcoming tab and highlight the row
+      window.location.href = '/dashboard?tab=upcoming&highlight=' + encodeURIComponent(ref);
+    } else {
+      // No numeric ID yet (guest / recovery path) — just go to dashboard
+      window.location.href = '/dashboard?tab=upcoming';
+    }
+  }
+
   // ════════════════════════════════════════════════════════════════════════════
   // MISC UI
   // ════════════════════════════════════════════════════════════════════════════
@@ -1920,8 +1935,11 @@ bookingPage.get('/:id', async (c) => {
     const digits = raw.replace(/\D/g, '');
     const len    = digits.length;
 
-    // Valid: 10 US digits, 11 digits starting with 1, or + international (7-15 digits)
-    const isUS10  = len === 10;
+    // Valid formats:
+    //   • 10 US digits (e.g. 5551234567)
+    //   • 11 digits starting with 1 (e.g. 15551234567)
+    //   • International with + prefix (7–15 digits total, e.g. +442071234567)
+    const isUS10  = len === 10 && !raw.trim().startsWith('+');
     const isUS11  = len === 11 && digits[0] === '1';
     const isIntl  = raw.trim().startsWith('+') && len >= 7 && len <= 15;
     const isValid = isUS10 || isUS11 || isIntl;
@@ -1929,7 +1947,7 @@ bookingPage.get('/:id', async (c) => {
     if (isValid) {
       btn.classList.remove('hidden');
       inp.style.borderColor = 'rgba(99,102,241,.6)';
-    } else if (len > 15) {
+    } else if (len > 15 || (raw.trim().startsWith('+') && len > 15)) {
       hint.textContent = 'Number too long — max 15 digits';
       hint.className = 'text-xs mt-1 text-red-400';
       hint.classList.remove('hidden');
