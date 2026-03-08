@@ -536,6 +536,17 @@ hostDashboard.get('/', async (c) => {
             </div>
           </div>
 
+          <!-- Overstay Alerts (dynamic — loads via JS) -->
+          <div id="overstay-section" class="hidden bg-red-500/5 rounded-2xl border border-red-500/20 overflow-hidden">
+            <div class="flex items-center justify-between p-5 border-b border-red-500/20">
+              <h3 class="font-bold text-red-400 text-lg flex items-center gap-2">
+                <i class="fas fa-exclamation-triangle"></i>Overstay Alerts
+              </h3>
+              <span id="overstay-count" class="bg-red-500 text-white text-xs font-bold px-2.5 py-1 rounded-full">0</span>
+            </div>
+            <div id="overstay-list" class="divide-y divide-red-500/10"></div>
+          </div>
+
           <!-- Booking Requests -->
           <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
             <div class="flex items-center justify-between p-5 border-b border-white/5">
@@ -1907,6 +1918,73 @@ hostDashboard.get('/', async (c) => {
         setTimeout(() => openAgreementModal(), 800);
       }
     })();
+
+    // ── Overstay detection ────────────────────────────────────────────────
+    (function loadOverstays() {
+      const tok = localStorage.getItem('pp_token') || sessionStorage.getItem('pp_token') || '';
+      fetch('/api/bookings/overstays', {
+        headers: { 'Authorization': 'Bearer ' + tok }
+      })
+      .then(r => r.json())
+      .then(data => {
+        const active = (data.overstays || []).filter(o => o.status === 'overstayed');
+        if (!active.length) return;
+        const section = document.getElementById('overstay-section');
+        const list    = document.getElementById('overstay-list');
+        const cnt     = document.getElementById('overstay-count');
+        if (!section || !list || !cnt) return;
+        section.classList.remove('hidden');
+        cnt.textContent = active.length;
+        list.innerHTML = active.map(o => {
+          const mins = o.overstay_minutes || 0;
+          return \`<div class="p-4 flex items-center justify-between gap-3">
+            <div class="flex-1">
+              <div class="flex items-center gap-2">
+                <span class="font-semibold text-white text-sm">\${o.driver_name}</span>
+                <span class="px-1.5 py-0.5 rounded-full text-xs bg-red-500/20 text-red-400 font-bold">
+                  \${mins > 0 ? mins + ' min overstay' : 'Just expired'}
+                </span>
+              </div>
+              <div class="text-xs text-white/40 mt-0.5">
+                <i class="fas fa-parking mr-1"></i>\${o.listing_title} · \${o.address || ''}
+              </div>
+            </div>
+            <button onclick="resolveOverstay(\${o.id}, this)"
+              class="flex-shrink-0 px-3 py-1.5 rounded-xl text-xs font-bold border border-red-500/30 text-red-400 hover:bg-red-500/10 transition">
+              <i class="fas fa-check mr-1"></i>Driver Left
+            </button>
+          </div>\`;
+        }).join('');
+      })
+      .catch(() => {});
+    })();
+
+    async function resolveOverstay(bookingId, btn) {
+      if (!confirm('Mark this driver as having left the spot?')) return;
+      const tok = localStorage.getItem('pp_token') || sessionStorage.getItem('pp_token') || '';
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+      try {
+        const r = await fetch('/api/bookings/' + bookingId + '/resolve-overstay', {
+          method: 'PATCH',
+          headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' }
+        });
+        const d = await r.json();
+        if (d.success) {
+          btn.closest('div.p-4').remove();
+          const remaining = document.querySelectorAll('#overstay-list > div').length;
+          if (!remaining) document.getElementById('overstay-section').classList.add('hidden');
+          document.getElementById('overstay-count').textContent = remaining;
+        } else {
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fas fa-check mr-1"></i>Driver Left';
+          alert(d.error || 'Could not resolve overstay.');
+        }
+      } catch {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-check mr-1"></i>Driver Left';
+      }
+    }
   </script>
 
   <!-- Host Agreement Acceptance Modal -->

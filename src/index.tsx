@@ -18,6 +18,9 @@ import { securityHeaders } from './middleware/security'
 import { connectRoutes } from './routes/connect'
 import { confirmationPage } from './routes/confirmation'
 import { featuresApiRoutes } from './routes/features-api'
+import { arrivalPage } from './routes/arrival'
+import { platformApiRoutes } from './routes/platform-api'
+import { businessPages } from './routes/business'
 
 const app = new Hono()
 
@@ -63,7 +66,10 @@ app.route('/admin', adminPanel)
 app.route('/api/admin', adminApiRoutes)
 app.route('/api/connect', connectRoutes)
 app.route('/api', featuresApiRoutes)
+app.route('/api', platformApiRoutes)
 app.route('/api', apiRoutes)
 app.route('/booking/confirmation', confirmationPage)
+app.route('/arrival', arrivalPage)
+app.route('/business', businessPages)
 
 export default app

@@ -271,7 +271,21 @@ confirmationPage.get('/:booking_id', async (c) => {
   </div>` : ''}
 
   <!-- ── ACTION BUTTONS ────────────────────────────────────────────── -->
-  <div class="mx-4 mt-4 grid grid-cols-2 gap-3 fade-up fade-up-3">
+
+  <!-- START ARRIVAL MODE — primary CTA -->
+  <div class="mx-4 mt-4 fade-up fade-up-3">
+    <a href="/arrival/${row.id}"
+       class="action-btn w-full flex items-center justify-center gap-2 font-black text-base"
+       style="background:linear-gradient(135deg,#C6FF00,#a8d900);color:#121212;border-radius:16px;padding:16px;">
+      <i class="fas fa-route"></i>
+      Start Arrival Mode
+    </a>
+    <p class="text-center text-xs mt-1.5" style="color:#4b5563;">
+      Live GPS navigation to your spot
+    </p>
+  </div>
+
+  <div class="mx-4 mt-3 grid grid-cols-2 gap-3 fade-up fade-up-3">
     <button onclick="openDirections()" class="action-btn btn-primary">
       <i class="fas fa-location-arrow"></i> Directions
     </button>

@@ -309,6 +309,11 @@ driverDashboard.get('/', async (c) => {
           </div>
         </div>
         <div class="flex gap-3">
+          <a href="/arrival/${activeBooking.id}"
+             class="flex-1 flex items-center justify-center gap-2 font-bold py-2.5 rounded-xl text-sm transition"
+             style="background:linear-gradient(135deg,#C6FF00,#a8d900);color:#121212;">
+            <i class="fas fa-route"></i> Arrival Mode
+          </a>
           <button onclick="window.location.href='/booking/${activeBooking.id}'" class="flex-1 bg-white/10 hover:bg-white/20 text-white font-semibold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2">
             <i class="fas fa-qrcode"></i> View QR
           </button>
