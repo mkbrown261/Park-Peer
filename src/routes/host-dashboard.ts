@@ -29,16 +29,17 @@ hostDashboard.get('/', async (c) => {
   const userId = session?.userId
 
   // ── Real D1 data ──────────────────────────────────────────────────────────
-  let totalRevenue    = 0
-  let activeBookings  = 0
-  let avgRating       = 0
-  let activeListings  = 0
-  let pendingBookings = 0
-  let myListings:     any[] = []
-  let pendingReqs:    any[] = []
-  let recentReviews:  any[] = []
-  let nextPayout      = 0
-  let payoutPending   = 0
+  let totalRevenue       = 0
+  let activeBookings     = 0
+  let avgRating          = 0
+  let activeListings     = 0
+  let pendingBookings    = 0
+  let myListings:        any[] = []
+  let pendingReqs:       any[] = []
+  let recentReviews:     any[] = []
+  let recentConfirmed:   any[] = []   // ← new: recently confirmed bookings
+  let nextPayout         = 0
+  let payoutPending      = 0
 
   let hostName = ''
   let tierCardHTML = ''
@@ -168,6 +169,21 @@ hostDashboard.get('/', async (c) => {
         LIMIT 6
       `).bind(userId).all<any>()
       pendingReqs = pendRows.results || []
+
+      // Recently confirmed bookings for this host (paid, upcoming/active)
+      const confirmedRows = await db.prepare(`
+        SELECT b.id, b.start_time, b.end_time, b.total_charged, b.host_payout,
+               b.status, b.vehicle_description, b.created_at,
+               l.title as space_title,
+               u.full_name as driver_name, u.email as driver_email
+        FROM bookings b
+        JOIN listings l ON b.listing_id = l.id
+        LEFT JOIN users u ON b.driver_id = u.id
+        WHERE b.host_id = ? AND b.status IN ('confirmed','active')
+        ORDER BY b.created_at DESC
+        LIMIT 8
+      `).bind(userId).all<any>()
+      recentConfirmed = confirmedRows.results || []
 
       // Recent reviews for this host's listings
       const revRows = await db.prepare(`
@@ -352,6 +368,37 @@ hostDashboard.get('/', async (c) => {
         `
       }).join('')
 
+  // ── Recent Confirmed Bookings HTML ────────────────────────────────────────
+  const confirmedHTML = recentConfirmed.length === 0
+    ? `<div class=\"p-8 text-center text-gray-500 text-sm\">
+         <i class=\"fas fa-calendar-check text-3xl text-gray-600 mb-3 block\"></i>
+         No confirmed bookings yet.
+       </div>`
+    : recentConfirmed.map(b => {
+        const driverInit = (b.driver_name || b.driver_email || '?')[0].toUpperCase()
+        const driverLabel = b.driver_name || b.driver_email || 'Unknown Driver'
+        const payout = Number(b.host_payout || 0)
+        const statusCls = b.status === 'active' ? 'text-lime-400' : 'text-green-400'
+        return `
+          <div class=\"flex items-center gap-3 p-4 hover:bg-white/5 transition-colors\">
+            <div class=\"w-9 h-9 gradient-bg rounded-full flex items-center justify-center font-bold text-white flex-shrink-0 text-sm\">
+              ${driverInit}
+            </div>
+            <div class=\"flex-1 min-w-0\">
+              <p class=\"font-semibold text-white text-sm truncate\">${driverLabel}</p>
+              <p class=\"text-xs text-gray-500 mt-0.5\">
+                <i class=\"fas fa-parking text-indigo-400 mr-1\"></i>${b.space_title} ·
+                ${fmtDate(b.start_time)} · ${fmtTime(b.start_time)} – ${fmtTime(b.end_time)}
+              </p>
+            </div>
+            <div class=\"text-right flex-shrink-0\">
+              <p class=\"text-lime-400 font-bold text-sm\">${fmtMoney(payout > 0 ? payout : b.total_charged)}</p>
+              <p class=\"text-xs ${statusCls} capitalize\">${b.status}</p>
+            </div>
+          </div>
+        `
+      }).join('')
+
   // ── Recent Reviews HTML ───────────────────────────────────────────────────
   const reviewsHTML = recentReviews.length === 0
     ? `<div class="p-4 text-center text-gray-500 text-xs">No reviews yet.</div>`
@@ -462,12 +509,27 @@ hostDashboard.get('/', async (c) => {
             </div>
           </div>
 
+          <!-- Recent Confirmed Bookings -->
+          <div class="bg-charcoal-100 rounded-2xl border border-white/5 overflow-hidden">
+            <div class="flex items-center justify-between p-5 border-b border-white/5">
+              <h3 class="font-bold text-white text-lg">
+                <i class="fas fa-calendar-check text-green-400 mr-2 text-base"></i>Confirmed Bookings
+              </h3>
+              ${recentConfirmed.length > 0
+                ? `<span class="bg-green-500/20 text-green-400 text-xs font-bold px-2.5 py-1 rounded-full border border-green-500/20">${recentConfirmed.length} active</span>`
+                : '<span class="text-gray-500 text-xs">None yet</span>'}
+            </div>
+            <div class="divide-y divide-white/5">
+              ${confirmedHTML}
+            </div>
+          </div>
+
           <!-- Availability Calendar -->
           <div class="bg-charcoal-100 rounded-2xl border border-white/5 p-5">
             <div class="flex items-center justify-between mb-4">
               <h3 class="font-bold text-white text-lg"><i class="fas fa-calendar text-indigo-400 mr-2"></i>Availability Calendar</h3>
-              <button class="btn-primary px-4 py-2 rounded-xl text-xs text-white font-semibold">
-                Edit Availability
+              <button onclick="window.location.href='/host'" class="btn-primary px-4 py-2 rounded-xl text-xs text-white font-semibold">
+                Refresh
               </button>
             </div>
             ${generateHostCalendar()}
@@ -508,8 +570,8 @@ hostDashboard.get('/', async (c) => {
                   <span class="text-lime-400">${fmtMoney(nextPayout)}</span>
                 </div>
               </div>
-              <button class="mt-4 w-full py-2.5 bg-lime-500 text-charcoal rounded-xl text-sm font-bold hover:bg-lime-400 transition-colors">
-                Manage Payouts
+              <button onclick="window.location.href='/host/connect/cashout'" class="mt-4 w-full py-2.5 bg-lime-500 text-charcoal rounded-xl text-sm font-bold hover:bg-lime-400 transition-colors flex items-center justify-center gap-2">
+                <i class="fas fa-wallet"></i> Manage Payouts
               </button>
             </div>
           </div>

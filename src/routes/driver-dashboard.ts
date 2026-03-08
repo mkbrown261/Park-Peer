@@ -309,10 +309,10 @@ driverDashboard.get('/', async (c) => {
           </div>
         </div>
         <div class="flex gap-3">
-          <button class="flex-1 bg-white/10 hover:bg-white/20 text-white font-semibold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2">
+          <button onclick="window.location.href='/booking/${activeBooking.id}'" class="flex-1 bg-white/10 hover:bg-white/20 text-white font-semibold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2">
             <i class="fas fa-qrcode"></i> View QR
           </button>
-          <button class="flex-1 bg-white/10 hover:bg-white/20 text-white font-semibold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2">
+          <button onclick="window.open('https://maps.google.com/maps?q=${encodeURIComponent(activeBooking.address || '')}','_blank')" class="flex-1 bg-white/10 hover:bg-white/20 text-white font-semibold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2">
             <i class="fas fa-map"></i> Navigate
           </button>
         </div>

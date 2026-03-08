@@ -439,7 +439,69 @@ apiRoutes.post('/auth/logout', (c) => {
 })
 
 // ════════════════════════════════════════════════════════════════════════════
-// DELETE /api/auth/account — Permanently delete the authenticated user's account
+// POST /api/auth/forgot-password — initiate password reset
+// Always returns 200 to prevent email enumeration.
+// In production, sends a reset link via email. Here we log it for demo.
+// ════════════════════════════════════════════════════════════════════════════
+apiRoutes.post('/auth/forgot-password', async (c) => {
+  let body: any = {}
+  try { body = await c.req.json() } catch {}
+  const email = String(body.email || '').toLowerCase().trim()
+
+  // Always return 200 to prevent email enumeration attacks
+  if (!email || !email.includes('@')) {
+    return c.json({ success: true, message: 'If an account exists, a reset link was sent.' })
+  }
+
+  const db = c.env?.DB
+  if (db) {
+    try {
+      const user = await db.prepare(
+        'SELECT id, full_name FROM users WHERE email = ? LIMIT 1'
+      ).bind(email).first<any>()
+
+      if (user) {
+        // Generate a secure reset token (valid for 1 hour)
+        const token    = crypto.randomUUID().replace(/-/g, '')
+        const expires  = new Date(Date.now() + 3600_000).toISOString()
+
+        await db.prepare(`
+          INSERT INTO password_reset_tokens (user_id, token, expires_at, used, created_at)
+          VALUES (?, ?, ?, 0, datetime('now'))
+          ON CONFLICT(user_id) DO UPDATE SET token=excluded.token, expires_at=excluded.expires_at, used=0
+        `).bind(user.id, token, expires).run().catch(async () => {
+          // Table may not exist yet — log the token for manual reset
+          console.log(`[ForgotPassword] token=${token} user=${user.id} expires=${expires}`)
+        })
+
+        // In production, send email via Resend. Log here as a fallback.
+        console.log(`[ForgotPassword] Reset link for ${email}: /auth/reset-password?token=${token}`)
+
+        // Fire email if configured
+        const { sendEmail } = await import('../services/sendgrid')
+        const resetUrl = `${c.req.header('origin') || 'https://parkpeer.com'}/auth/reset-password?token=${token}`
+        await sendEmail(c.env as any, {
+          to: email,
+          toName: user.full_name || 'ParkPeer User',
+          subject: 'Reset your ParkPeer password',
+          htmlContent: `
+            <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px;">
+              <h2 style="color:#4f46e5;">Reset Your Password</h2>
+              <p>Hi ${user.full_name || 'there'},</p>
+              <p>We received a request to reset your ParkPeer password. Click the link below to set a new password:</p>
+              <a href="${resetUrl}" style="display:inline-block;background:#4f46e5;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold;margin:16px 0;">Reset Password</a>
+              <p style="color:#888;font-size:12px;">This link expires in 1 hour. If you did not request a password reset, ignore this email.</p>
+            </div>
+          `,
+        }).catch(() => {})
+      }
+    } catch (e: any) {
+      console.error('[ForgotPassword]', e.message)
+    }
+  }
+
+  return c.json({ success: true, message: 'If an account exists, a reset link was sent.' })
+})
 //
 // Rules:
 //  • Requires valid JWT session (requireUserAuth)

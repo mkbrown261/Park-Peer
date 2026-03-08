@@ -8,6 +8,17 @@ export const bookingPage = new Hono<{ Bindings: Bindings }>()
 
 bookingPage.get('/:id', async (c) => {
   const id = c.req.param('id')
+
+  // ── Auth guard: require login to access checkout ──────────────────────────
+  const session = await verifyUserToken(
+    c,
+    c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod'
+  ).catch(() => null)
+  if (!session) {
+    return c.redirect(`/auth/login?reason=auth&next=${encodeURIComponent('/booking/' + id)}`)
+  }
+  const navSession = { name: session.name || session.email || '', role: session.role || '' }
+
   const content = `
   <style>
     /* ══════════════════════════════════════════════════
@@ -1684,16 +1695,15 @@ bookingPage.get('/:id', async (c) => {
   }
 
   // Navigate to the dashboard after booking is confirmed.
-  // • If user has a real dbBookingId → go directly to dashboard with highlight.
-  // • If guest checkout (no session) → dashboard will redirect to login first,
-  //   which then redirects back to dashboard after sign-in.
+  // • If user has a real dbBookingId → go directly to booking detail page.
+  // • If guest checkout (no session) → go to dashboard, which will redirect to login first.
   function viewBookingAfterConfirm() {
     const ref = document.getElementById('success-booking-ref')?.textContent || '';
     if (dbBookingId) {
-      // Known booking ID — go to dashboard, show upcoming tab and highlight the row
-      window.location.href = '/dashboard?tab=upcoming&highlight=' + encodeURIComponent(ref);
+      // Known booking ID — go directly to the booking detail page
+      window.location.href = '/booking/' + dbBookingId;
     } else {
-      // No numeric ID yet (guest / recovery path) — just go to dashboard
+      // No numeric ID yet (guest / recovery path) — go to dashboard
       window.location.href = '/dashboard?tab=upcoming';
     }
   }
@@ -2290,5 +2300,5 @@ bookingPage.get('/:id', async (c) => {
   </script>
 `
 
-  return c.html(Layout('Checkout – ParkPeer', content))
+  return c.html(Layout('Checkout – ParkPeer', content, '', navSession))
 })

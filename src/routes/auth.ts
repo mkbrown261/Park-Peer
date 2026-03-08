@@ -103,7 +103,7 @@ authPages.get('/login', (c) => {
           <div>
             <div class="flex items-center justify-between mb-1.5">
               <label class="text-sm text-gray-400 font-medium">Password</label>
-              <a href="#" class="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">Forgot password?</a>
+              <a href="#" onclick="openForgotPassword(event)" class="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">Forgot password?</a>
             </div>
             <div class="relative">
               <i class="fas fa-lock absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm"></i>
@@ -152,8 +152,60 @@ authPages.get('/login', (c) => {
     </div>
   </div>
 
+  <!-- Forgot Password Modal -->
+  <div id="forgot-modal" class="hidden fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
+    <div class="bg-charcoal-100 rounded-3xl w-full max-w-sm border border-white/10 p-7">
+      <div class="flex items-center justify-between mb-5">
+        <h3 class="font-bold text-white text-lg">Reset Password</h3>
+        <button onclick="document.getElementById('forgot-modal').classList.add('hidden')" class="w-8 h-8 bg-charcoal-200 rounded-full flex items-center justify-center text-gray-400 hover:text-white transition-colors">
+          <i class="fas fa-times text-sm"></i>
+        </button>
+      </div>
+      <p class="text-gray-400 text-sm mb-5">Enter your email address and we'll send you instructions to reset your password.</p>
+      <div id="forgot-result" class="hidden mb-4 p-3 rounded-xl text-sm font-medium"></div>
+      <input type="email" id="forgot-email" placeholder="your@email.com"
+        class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 transition-all mb-4"/>
+      <button onclick="submitForgotPassword()" id="forgot-btn"
+        class="w-full py-3 btn-primary text-white rounded-xl font-semibold text-sm">
+        <i class="fas fa-paper-plane mr-2"></i>Send Reset Link
+      </button>
+    </div>
+  </div>
+
   <script>
-    function togglePass(id, btn) {
+    function openForgotPassword(e) {
+      e.preventDefault();
+      document.getElementById('forgot-modal').classList.remove('hidden');
+      const emailInp = document.getElementById('login-email');
+      if (emailInp?.value) document.getElementById('forgot-email').value = emailInp.value;
+    }
+
+    async function submitForgotPassword() {
+      const email = document.getElementById('forgot-email').value.trim();
+      const btn   = document.getElementById('forgot-btn');
+      const res   = document.getElementById('forgot-result');
+      if (!email) { res.textContent = 'Please enter your email address.'; res.className = 'mb-4 p-3 rounded-xl text-sm font-medium bg-red-500/20 text-red-300 border border-red-500/20'; res.classList.remove('hidden'); return; }
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Sending…';
+      try {
+        const r = await fetch('/api/auth/forgot-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email }),
+        });
+        // Always show success to prevent email enumeration
+        res.textContent = '✓ If an account with that email exists, a reset link has been sent. Check your inbox.';
+        res.className = 'mb-4 p-3 rounded-xl text-sm font-medium bg-green-500/20 text-green-300 border border-green-500/20';
+        res.classList.remove('hidden');
+        btn.innerHTML = '<i class="fas fa-check mr-2"></i>Sent';
+      } catch {
+        res.textContent = 'Failed to send. Please try again later.';
+        res.className = 'mb-4 p-3 rounded-xl text-sm font-medium bg-red-500/20 text-red-300 border border-red-500/20';
+        res.classList.remove('hidden');
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-paper-plane mr-2"></i>Send Reset Link';
+      }
+    }
       const inp = document.getElementById(id);
       const icon = btn.querySelector('i');
       if (inp.type === 'password') {

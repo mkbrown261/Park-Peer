@@ -388,7 +388,7 @@ adminPanel.get('/users', async (c: any) => {
   const content = `
   <div class="flex items-center justify-between mb-6">
     <p class="text-gray-400 text-sm">Manage all platform users (${total} total)</p>
-    <button class="btn-primary px-4 py-2 rounded-xl text-xs text-white font-semibold flex items-center gap-2">
+    <button onclick="exportUsersCSV()" class="btn-primary px-4 py-2 rounded-xl text-xs text-white font-semibold flex items-center gap-2">
       <i class="fas fa-download"></i> Export CSV
     </button>
   </div>
@@ -448,6 +448,23 @@ adminPanel.get('/users', async (c: any) => {
         const show = (!q || text.includes(q)) && (!role || text.includes(role.toLowerCase())) && (!status || text.includes(status))
         row.style.display = show ? '' : 'none'
       })
+    }
+
+    function exportUsersCSV() {
+      const rows = Array.from(document.querySelectorAll('#users-table tr[class]'))
+        .filter(r => r.style.display !== 'none')
+      const headers = ['Name', 'Email', 'Role', 'Status', 'Joined']
+      const csvRows = [headers.join(',')]
+      rows.forEach(row => {
+        const cells = Array.from(row.querySelectorAll('td'))
+        const values = cells.slice(0, 5).map(td => '"' + (td.textContent?.trim() || '').replace(/"/g, '""') + '"')
+        if (values.length > 0) csvRows.push(values.join(','))
+      })
+      const blob = new Blob([csvRows.join('\\n')], { type: 'text/csv' })
+      const url  = URL.createObjectURL(blob)
+      const a    = document.createElement('a')
+      a.href = url; a.download = 'parkpeer-users-' + new Date().toISOString().split('T')[0] + '.csv'
+      a.click(); URL.revokeObjectURL(url)
     }
   </script>
   `
@@ -1080,7 +1097,7 @@ adminPanel.get('/settings', (c: any) => {
             ${f.note ? `<p class="text-gray-600 text-xs mt-1">${f.note}</p>` : ''}
           </div>
         `).join('')}
-        <button class="btn-primary w-full py-2.5 rounded-xl text-sm text-white font-semibold mt-2">
+        <button onclick="alert('Platform settings are configured via environment variables for security. Contact your system administrator to update these values.')" class="btn-primary w-full py-2.5 rounded-xl text-sm text-white font-semibold mt-2">
           Save Settings
         </button>
       </div>

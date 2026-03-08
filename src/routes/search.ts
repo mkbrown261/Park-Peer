@@ -10,6 +10,16 @@ searchPage.get('/', async (c) => {
   const q    = c.req.query('q') || ''
   const city = c.req.query('city') || ''
 
+  // ── Auth guard: require login to search and book ──────────────────────────
+  const _session = await verifyUserToken(
+    c,
+    c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod'
+  ).catch(() => null)
+  if (!_session) {
+    return c.redirect('/auth/login?reason=auth&next=/search')
+  }
+  const navSession = { name: _session.name || _session.email || '', role: _session.role || '' }
+
   const content = `
   <div class="pt-16 flex h-screen overflow-hidden">
 
@@ -2323,9 +2333,6 @@ searchPage.get('/', async (c) => {
   })
   </script>
   `
-
-  const _session = await verifyUserToken(c, c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod').catch(() => null)
-  const navSession = _session ? { name: _session.name || _session.email || '', role: _session.role || '' } : null
 
   return c.html(Layout('Find Parking Near You', content, '', navSession))
 })
