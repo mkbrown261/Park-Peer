@@ -4829,8 +4829,19 @@ apiRoutes.post('/verify/email/send', async (c) => {
     })
     if (!res.ok) {
       const errData = await res.json().catch(() => ({})) as any
-      console.error('[verify/email/send] Resend error:', res.status, errData)
-      return c.json({ error: 'Failed to send verification email. Please check your email address.', code: 'EMAIL_FAILED' }, 500)
+      console.error('[verify/email/send] Resend error:', res.status, JSON.stringify(errData))
+      // Surface a more actionable error when using sandbox domain
+      const fromAddr = env.FROM_EMAIL || 'onboarding@resend.dev'
+      const isSandbox = fromAddr.endsWith('@resend.dev')
+      if (isSandbox && res.status === 403) {
+        return c.json({
+          error: 'Email sending is in sandbox mode. The recipient email must be verified in your Resend account, or a custom FROM_EMAIL domain must be configured.',
+          code: 'EMAIL_SANDBOX_RESTRICTED',
+          resend_status: res.status,
+          resend_error: errData?.message || errData?.name
+        }, 500)
+      }
+      return c.json({ error: 'Failed to send verification email. Please check your email address.', code: 'EMAIL_FAILED', resend_status: res.status }, 500)
     }
   } catch (e: any) {
     console.error('[verify/email/send] exception:', e.message)
