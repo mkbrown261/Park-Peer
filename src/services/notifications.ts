@@ -7,6 +7,7 @@ import {
   smsSendBookingConfirmation,
   smsSendHostAlert,
   smsSendCancellation,
+  smsSendPaymentFailed,
 } from './twilio'
 
 import {
@@ -370,16 +371,36 @@ export async function notifyPayoutProcessed(env: Env, data: {
       }).then(() => markEmailSent(db, notifId)).catch(() => {})
     }
 
-    if (prefs.payout_sms === 1 && data.hostPhone && (env as any).TWILIO_ACCOUNT_SID) {
-      const msg = `💰 ParkPeer Payout: $${data.amount.toFixed(2)} sent to your account. parkpeer.pages.dev/host`
-      fetch(`https://api.twilio.com/2010-04-01/Accounts/${(env as any).TWILIO_ACCOUNT_SID}/Messages.json`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Basic ${btoa(`${(env as any).TWILIO_ACCOUNT_SID}:${(env as any).TWILIO_AUTH_TOKEN}`)}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: new URLSearchParams({ From: (env as any).TWILIO_PHONE_NUMBER || '', To: data.hostPhone, Body: msg }).toString(),
-      }).then(() => markSmsSent(db, notifId)).catch(() => {})
+    if (prefs.payout_sms === 1 && data.hostPhone) {
+      const payoutMsg = `💰 ParkPeer Payout: $${data.amount.toFixed(2)} sent to your account. Arrive in 1-2 business days. parkpeer.pages.dev/host`
+      // Use the core sendSMS wrapper via smsSendHostAlert shape-compatible call
+      ;(async () => {
+        try {
+          if (!((env as any).TWILIO_ACCOUNT_SID && (env as any).TWILIO_AUTH_TOKEN && (env as any).TWILIO_PHONE_NUMBER)) {
+            console.log(`[Twilio SKIP] payout SMS to ${data.hostPhone}`)
+            return
+          }
+          const toNumber = data.hostPhone.startsWith('+') ? data.hostPhone : `+1${data.hostPhone.replace(/\D/g, '')}`
+          const credentials = btoa(`${(env as any).TWILIO_ACCOUNT_SID}:${(env as any).TWILIO_AUTH_TOKEN}`)
+          const res = await fetch(
+            `https://api.twilio.com/2010-04-01/Accounts/${(env as any).TWILIO_ACCOUNT_SID}/Messages.json`,
+            {
+              method: 'POST',
+              headers: { Authorization: `Basic ${credentials}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: new URLSearchParams({ From: (env as any).TWILIO_PHONE_NUMBER, To: toNumber, Body: payoutMsg }).toString(),
+            }
+          )
+          const d = await res.json() as any
+          if (res.ok) {
+            console.log(`[Twilio OK] payout SMS SID: ${d.sid} → ${toNumber}`)
+            await markSmsSent(db, notifId)
+          } else {
+            console.error(`[Twilio ERROR] payout SMS ${res.status}:`, d?.message || d)
+          }
+        } catch (e: any) {
+          console.error('[Twilio EXCEPTION] payout SMS:', e.message)
+        }
+      })()
     }
   } catch (e: any) {
     console.error('[notifyPayoutProcessed]', e.message)

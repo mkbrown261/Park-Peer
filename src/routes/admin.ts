@@ -1230,7 +1230,158 @@ adminPanel.get('/settings', (c: any) => {
         </button>
       </div>
     </div>
+
   </div>
+
+  <!-- Messaging Diagnostic Panel — full width below the 2-col grid -->
+  <div class="mt-6 bg-charcoal-100 rounded-2xl border border-white/5 p-6">
+    <h3 class="font-bold text-white mb-1 flex items-center gap-2">
+      <i class="fas fa-satellite-dish text-indigo-400"></i> Messaging System Diagnostic
+    </h3>
+    <p class="text-gray-500 text-xs mb-5">Live validation of Resend email and Twilio SMS credentials. Optionally fire a real test message.</p>
+
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-5">
+      <div>
+        <label class="text-xs text-gray-400 font-medium block mb-1.5">Test Email Address <span class="text-gray-600">(optional)</span></label>
+        <input id="msg-test-email" type="email" placeholder="e.g. admin@example.com"
+          class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500"/>
+      </div>
+      <div>
+        <label class="text-xs text-gray-400 font-medium block mb-1.5">Test Phone Number <span class="text-gray-600">(optional, E.164)</span></label>
+        <input id="msg-test-phone" type="tel" placeholder="e.g. +12125551234"
+          class="w-full bg-charcoal-200 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500"/>
+      </div>
+    </div>
+
+    <div class="flex gap-3 mb-5">
+      <button id="msg-run-btn" onclick="runMessagingDiagnostic()"
+        class="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold rounded-xl transition flex items-center gap-2">
+        <i class="fas fa-flask"></i> Run Diagnostic
+      </button>
+      <button onclick="runMessagingDiagnostic(true)"
+        class="px-5 py-2.5 bg-white/10 hover:bg-white/20 text-white text-sm font-semibold rounded-xl transition flex items-center gap-2">
+        <i class="fas fa-paper-plane"></i> Run + Send Test Messages
+      </button>
+    </div>
+
+    <div id="msg-diag-result" class="hidden"></div>
+  </div>
+
+  <script>
+  async function runMessagingDiagnostic(sendMessages) {
+    const btn = document.getElementById('msg-run-btn');
+    const resultEl = document.getElementById('msg-diag-result');
+    const email = document.getElementById('msg-test-email').value.trim();
+    const phone = document.getElementById('msg-test-phone').value.trim();
+
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> Running…';
+    resultEl.innerHTML = '';
+    resultEl.className = 'hidden';
+
+    const body = { services: ['resend', 'twilio'] };
+    if (sendMessages && email) body.email = email;
+    if (sendMessages && phone) body.phone = phone;
+
+    try {
+      const r = await fetch('/api/admin/messaging-test', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const d = await r.json();
+      renderDiagnosticResult(d, resultEl);
+    } catch (e) {
+      resultEl.className = 'p-4 rounded-xl bg-red-500/10 border border-red-500/20 text-red-300 text-sm';
+      resultEl.innerHTML = '<i class="fas fa-times-circle mr-2"></i> Network error: ' + e.message;
+      resultEl.classList.remove('hidden');
+    }
+
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fas fa-flask"></i> Run Diagnostic';
+  }
+
+  function renderDiagnosticResult(d, el) {
+    const overallOk = d.overall === 'operational';
+    const ts = new Date(d.timestamp).toLocaleTimeString();
+
+    let html = '<div class="space-y-4">';
+
+    // Overall banner
+    html += '<div class="p-3.5 rounded-xl ' + (overallOk ? 'bg-green-500/10 border border-green-500/20 text-green-300' : 'bg-yellow-500/10 border border-yellow-500/20 text-yellow-300') + ' flex items-center gap-3">';
+    html += '<i class="fas ' + (overallOk ? 'fa-check-circle text-green-400' : 'fa-exclamation-triangle text-yellow-400') + ' text-lg"></i>';
+    html += '<div><div class="font-bold text-sm">' + (overallOk ? '✅ All Messaging Systems Operational' : '⚠️ Issues Detected') + '</div>';
+    html += '<div class="text-xs opacity-75">Checked at ' + ts + '</div></div></div>';
+
+    // Issues list
+    if (d.issues && d.issues.length) {
+      html += '<div class="space-y-2">' + d.issues.map(i => '<div class="p-2.5 bg-red-500/10 border border-red-500/20 rounded-lg text-red-300 text-xs flex items-start gap-2"><i class="fas fa-circle-exclamation mt-0.5 flex-shrink-0"></i>' + i + '</div>').join('') + '</div>';
+    }
+
+    // Per-service cards
+    html += '<div class="grid grid-cols-1 sm:grid-cols-2 gap-4">';
+
+    // Resend card
+    if (d.services.resend) {
+      const rs = d.services.resend;
+      html += '<div class="bg-charcoal-200 rounded-xl p-4 border ' + (rs.ok ? 'border-green-500/20' : 'border-red-500/20') + '">';
+      html += '<div class="flex items-center gap-2 mb-3"><i class="fas fa-envelope text-indigo-400"></i><span class="font-bold text-white text-sm">Resend Email</span>';
+      html += '<span class="ml-auto text-xs px-2 py-0.5 rounded-full font-semibold ' + (rs.ok ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400') + '">' + (rs.ok ? 'OK' : 'FAIL') + '</span></div>';
+      html += '<div class="space-y-1.5 text-xs">';
+      html += '<div class="flex justify-between"><span class="text-gray-500">API Key</span><span class="' + (rs.key_valid ? 'text-green-400' : 'text-red-400') + '">' + (rs.key_valid ? '✓ Valid' : '✗ Invalid') + '</span></div>';
+      html += '<div class="flex justify-between"><span class="text-gray-500">From Address</span><span class="text-white font-mono">' + (rs.from_email || '–') + '</span></div>';
+      html += '<div class="flex justify-between"><span class="text-gray-500">Domain Mode</span><span class="' + (rs.sandbox_mode ? 'text-yellow-400' : 'text-green-400') + '">' + (rs.sandbox_mode ? '⚠ Sandbox' : '✓ Production') + '</span></div>';
+      if (rs.verified_domains && rs.verified_domains.length) html += '<div class="flex justify-between"><span class="text-gray-500">Verified Domains</span><span class="text-green-400">' + rs.verified_domains.join(', ') + '</span></div>';
+      html += '<div class="flex justify-between"><span class="text-gray-500">API Latency</span><span class="text-gray-300">' + (rs.latency_ms || '–') + ' ms</span></div>';
+      if (rs.sandbox_warning) html += '<div class="mt-2 p-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg text-yellow-300">' + rs.sandbox_warning + '</div>';
+      if (rs.error) html += '<div class="mt-2 p-2 bg-red-500/10 border border-red-500/20 rounded-lg text-red-300">' + rs.error + '</div>';
+      if (rs.fix) html += '<div class="mt-1 text-indigo-300 text-xs">Fix: ' + rs.fix + '</div>';
+      if (rs.test_send) {
+        const ts2 = rs.test_send;
+        html += '<div class="mt-2 p-2.5 ' + (ts2.ok ? 'bg-green-500/10 border-green-500/20' : 'bg-red-500/10 border-red-500/20') + ' border rounded-lg">';
+        html += '<div class="font-semibold ' + (ts2.ok ? 'text-green-400' : 'text-red-400') + ' mb-1">Test Email: ' + (ts2.ok ? '✅ Sent' : '❌ Failed') + '</div>';
+        if (ts2.email_id) html += '<div>ID: <span class="font-mono">' + ts2.email_id + '</span></div>';
+        if (ts2.error) html += '<div class="text-red-300">' + ts2.error + '</div>';
+        html += '<div>Latency: ' + ts2.latency_ms + ' ms</div></div>';
+      }
+      html += '</div></div>';
+    }
+
+    // Twilio card
+    if (d.services.twilio) {
+      const tw = d.services.twilio;
+      html += '<div class="bg-charcoal-200 rounded-xl p-4 border ' + (tw.ok ? 'border-green-500/20' : 'border-red-500/20') + '">';
+      html += '<div class="flex items-center gap-2 mb-3"><i class="fas fa-mobile-screen text-indigo-400"></i><span class="font-bold text-white text-sm">Twilio SMS</span>';
+      html += '<span class="ml-auto text-xs px-2 py-0.5 rounded-full font-semibold ' + (tw.ok ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400') + '">' + (tw.ok ? 'OK' : 'FAIL') + '</span></div>';
+      html += '<div class="space-y-1.5 text-xs">';
+      html += '<div class="flex justify-between"><span class="text-gray-500">Account SID</span><span class="text-white font-mono">' + (tw.account_sid ? tw.account_sid.slice(0,8) + '…' : '–') + '</span></div>';
+      html += '<div class="flex justify-between"><span class="text-gray-500">Account Status</span><span class="' + (tw.active ? 'text-green-400' : 'text-red-400') + '">' + (tw.account_status || '–') + '</span></div>';
+      html += '<div class="flex justify-between"><span class="text-gray-500">From Number</span><span class="text-white font-mono">' + (tw.from_number || '–') + '</span></div>';
+      html += '<div class="flex justify-between"><span class="text-gray-500">Number Valid</span><span class="' + (tw.number_valid ? 'text-green-400' : 'text-yellow-400') + '">' + (tw.number_valid ? '✓ Verified' : '? Not found on account') + '</span></div>';
+      if (tw.number_details) html += '<div class="flex justify-between"><span class="text-gray-500">SMS Enabled</span><span class="' + (tw.number_details.sms_enabled ? 'text-green-400' : 'text-red-400') + '">' + (tw.number_details.sms_enabled ? '✓ Yes' : '✗ No') + '</span></div>';
+      html += '<div class="flex justify-between"><span class="text-gray-500">API Latency</span><span class="text-gray-300">' + (tw.latency_ms || '–') + ' ms</span></div>';
+      if (tw.warning) html += '<div class="mt-2 p-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg text-yellow-300">' + tw.warning + '</div>';
+      if (tw.error) html += '<div class="mt-2 p-2 bg-red-500/10 border border-red-500/20 rounded-lg text-red-300">' + tw.error + '</div>';
+      if (tw.fix) html += '<div class="mt-1 text-indigo-300 text-xs">Fix: ' + tw.fix + '</div>';
+      if (tw.test_send) {
+        const ts3 = tw.test_send;
+        html += '<div class="mt-2 p-2.5 ' + (ts3.ok ? 'bg-green-500/10 border-green-500/20' : 'bg-red-500/10 border-red-500/20') + ' border rounded-lg">';
+        html += '<div class="font-semibold ' + (ts3.ok ? 'text-green-400' : 'text-red-400') + ' mb-1">Test SMS: ' + (ts3.ok ? '✅ Sent' : '❌ Failed') + '</div>';
+        if (ts3.sms_sid) html += '<div>SID: <span class="font-mono">' + ts3.sms_sid + '</span></div>';
+        if (ts3.sms_status) html += '<div>Status: ' + ts3.sms_status + '</div>';
+        if (ts3.error) html += '<div class="text-red-300">' + ts3.error + (ts3.error_code ? ' (code ' + ts3.error_code + ')' : '') + '</div>';
+        html += '<div>Latency: ' + ts3.latency_ms + ' ms</div></div>';
+      }
+      html += '</div></div>';
+    }
+
+    html += '</div></div>';
+    el.innerHTML = html;
+    el.className = '';
+    el.classList.remove('hidden');
+  }
+  </script>
   `
   return c.html(AdminLayout('Settings', content))
 })

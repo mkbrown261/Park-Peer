@@ -33,6 +33,10 @@ type Bindings = {
   DB: D1Database
   STRIPE_SECRET_KEY: string
   RESEND_API_KEY: string
+  FROM_EMAIL: string
+  TWILIO_ACCOUNT_SID: string
+  TWILIO_AUTH_TOKEN: string
+  TWILIO_PHONE_NUMBER: string
   ADMIN_USERNAME: string
   ADMIN_PASSWORD: string
 }
@@ -1145,3 +1149,247 @@ adminApiRoutes.get('/payout-audit', async (c: any) => {
     return c.json({ error: 'Audit query failed: ' + e.message }, 500)
   }
 })
+
+// ════════════════════════════════════════════════════════════════════════════
+// POST /api/admin/messaging-test
+// Live diagnostic: validates Resend + Twilio credentials and fires a real
+// test message to the provided email/phone.
+// Body: { email?: string, phone?: string, services?: ('resend'|'twilio')[] }
+// Returns per-service status with latency and error details.
+// ════════════════════════════════════════════════════════════════════════════
+adminApiRoutes.post('/messaging-test', async (c: any) => {
+  const env = c.env as any
+  const db  = env.DB
+
+  let body: any = {}
+  try { body = await c.req.json() } catch {}
+
+  const targetEmail = String(body.email || '').trim()
+  const targetPhone = String(body.phone || '').trim()
+  const services: string[] = body.services || ['resend', 'twilio']
+
+  const results: Record<string, any> = {}
+
+  // ── 1. Resend Email Test ───────────────────────────────────────────────────
+  if (services.includes('resend')) {
+    const apiKey  = env.RESEND_API_KEY
+    const fromRaw = env.FROM_EMAIL || ''
+
+    if (!apiKey) {
+      results.resend = { ok: false, error: 'RESEND_API_KEY environment variable is not set', fix: 'Add RESEND_API_KEY secret in Cloudflare Pages → Settings → Environment Variables' }
+    } else if (apiKey === 'PLACEHOLDER_RESEND_KEY') {
+      results.resend = { ok: false, error: 'RESEND_API_KEY is still the placeholder value', fix: 'Replace with a real key from resend.com/api-keys' }
+    } else {
+      // Step A: validate key against Resend API
+      const t0 = Date.now()
+      try {
+        const authCheck = await fetch('https://api.resend.com/domains', {
+          headers: { Authorization: `Bearer ${apiKey}` }
+        })
+        const authData = await authCheck.json() as any
+        const latencyMs = Date.now() - t0
+
+        if (!authCheck.ok) {
+          results.resend = {
+            ok: false,
+            http_status: authCheck.status,
+            error: authData?.message || authData?.name || 'API key rejected',
+            latency_ms: latencyMs,
+            fix: authCheck.status === 403 ? 'API key does not have domain:read permission — regenerate at resend.com/api-keys' : 'Check API key validity at resend.com/api-keys',
+          }
+        } else {
+          // Key is valid — extract verified domains
+          const domains: any[] = authData.data || []
+          const verifiedDomains = domains.filter((d: any) => d.status === 'verified').map((d: any) => d.name)
+          const allDomains = domains.map((d: any) => `${d.name} (${d.status})`)
+
+          // Determine effective FROM address
+          const fromEmail = fromRaw || 'onboarding@resend.dev'
+          const isSandbox = fromEmail.endsWith('@resend.dev')
+
+          // Step B: send test email if target provided
+          let sendResult: any = null
+          if (targetEmail) {
+            const t1 = Date.now()
+            const sendRes = await fetch('https://api.resend.com/emails', {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                from:    `ParkPeer <${fromEmail}>`,
+                to:      [targetEmail],
+                subject: '✅ ParkPeer Messaging System — Live Test',
+                html: `<!DOCTYPE html><html><body style="font-family:system-ui,sans-serif;background:#f4f4f7;padding:40px 20px;margin:0">
+                  <div style="max-width:560px;margin:0 auto;background:#fff;border-radius:16px;padding:40px;border:1px solid #e5e7eb">
+                    <div style="text-align:center;margin-bottom:28px">
+                      <span style="font-size:32px">🅿️</span>
+                      <h1 style="color:#121212;font-size:22px;margin:8px 0 0;font-weight:800">Park<span style="color:#5B2EFF">Peer</span></h1>
+                    </div>
+                    <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;padding:20px;margin-bottom:24px;text-align:center">
+                      <p style="color:#166534;font-size:18px;font-weight:700;margin:0">✅ Resend Email — OPERATIONAL</p>
+                      <p style="color:#4b5563;font-size:13px;margin:8px 0 0">This is a live test confirming Resend is correctly configured for ParkPeer.</p>
+                    </div>
+                    <table style="width:100%;font-size:13px;color:#374151">
+                      <tr><td style="padding:4px 0;color:#6b7280">From</td><td style="font-weight:600">${fromEmail}</td></tr>
+                      <tr><td style="padding:4px 0;color:#6b7280">To</td><td style="font-weight:600">${targetEmail}</td></tr>
+                      <tr><td style="padding:4px 0;color:#6b7280">Mode</td><td style="font-weight:600;color:${isSandbox ? '#d97706' : '#16a34a'}">${isSandbox ? '⚠️ Sandbox (resend.dev domain)' : '✅ Production (verified domain)'}</td></tr>
+                      <tr><td style="padding:4px 0;color:#6b7280">Sent at</td><td style="font-weight:600">${new Date().toISOString()}</td></tr>
+                    </table>
+                    <p style="color:#9ca3af;font-size:12px;text-align:center;margin:24px 0 0">ParkPeer Admin Messaging Audit — ${new Date().getFullYear()}</p>
+                  </div>
+                </body></html>`,
+                text: `ParkPeer Resend Test — OPERATIONAL. From: ${fromEmail}, To: ${targetEmail}, Mode: ${isSandbox ? 'Sandbox' : 'Production'}, Sent: ${new Date().toISOString()}`,
+              })
+            })
+            const sendData = await sendRes.json() as any
+            sendResult = {
+              ok:          sendRes.ok,
+              http_status: sendRes.status,
+              email_id:    sendData.id || null,
+              error:       sendRes.ok ? null : (sendData?.message || sendData?.name || 'Send failed'),
+              latency_ms:  Date.now() - t1,
+            }
+          }
+
+          results.resend = {
+            ok:               true,
+            key_valid:        true,
+            from_email:       fromEmail,
+            from_email_set:   !!fromRaw,
+            sandbox_mode:     isSandbox,
+            sandbox_warning:  isSandbox ? 'FROM_EMAIL env var is not set — using onboarding@resend.dev sandbox domain. Set FROM_EMAIL to your verified domain address (e.g. noreply@yourdomain.com).' : null,
+            verified_domains: verifiedDomains,
+            all_domains:      allDomains,
+            latency_ms:       latencyMs,
+            test_send:        sendResult,
+          }
+        }
+      } catch (e: any) {
+        results.resend = { ok: false, error: 'Network error calling Resend API: ' + e.message, latency_ms: Date.now() - t0 }
+      }
+    }
+  }
+
+  // ── 2. Twilio SMS Test ────────────────────────────────────────────────────
+  if (services.includes('twilio')) {
+    const sid      = env.TWILIO_ACCOUNT_SID
+    const token    = env.TWILIO_AUTH_TOKEN
+    const fromNum  = env.TWILIO_PHONE_NUMBER
+
+    if (!sid || !token) {
+      results.twilio = { ok: false, error: 'TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN not set', fix: 'Add Twilio credentials as Cloudflare Pages secrets' }
+    } else if (!fromNum) {
+      results.twilio = { ok: false, error: 'TWILIO_PHONE_NUMBER not set', fix: 'Add your Twilio phone number (E.164 format, e.g. +12125551234) as TWILIO_PHONE_NUMBER secret' }
+    } else {
+      // Step A: validate credentials by fetching the account
+      const t0 = Date.now()
+      try {
+        const credentials = btoa(`${sid}:${token}`)
+        const acctRes = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}.json`, {
+          headers: { Authorization: `Basic ${credentials}` }
+        })
+        const acctData = await acctRes.json() as any
+        const latencyMs = Date.now() - t0
+
+        if (!acctRes.ok) {
+          results.twilio = {
+            ok: false,
+            http_status: acctRes.status,
+            error: acctData?.message || acctData?.code ? `Twilio error ${acctData.code}: ${acctData.message}` : 'Credentials rejected',
+            latency_ms: latencyMs,
+            fix: acctRes.status === 401 ? 'TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN is invalid — check at console.twilio.com' : 'Check Twilio account status',
+          }
+        } else {
+          const accountStatus = acctData.status   // 'active', 'suspended', 'closed'
+          const accountName   = acctData.friendly_name || acctData.sid
+
+          // Step B: validate the from number exists on this account
+          const numRes = await fetch(
+            `https://api.twilio.com/2010-04-01/Accounts/${sid}/IncomingPhoneNumbers.json?PhoneNumber=${encodeURIComponent(fromNum)}`,
+            { headers: { Authorization: `Basic ${credentials}` } }
+          )
+          const numData = await numRes.json() as any
+          const numberValid   = numRes.ok && (numData.incoming_phone_numbers?.length ?? 0) > 0
+          const numberDetails = numData.incoming_phone_numbers?.[0] || null
+
+          // Step C: send test SMS if phone provided
+          let sendResult: any = null
+          if (targetPhone) {
+            const toNormalized = targetPhone.startsWith('+') ? targetPhone : `+1${targetPhone.replace(/\D/g, '')}`
+            const t1 = Date.now()
+            const smsRes = await fetch(
+              `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
+              {
+                method: 'POST',
+                headers: { Authorization: `Basic ${credentials}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({
+                  From: fromNum,
+                  To:   toNormalized,
+                  Body: `✅ ParkPeer SMS Test — OPERATIONAL\nTwilio is correctly configured for ParkPeer.\nFrom: ${fromNum}\nTo: ${toNormalized}\nSent: ${new Date().toISOString()}\n\nThis is an automated system diagnostic.`,
+                }).toString()
+              }
+            )
+            const smsData = await smsRes.json() as any
+            sendResult = {
+              ok:          smsRes.ok,
+              http_status: smsRes.status,
+              sms_sid:     smsData.sid || null,
+              sms_status:  smsData.status || null,
+              to:          toNormalized,
+              error:       smsRes.ok ? null : (smsData?.message || `Twilio error ${smsData?.code}`),
+              error_code:  smsData?.code || null,
+              latency_ms:  Date.now() - t1,
+            }
+          }
+
+          results.twilio = {
+            ok:              accountStatus === 'active',
+            account_sid:     sid,
+            account_name:    accountName,
+            account_status:  accountStatus,
+            active:          accountStatus === 'active',
+            from_number:     fromNum,
+            number_valid:    numberValid,
+            number_details:  numberDetails ? {
+              friendly_name: numberDetails.friendly_name,
+              capabilities:  numberDetails.capabilities,
+              sms_enabled:   numberDetails.capabilities?.sms ?? false,
+            } : null,
+            latency_ms:      latencyMs,
+            test_send:       sendResult,
+            warning:         accountStatus !== 'active' ? `Twilio account status is "${accountStatus}" — SMS sending may fail` : null,
+          }
+        }
+      } catch (e: any) {
+        results.twilio = { ok: false, error: 'Network error calling Twilio API: ' + e.message, latency_ms: Date.now() - (Date.now()) }
+      }
+    }
+  }
+
+  // ── 3. Summary ────────────────────────────────────────────────────────────
+  const allOk = Object.values(results).every((r: any) => r.ok === true)
+  const issues: string[] = []
+  if (results.resend && !results.resend.ok) issues.push(`Resend: ${results.resend.error}`)
+  if (results.resend?.sandbox_mode) issues.push('Resend: FROM_EMAIL not set — using sandbox domain (onboarding@resend.dev)')
+  if (results.twilio && !results.twilio.ok) issues.push(`Twilio: ${results.twilio.error}`)
+  if (results.twilio?.test_send && !results.twilio.test_send.ok) issues.push(`Twilio test send: ${results.twilio.test_send.error}`)
+  if (results.resend?.test_send && !results.resend.test_send.ok) issues.push(`Resend test send: ${results.resend.test_send.error}`)
+
+  // Log audit result to DB
+  if (db) {
+    db.prepare(`
+      INSERT INTO notifications
+        (user_id, user_role, type, title, message, read_status, delivery_inapp, delivery_email, delivery_sms, email_sent, sms_sent, created_at)
+      VALUES (0, 'admin', 'system', 'Messaging System Audit', ?, 0, 1, 0, 0, 0, 0, datetime('now'))
+    `).bind(
+      allOk ? `✅ All messaging services operational (${Object.keys(results).join(', ')})` : `⚠️ Issues: ${issues.join(' | ')}`
+    ).run().catch(() => {})
+  }
+
+  return c.json({
+    timestamp: new Date().toISOString(),
+    overall:   allOk ? 'operational' : (issues.length ? 'degraded' : 'unknown'),
+    issues,
+    services:  results,
+  }, allOk ? 200 : 207)
+})
+
