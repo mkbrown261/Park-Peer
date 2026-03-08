@@ -83,7 +83,7 @@ async function sendEmail(env: Bindings, to: string, subject: string, html: strin
     await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: from || 'noreply@parkpeer.com', to: [to], subject, html })
+      body: JSON.stringify({ from: from || 'PARKPEER@proton.me', to: [to], subject, html })
     })
   } catch {}
 }

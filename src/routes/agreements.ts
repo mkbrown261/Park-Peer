@@ -155,7 +155,7 @@ export const HOST_AGREEMENT_TEXT = `
 </p>
 
 <p class="text-gray-400 text-xs mt-8 border-t border-white/10 pt-4">
-  For questions about this Agreement, contact <a href="mailto:legal@parkpeer.com" class="text-indigo-400 underline">legal@parkpeer.com</a>.
+  For questions about this Agreement, contact <a href="mailto:PARKPEER@proton.me" class="text-indigo-400 underline">PARKPEER@proton.me</a>.
   &copy; 2026 ParkPeer, Inc. All rights reserved.
 </p>
 `
@@ -228,7 +228,7 @@ export const CANCELLATION_POLICY_TEXT = `
 <h3 class="text-lg font-semibold text-white mt-6 mb-2">Disputes</h3>
 <p class="text-gray-300 mb-4">
   If you believe a cancellation or refund was handled incorrectly, please contact
-  <a href="mailto:support@parkpeer.com" class="text-indigo-400 underline">support@parkpeer.com</a>
+  <a href="mailto:PARKPEER@proton.me" class="text-indigo-400 underline">PARKPEER@proton.me</a>
   within 7 days of the booking end date. ParkPeer's decision following review is final.
 </p>
 
@@ -240,7 +240,7 @@ export const CANCELLATION_POLICY_TEXT = `
 </p>
 
 <p class="text-gray-400 text-xs mt-8 border-t border-white/10 pt-4">
-  For questions contact <a href="mailto:support@parkpeer.com" class="text-indigo-400 underline">support@parkpeer.com</a>.
+  For questions contact <a href="mailto:PARKPEER@proton.me" class="text-indigo-400 underline">PARKPEER@proton.me</a>.
   &copy; 2026 ParkPeer, Inc. All rights reserved.
 </p>
 `

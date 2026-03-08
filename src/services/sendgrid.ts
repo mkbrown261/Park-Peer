@@ -346,7 +346,7 @@ export async function sendListingRemovedEmail(env: Env, data: {
     ` : ''}
 
     <a href="https://parkpeer.pages.dev/host" style="display:inline-block;background:linear-gradient(135deg,#5B2EFF,#4a20f0);color:#fff;font-weight:700;font-size:14px;padding:14px 28px;border-radius:10px;text-decoration:none;">Go to Host Dashboard →</a>
-    <p style="color:#9ca3af;font-size:13px;margin-top:24px;">Have questions? Contact us at <a href="mailto:support@parkpeer.com" style="color:#5B2EFF;">support@parkpeer.com</a></p>
+    <p style="color:#9ca3af;font-size:13px;margin-top:24px;">Have questions? Contact us at <a href="mailto:PARKPEER@proton.me" style="color:#5B2EFF;">PARKPEER@proton.me</a></p>
   `)
 
   return sendEmail(env, {

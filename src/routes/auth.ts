@@ -26,7 +26,7 @@ authPages.get('/login', (c) => {
     google_invalid_grant:  'Google authorization code expired or already used. Please try signing in again.',
     apple_denied:          'Apple sign-in was cancelled.',
     apple_token_failed:    'Apple authentication failed. Please try again.',
-    account_suspended:     'This account has been suspended. Contact support@parkpeer.com.',
+    account_suspended:     'This account has been suspended. Contact PARKPEER@proton.me.',
     db_unavailable:        'Service temporarily unavailable. Please try again in a moment.',
     // reason= params (from requireUserAuth redirect)
     auth:                  'Please sign in to continue.',
@@ -282,7 +282,7 @@ authPages.get('/signup', (c) => {
     google_unexpected:     'Google sign-in encountered an unexpected error. Please try again.',
     apple_denied:          'Apple sign-up was cancelled.',
     apple_token_failed:    'Apple authentication failed. Please try again.',
-    account_suspended:     'This account has been suspended. Contact support@parkpeer.com.',
+    account_suspended:     'This account has been suspended. Contact PARKPEER@proton.me.',
     db_unavailable:        'Service temporarily unavailable. Please try again.',
   }
   const oauthMsg = errorMessages[oauthError]

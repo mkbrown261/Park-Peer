@@ -2069,7 +2069,7 @@ hostDashboard.get('/', async (c) => {
             <a href="/legal/host-agreement" target="_blank" class="text-indigo-400 hover:text-indigo-300 underline">
               <i class="fas fa-external-link-alt text-xs mr-1"></i>View full agreement in new tab
             </a>
-            &nbsp;·&nbsp; For questions: <a href="mailto:legal@parkpeer.com" class="text-indigo-400 underline">legal@parkpeer.com</a>
+            &nbsp;·&nbsp; For questions: <a href="mailto:PARKPEER@proton.me" class="text-indigo-400 underline">PARKPEER@proton.me</a>
             &nbsp;·&nbsp; © 2026 ParkPeer, Inc.
           </p>
         </div>

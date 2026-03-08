@@ -428,7 +428,7 @@ apiRoutes.post('/auth/login', async (c) => {
     }
 
     if (user.status === 'suspended') {
-      return c.json({ error: 'Your account has been suspended. Contact support@parkpeer.com.' }, 403)
+      return c.json({ error: 'Your account has been suspended. Contact PARKPEER@proton.me.' }, 403)
     }
 
     const secret = c.env?.USER_TOKEN_SECRET || 'pp-user-secret-change-in-prod'
@@ -5041,7 +5041,7 @@ apiRoutes.post('/webhooks/twilio/sms', async (c) => {
   // Simple keyword auto-replies
   let reply = ''
   if (body === 'HELP') {
-    reply = 'ParkPeer Help: Reply STOP to unsubscribe. Visit parkpeer.pages.dev/dashboard to manage your bookings. Questions? Email support@parkpeer.pages.dev'
+    reply = 'ParkPeer Help: Reply STOP to unsubscribe. Visit parkpeer.pages.dev/dashboard to manage your bookings. Questions? Email PARKPEER@proton.me'
   } else if (body === 'STOP' || body === 'UNSUBSCRIBE') {
     reply = 'You have been unsubscribed from ParkPeer SMS notifications. Reply START to re-subscribe.'
   } else if (body === 'START') {
@@ -5165,7 +5165,7 @@ STEP-BY-STEP GUIDES (use numbered lists):
 • Booking a spot: 1) Search by address or landmark → 2) Pick dates & times → 3) Choose a listing → 4) Pay securely via Stripe → 5) Get confirmation with directions.
 • Listing a space: 1) Go to /host → 2) Add your address & photos → 3) Set your rate & availability → 4) Publish — you're live!
 
-FALLBACK: If you are unsure, say "I'm not sure about that — please email support@parkpeer.com for help."
+FALLBACK: If you are unsure, say "I'm not sure about that — please email PARKPEER@proton.me for help."
 
 Remember: You represent ParkPeer and must always be helpful, honest, and on-brand.`
 
@@ -5224,7 +5224,7 @@ apiRoutes.post('/chat', async (c) => {
   if (!apiKey) {
     console.error('[Chat] OPENAI_API_KEY not configured')
     return c.json({
-      reply: "I'm temporarily unavailable. Please email support@parkpeer.com for help."
+      reply: "I'm temporarily unavailable. Please email PARKPEER@proton.me for help."
     })
   }
 
@@ -5266,7 +5266,7 @@ apiRoutes.post('/chat', async (c) => {
       // Log without PII
       console.error('[Chat] OpenAI error ' + response.status + ': ' + errText.slice(0, 200))
       return c.json({
-        reply: "I'm having trouble connecting right now. Please try again in a moment or email support@parkpeer.com."
+        reply: "I'm having trouble connecting right now. Please try again in a moment or email PARKPEER@proton.me."
       })
     }
 
@@ -5287,7 +5287,7 @@ apiRoutes.post('/chat', async (c) => {
   } catch (err) {
     console.error('[Chat] Fetch error:', (err as Error).message?.slice(0, 100))
     return c.json({
-      reply: "I'm temporarily unavailable. Please email support@parkpeer.com for help."
+      reply: "I'm temporarily unavailable. Please email PARKPEER@proton.me for help."
     })
   }
 })

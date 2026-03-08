@@ -883,7 +883,7 @@ export const Layout = (title: string, content: string, extraHead = '', session: 
           history.pop(); // remove the failed user message
         } else if (!res.ok) {
           appendBubble('error',
-            'Something went wrong on our end. Please try again or email support@parkpeer.com.'
+            'Something went wrong on our end. Please try again or email PARKPEER@proton.me.'
           );
           history.pop();
         } else {
@@ -1109,7 +1109,7 @@ export const Footer = () => `
           <li><a href="/legal/tos" class="text-gray-400 hover:text-white text-sm transition-colors">Terms of Service</a></li>
           <li><a href="/legal/privacy" class="text-gray-400 hover:text-white text-sm transition-colors">Privacy Policy</a></li>
           <li><a href="/legal/cancellation-policy" class="text-gray-400 hover:text-white text-sm transition-colors">Cancellation Policy</a></li>
-          <li><a href="mailto:legal@parkpeer.com" class="text-gray-400 hover:text-white text-sm transition-colors">Legal</a></li>
+          <li><a href="mailto:PARKPEER@proton.me" class="text-gray-400 hover:text-white text-sm transition-colors">Legal</a></li>
         </ul>
       </div>
     </div>

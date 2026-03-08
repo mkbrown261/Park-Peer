@@ -80,7 +80,7 @@ legalPages.get('/tos', (c) => {
 
         <section>
           <h2 class="text-white font-bold text-lg mb-2">10. Dispute Resolution</h2>
-          <p>Disputes between Drivers and Hosts should be reported to support@parkpeer.com. ParkPeer will attempt to mediate in good faith but is under no obligation to resolve private disputes. <strong>BINDING ARBITRATION:</strong> Any disputes between you and ParkPeer shall be resolved by binding arbitration under AAA rules, not in court.</p>
+          <p>Disputes between Drivers and Hosts should be reported to PARKPEER@proton.me. ParkPeer will attempt to mediate in good faith but is under no obligation to resolve private disputes. <strong>BINDING ARBITRATION:</strong> Any disputes between you and ParkPeer shall be resolved by binding arbitration under AAA rules, not in court.</p>
         </section>
 
         <section>
@@ -88,7 +88,7 @@ legalPages.get('/tos', (c) => {
           <p>These Terms are governed by the laws of the State of Delaware, USA, without regard to conflict of law principles.</p>
         </section>
 
-        <p class="text-gray-500 text-xs">Questions? Email legal@parkpeer.com · ParkPeer, Inc. · © 2026</p>
+        <p class="text-gray-500 text-xs">Questions? Email PARKPEER@proton.me · ParkPeer, Inc. · © 2026</p>
       </div>
     </div>
   </div>
@@ -129,7 +129,7 @@ legalPages.get('/privacy', (c) => {
           <ul class="list-disc list-inside space-y-1">
             <li>Unverified accounts inactive for 30+ days are automatically deleted</li>
             <li>Transaction records are retained for 7 years for financial compliance, then anonymized</li>
-            <li>You may request deletion of your account at any time via support@parkpeer.com</li>
+            <li>You may request deletion of your account at any time via PARKPEER@proton.me</li>
           </ul>
         </section>
 
@@ -140,10 +140,10 @@ legalPages.get('/privacy', (c) => {
 
         <section>
           <h2 class="text-white font-bold text-lg mb-2">Your Rights (GDPR / CCPA)</h2>
-          <p>You have the right to access, correct, delete, or export your personal data. Contact privacy@parkpeer.com. We do not sell personal data to third parties.</p>
+          <p>You have the right to access, correct, delete, or export your personal data. Contact PARKPEER@proton.me. We do not sell personal data to third parties.</p>
         </section>
 
-        <p class="text-gray-500 text-xs">Questions? Email privacy@parkpeer.com · ParkPeer, Inc. · © 2026</p>
+        <p class="text-gray-500 text-xs">Questions? Email PARKPEER@proton.me · ParkPeer, Inc. · © 2026</p>
       </div>
     </div>
   </div>
@@ -204,7 +204,7 @@ legalPages.get('/host-protection', (c) => {
           <p>We strongly recommend Hosts carry their own property and liability insurance. ParkPeer is not an insurance company and this policy does not satisfy any insurance requirements.</p>
         </section>
 
-        <p class="text-gray-500 text-xs">Questions? Email hosts@parkpeer.com · ParkPeer, Inc. · © 2026</p>
+        <p class="text-gray-500 text-xs">Questions? Email PARKPEER@proton.me · ParkPeer, Inc. · © 2026</p>
       </div>
     </div>
   </div>
@@ -254,7 +254,7 @@ legalPages.get('/no-bailment', (c) => {
           <p>We recommend verifying your auto insurance covers off-premise parking incidents. Always lock your vehicle and never leave valuables visible.</p>
         </section>
 
-        <p class="text-gray-500 text-xs">Questions? Email legal@parkpeer.com · ParkPeer, Inc. · © 2026</p>
+        <p class="text-gray-500 text-xs">Questions? Email PARKPEER@proton.me · ParkPeer, Inc. · © 2026</p>
       </div>
     </div>
   </div>
