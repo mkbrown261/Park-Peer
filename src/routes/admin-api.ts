@@ -27,7 +27,7 @@
 import { Hono } from 'hono'
 import { getCookie } from 'hono/cookie'
 import { adminApiAuthMiddleware } from './admin-auth'
-import { verifyPassword } from '../middleware/security'
+import { verifyPassword, hashPassword } from '../middleware/security'
 
 type Bindings = {
   DB: D1Database
@@ -771,6 +771,47 @@ adminApiRoutes.post('/users/:id/suspend', async (c: any) => {
     return c.json({ success: true, new_status: newStatus, audit_log_id: auditId })
   } catch (e: any) {
     return c.json({ error: 'Failed to update user status'}, 500)
+  }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// POST /api/admin/users/:id/reset-password
+// Body: { new_password: string }
+// Resets a user's password to a new value (admin only).
+// ════════════════════════════════════════════════════════════════════════════
+adminApiRoutes.post('/users/:id/reset-password', async (c: any) => {
+  const db: D1Database | undefined = c.env?.DB
+  if (!db) return c.json({ error: 'DB not available' }, 500)
+
+  const userId = parseInt(c.req.param('id'), 10)
+  if (isNaN(userId)) return c.json({ error: 'Invalid user ID' }, 400)
+
+  let body: any = {}
+  try { body = await c.req.json() } catch {}
+
+  const newPassword = String(body.new_password || '').trim()
+  if (!newPassword || newPassword.length < 8) {
+    return c.json({ error: 'new_password must be at least 8 characters' }, 400)
+  }
+
+  try {
+    const user = await db.prepare('SELECT id, email, full_name FROM users WHERE id = ?')
+      .bind(userId).first<any>()
+    if (!user) return c.json({ error: 'User not found' }, 404)
+
+    const newHash = await hashPassword(newPassword)
+    await db.prepare(
+      'UPDATE users SET password_hash = ?, updated_at = datetime(\'now\') WHERE id = ?'
+    ).bind(newHash, userId).run()
+
+    return c.json({
+      success: true,
+      message: `Password reset for ${user.full_name} (${user.email})`,
+      user_id: userId,
+    })
+  } catch (e: any) {
+    console.error('[admin/reset-password]', e.message)
+    return c.json({ error: 'Failed to reset password' }, 500)
   }
 })
 

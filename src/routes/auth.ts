@@ -206,6 +206,8 @@ authPages.get('/login', (c) => {
         btn.innerHTML = '<i class="fas fa-paper-plane mr-2"></i>Send Reset Link';
       }
     }
+
+    function togglePass(id, btn) {
       const inp = document.getElementById(id);
       const icon = btn.querySelector('i');
       if (inp.type === 'password') {
